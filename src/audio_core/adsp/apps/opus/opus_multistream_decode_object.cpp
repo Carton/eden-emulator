@@ -53,7 +53,8 @@ Result OpusMultiStreamDecodeObject::Shutdown() {
 
 Result OpusMultiStreamDecodeObject::ResetDecoder() {
     if (avctx) {
-        avcodec_flush_buffers(avctx);
+        if (avcodec_is_open(avctx))
+            avcodec_flush_buffers(avctx);
         return ResultSuccess;
     }
     return Service::Audio::ResultLibOpusInvalidState;
