@@ -63,19 +63,19 @@ Result OpusMultiStreamDecodeObject::ResetDecoder() {
 Result OpusMultiStreamDecodeObject::Decode(u32& out_sample_count, u64 output_data, u64 output_data_size, u64 input_data, u64 input_data_size) {
     out_sample_count = 0;
     if (avctx) {
-        AVPacket* avpkt = av_packet_alloc();
-        av_new_packet(avpkt, int(input_data_size));
-        std::memcpy(avpkt->data, reinterpret_cast<const u8*>(input_data), input_data_size);
-        avcodec_send_packet(avctx, avpkt);
-
-        AVFrame* frame = av_frame_alloc();
-        avcodec_receive_frame(avctx, frame);
-        std::memcpy(reinterpret_cast<u16*>(output_data), frame->data, output_data_size);
-        av_frame_free(&frame);
-        av_packet_free(&avpkt);
-
-        out_sample_count = frame->nb_samples;
-        return ResultSuccess;
+        if (AVPacket* avpkt = av_packet_alloc(); avpkt) {
+            av_new_packet(avpkt, int(input_data_size));
+            std::memcpy(avpkt->data, reinterpret_cast<const u8*>(input_data), input_data_size);
+            avcodec_send_packet(avctx, avpkt);
+            if (AVFrame* frame = av_frame_alloc(); frame) {
+                avcodec_receive_frame(avctx, frame);
+                std::memcpy(reinterpret_cast<u16*>(output_data), frame->data, output_data_size);
+                out_sample_count = frame->nb_samples;
+                av_frame_free(&frame);
+                av_packet_free(&avpkt);
+                return ResultSuccess;
+            }
+        }
     }
     return Service::Audio::ResultLibOpusInvalidState;
 }
