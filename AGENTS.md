@@ -80,8 +80,10 @@ cmake.exe -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DYUZU_TESTS=
 3. **eden-cli + TOTK**（任何版本，官方同期版也一样）：shader 编译阶段
    `CollectStorageBuffers`（global_memory_to_storage_buffer_pass.cpp）segfault → 时代性代码 bug。
    **profile 一律用 GUI 的 eden.exe**。
-4. master 工作区有 3 个未提交的 clang-cl 兼容补丁（vk/gl_graphics_pipeline.cpp 的
-   `!defined(__clang__)` 守卫、image_base.cpp 的 find_if 改写），用 MSVC 编译不需要它们。
+4. 曾在工作区的 3 个 clang-cl 兼容补丁（vk/gl_graphics_pipeline.cpp 的 `!defined(__clang__)`
+   守卫、image_base.cpp 的 find_if 改写）已于 09-07 丢弃——MSVC/VS2022 编译不需要它们。
+   若将来复活 clang-cl 路线需重打：守卫加在 `LAMBDA_FORCEINLINE` 定义处，find_if 改写避开
+   MSVC 14.5x STL 的 `_Find_vectorized` static_assert。
 
 ## Profile 工作流（TOTK 性能热点）
 
@@ -187,6 +189,13 @@ MSYS_NO_PATHCONV=1 "$NSYS" profile -t wddm,vulkan -d 90 --force-overwrite=true \
   ——全是**每 draw 的命令处理/缓存查找开销**，与驱动无关。
 - 优化方向：降 GPU 线程每 draw 成本（脏寄存器、绑定缓存、管线键比较）；
   模拟核侧看 fastmem/JIT 质量与精度设置。VulkanWorker 只用了 50%，有调度空间。
+
+### 瓶颈判定实验（2026-09-07）
+- 设备 GPU 利用率（nvidia-smi 2s 采样）：1x 分辨率 **37%**（43 FPS）；0.25x 分辨率 **25%**（45 FPS）。
+  像素负载砍 4~16 倍 FPS 仅 +2 → **设备 GPU 不是瓶颈，帧率完全被 CPU 侧流水线卡住**。
+- 模拟核非空转：CPUCore 采样 86% 在 JIT 游戏代码（eden.exe 自身仅 5%，排除 fence 自旋嫌疑）。
+- 结论：优先优化 GPU 命令线程（eden 侧每 draw 开销，靶点明确）；模拟核是次级天花板。
+- 实验后分辨率配置已还原（`resolution_setup\default=true`）。
 
 ### 本地补丁与工具（v0.2.1 worktree，勿提交上游）
 - `fsp_srv.cpp` 两处 `OpenSaveDataFileSystem` 的 `ASSERT(false)`（Temporary/ProperSystem/SafeMode
