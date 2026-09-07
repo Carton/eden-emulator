@@ -55,7 +55,7 @@ public:
 
     /// idempotency of initialize is guaranteed
     Result InitializeDecoder(u32 sample_rate, u32 total_stream_count, u32 channel_count, u32 stereo_stream_count, u8 const* mappings) {
-        if (auto codec = avcodec_find_decoder_by_name("libopus")) {
+        if (auto codec = avcodec_find_decoder(AV_CODEC_ID_OPUS)) {
             if ((avc = avc ? avc : avcodec_alloc_context3(codec))) {
                 const std::array<u8, 2> mapping_arr{0, 1};
                 mappings = mappings ? mappings : mapping_arr.data();
@@ -107,15 +107,25 @@ public:
     Result Decode(u32& out_sample_count, u64 output_data, u64 output_data_size, u64 input_data, u64 input_data_size) {
         out_sample_count = 0;
         if (avc) {
-            av_packet_unref(avpkt);
-            av_new_packet(avpkt, int(input_data_size));
-            std::memcpy(avpkt->data, reinterpret_cast<const u8*>(input_data), input_data_size);
-            avcodec_send_packet(avc, avpkt);
-
-            av_frame_unref(frame);
-            avcodec_receive_frame(avc, frame);
-            std::memcpy(reinterpret_cast<s16*>(output_data), frame->data, output_data_size);
-            out_sample_count = frame->nb_samples;
+            int rem_output_bytes = int(output_data_size);
+            while (rem_output_bytes > 0) {
+                int r = avcodec_receive_frame(avc, frame);
+                if (r == AVERROR(EAGAIN)) {
+                    av_packet_unref(avpkt);
+                    av_new_packet(avpkt, int(input_data_size));
+                    std::memcpy(avpkt->data, reinterpret_cast<const u8*>(input_data), input_data_size);
+                    r = avcodec_send_packet(avc, avpkt);
+                    ASSERT(r >= 0);
+                } else if (r == AVERROR_EOF) {
+                    break;
+                } else {
+                    auto const bsize = av_samples_get_buffer_size(nullptr, frame->ch_layout.nb_channels, frame->nb_samples, (enum AVSampleFormat)frame->format, 1);
+                    std::memcpy(reinterpret_cast<s16*>(output_data) + (int(output_data_size) - rem_output_bytes), frame->data[0], size_t(bsize));
+                    out_sample_count = frame->nb_samples;
+                    rem_output_bytes -= bsize;
+                }
+            }
+            ASSERT(rem_output_bytes == 0 && "remaining bytes!");
             return ResultSuccess;
         }
         return Service::Audio::ResultLibOpusInvalidState;
