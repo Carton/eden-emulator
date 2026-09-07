@@ -58,7 +58,10 @@ public:
 
     /// idempotency of initialize is guaranteed
     Result InitializeDecoder(u32 sample_rate, u32 total_stream_count, u32 channel_count, u32 stereo_stream_count, u8 const* mappings) {
-        AVCodec const* codec = nullptr;// = avcodec_find_decoder_by_name("libopus");
+        // prefer libopus, ffmpeg docs say to use libopus **if** available
+        // However, native opus can also work with swrescale:
+        // it uses planarfloat, we can resample to s16
+        AVCodec const* codec = avcodec_find_decoder_by_name("libopus");
         if (!codec) {
             LOG_WARNING(Audio_DSP, "unable to find libopus decoder -- using builtin opus decoder");
             codec = avcodec_find_decoder(AV_CODEC_ID_OPUS);
