@@ -15,10 +15,6 @@ add_library(audio_core STATIC
     adsp/apps/audio_renderer/command_list_processor.h
     adsp/apps/opus/opus_decoder.cpp
     adsp/apps/opus/opus_decoder.h
-    adsp/apps/opus/opus_decode_object.cpp
-    adsp/apps/opus/opus_decode_object.h
-    adsp/apps/opus/opus_multistream_decode_object.cpp
-    adsp/apps/opus/opus_multistream_decode_object.h
     adsp/apps/opus/shared_memory.h
     audio_core.cpp
     audio_core.h

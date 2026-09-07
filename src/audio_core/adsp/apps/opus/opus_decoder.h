@@ -9,11 +9,10 @@
 #include <thread>
 
 #include "common/container/unordered_map.h"
-#include "audio_core/adsp/apps/opus/opus_decode_object.h"
-#include "audio_core/adsp/apps/opus/opus_multistream_decode_object.h"
 #include "audio_core/adsp/apps/opus/shared_memory.h"
 #include "audio_core/adsp/mailbox.h"
 #include "common/common_types.h"
+#include "core/hle/result.h"
 
 namespace Core {
 class System;
@@ -50,9 +49,7 @@ enum Message : u32 {
     DecodeInterleavedForMultiStreamOK = 50,
 };
 
-/**
- * The AudioRenderer application running on the ADSP.
- */
+/// @brief The AudioRenderer application running on the ADSP.
 class OpusDecoder {
 public:
     explicit OpusDecoder(Core::System& system);
@@ -88,9 +85,6 @@ private:
     std::jthread init_thread{};
     /// Main thread
     std::jthread main_thread{};
-
-    ::Common::unordered_map<u64, OpusDecodeObject> decode_objects;
-    ::Common::unordered_map<u64, OpusMultiStreamDecodeObject> ms_decode_objects;
 
     /// The current state
     bool running{};

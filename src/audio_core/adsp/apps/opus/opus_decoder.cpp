@@ -6,8 +6,14 @@
 
 #include <array>
 
-#include "audio_core/adsp/apps/opus/opus_decode_object.h"
-#include "audio_core/adsp/apps/opus/opus_multistream_decode_object.h"
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavcodec/codec.h>
+#include <libavcodec/packet.h>
+#include <libavutil/channel_layout.h>
+#include <libavutil/frame.h>
+}
+
 #include "audio_core/adsp/apps/opus/shared_memory.h"
 #include "audio_core/audio_core.h"
 #include "common/logging.h"
@@ -19,20 +25,106 @@
 namespace AudioCore::ADSP::OpusDecoder {
 
 namespace {
-constexpr size_t OpusStreamCountMax = 255;
+constexpr u32 OPUS_STREAM_COUNT_MAX = 255;
+// https://git.ffmpeg.org/gitweb/ffmpeg.git/blob_plain/HEAD:/libavcodec/libopusdec.c
+constexpr u32 OPUS_HEAD_SIZE = 19;
+constexpr u32 OPUS_MAX_CHANNELS = 2;
 
 bool IsValidChannelCount(u32 channel_count) {
-    return channel_count == 1 || channel_count == 2;
+    return channel_count >= 1 || channel_count <= OPUS_MAX_CHANNELS;
 }
 
-bool IsValidMultiStreamChannelCount(u32 channel_count) {
-    return channel_count <= OpusStreamCountMax;
+bool IsValidStreamCounts(u32 total_stream_count, u32 stereo_stream_count) {
+    return total_stream_count > 0 && total_stream_count <= OPUS_STREAM_COUNT_MAX
+        && s32(stereo_stream_count) >= 0 && stereo_stream_count <= total_stream_count;
 }
 
-bool IsValidMultiStreamStreamCounts(s32 total_stream_count, s32 stereo_stream_count) {
-    return IsValidMultiStreamChannelCount(total_stream_count) && total_stream_count > 0 &&
-           stereo_stream_count >= 0 && stereo_stream_count <= total_stream_count;
-}
+class OpusGenericDecodeObject {
+public:
+    static u32 GetWorkBufferSizeMultistream(u32 total_stream_count, u32 stereo_stream_count) {
+        if (IsValidStreamCounts(total_stream_count, stereo_stream_count))
+            return 48 + 2556 * (total_stream_count * stereo_stream_count);
+        return 0;
+    }
+
+    static u32 GetWorkBufferSize(u32 channel_count) {
+        if (channel_count == 1 || channel_count == 2)
+            return 48 + 16 * channel_count;
+        return 0;
+    }
+
+    /// idempotency of initialize is guaranteed
+    Result InitializeDecoder(u32 sample_rate, u32 total_stream_count, u32 channel_count, u32 stereo_stream_count, u8 const* mappings) {
+        if (auto codec = avcodec_find_decoder_by_name("libopus")) {
+            if ((avc = avc ? avc : avcodec_alloc_context3(codec))) {
+                const std::array<u8, 2> mapping_arr{0, 1};
+                mappings = mappings ? mappings : mapping_arr.data();
+
+                std::array<u8, OPUS_HEAD_SIZE + 2 * OPUS_MAX_CHANNELS> edata{};
+                edata[9] = u8(channel_count); //channels
+                edata[10] = u8(0); //opus->pre_skip
+                edata[16] = u8(0); //gain_db
+                edata[18] = u8(0); //channel_map
+                edata[OPUS_HEAD_SIZE + 0] = u8(total_stream_count);
+                edata[OPUS_HEAD_SIZE + 1] = u8(stereo_stream_count);
+                if (channel_count >= 1) edata[OPUS_HEAD_SIZE + 2] = mappings[0];
+                if (channel_count >= 2) edata[OPUS_HEAD_SIZE + 3] = mappings[1];
+
+                avc->extradata = edata.data();
+                avc->extradata_size = OPUS_HEAD_SIZE + 2 * channel_count;
+                // FFmpeg hardcodes sample rate
+                //avc->sample_rate = sample_rate;
+                avc->request_sample_fmt = AV_SAMPLE_FMT_S16;
+
+                av_channel_layout_default(&avc->ch_layout, channel_count);
+                if (avcodec_open2(avc, codec, nullptr) >= 0) {
+                    avpkt = av_packet_alloc();
+                    frame = av_frame_alloc();
+                    return ResultSuccess;
+                }
+            }
+        }
+        return Service::Audio::ResultLibOpusInternalError;
+    }
+
+    Result Shutdown() {
+        if (avc) avcodec_free_context(&avc);
+        if (frame) av_frame_free(&frame);
+        if (avpkt) av_packet_free(&avpkt);
+        return ResultSuccess;
+    }
+
+    Result ResetDecoder() {
+        if (avc) {
+            if (avcodec_is_open(avc)) avcodec_flush_buffers(avc);
+            if (avpkt) av_packet_unref(avpkt);
+            if (frame) av_frame_unref(frame);
+            return ResultSuccess;
+        }
+        return Service::Audio::ResultLibOpusInvalidState;
+    }
+
+    Result Decode(u32& out_sample_count, u64 output_data, u64 output_data_size, u64 input_data, u64 input_data_size) {
+        out_sample_count = 0;
+        if (avc) {
+            av_packet_unref(avpkt);
+            av_new_packet(avpkt, int(input_data_size));
+            std::memcpy(avpkt->data, reinterpret_cast<const u8*>(input_data), input_data_size);
+            avcodec_send_packet(avc, avpkt);
+
+            av_frame_unref(frame);
+            avcodec_receive_frame(avc, frame);
+            std::memcpy(reinterpret_cast<s16*>(output_data), frame->data, output_data_size);
+            out_sample_count = frame->nb_samples;
+            return ResultSuccess;
+        }
+        return Service::Audio::ResultLibOpusInvalidState;
+    }
+
+    AVCodecContext* avc = nullptr;
+    AVPacket* avpkt = nullptr;
+    AVFrame* frame = nullptr;
+};
 } // namespace
 
 OpusDecoder::OpusDecoder(Core::System& system_) : system{system_} {
@@ -40,24 +132,16 @@ OpusDecoder::OpusDecoder(Core::System& system_) : system{system_} {
 }
 
 OpusDecoder::~OpusDecoder() {
-    if (!running) {
+    if (main_thread.joinable()) {
+        // Shutdown the thread
+        Send(Direction::DSP, Message::Shutdown);
+        auto msg = Receive(Direction::Host);
+        ASSERT_MSG(msg == Message::ShutdownOK, "Expected Opus shutdown code {}, got {}", Message::ShutdownOK, msg);
+        main_thread.request_stop();
+        main_thread.join();
+    } else {
         init_thread.request_stop();
-        return;
     }
-
-    // Shutdown the thread
-    Send(Direction::DSP, Message::Shutdown);
-    auto msg = Receive(Direction::Host);
-    ASSERT_MSG(msg == Message::ShutdownOK, "Expected Opus shutdown code {}, got {}", Message::ShutdownOK, msg);
-    main_thread.request_stop();
-    main_thread.join();
-    running = false;
-
-    // Must shutdown as there are AV allocations which are manual
-    for (auto& e : decode_objects)
-        e.second.Shutdown();
-    for (auto& e : ms_decode_objects)
-        e.second.Shutdown();
 }
 
 void OpusDecoder::Send(Direction dir, u32 message) {
@@ -70,13 +154,13 @@ u32 OpusDecoder::Receive(Direction dir, std::stop_token stop_token) {
 
 void OpusDecoder::Init(std::stop_token stop_token) {
     Common::SetCurrentThreadName("DSP_OpusDecoder_Init");
-
     if (Receive(Direction::DSP, stop_token) != Message::Start) {
         LOG_ERROR(Service_Audio, "DSP OpusDecoder failed to receive Start message. Opus initialization failed.");
         return;
     }
     // Main OpusDecoder thread, responsible for processing the incoming Opus packets.
     main_thread = std::jthread([this](std::stop_token thread_stop_token) {
+        ::Common::unordered_map<u64, OpusGenericDecodeObject> decode_objects;
         Common::SetCurrentThreadName("DSP_OpusDecoder_Main");
         while (!thread_stop_token.stop_requested()) {
             auto msg = Receive(Direction::DSP, thread_stop_token);
@@ -89,7 +173,7 @@ void OpusDecoder::Init(std::stop_token stop_token) {
 
                 ASSERT(IsValidChannelCount(channel_count));
 
-                shared_memory->dsp_return_data[0] = OpusDecodeObject::GetWorkBufferSize(channel_count);
+                shared_memory->dsp_return_data[0] = OpusGenericDecodeObject::GetWorkBufferSize(channel_count);
                 Send(Direction::Host, Message::GetWorkBufferSizeOK);
                 break;
             }
@@ -101,14 +185,14 @@ void OpusDecoder::Init(std::stop_token stop_token) {
 
                 ASSERT(sample_rate >= 0);
                 ASSERT(IsValidChannelCount(channel_count));
-                ASSERT(buffer_size >= OpusDecodeObject::GetWorkBufferSize(channel_count));
+                ASSERT(buffer_size >= OpusGenericDecodeObject::GetWorkBufferSize(channel_count));
 
                 if (auto const it = decode_objects.find(buffer); it != decode_objects.end()) {
                     it->second.Shutdown();
-                    shared_memory->dsp_return_data[0] = it->second.InitializeDecoder(sample_rate, channel_count).raw;
+                    shared_memory->dsp_return_data[0] = it->second.InitializeDecoder(sample_rate, 1, channel_count, channel_count == 2 ? 1 : 0, nullptr).raw;
                 } else {
-                    OpusDecodeObject obj{};
-                    shared_memory->dsp_return_data[0] = obj.InitializeDecoder(sample_rate, channel_count).raw;
+                    OpusGenericDecodeObject obj{};
+                    shared_memory->dsp_return_data[0] = obj.InitializeDecoder(sample_rate, 1, channel_count, channel_count == 2 ? 1 : 0, nullptr).raw;
                     decode_objects.insert_or_assign(buffer, obj);
                 }
                 Send(Direction::Host, Message::InitializeDecodeObjectOK);
@@ -173,10 +257,9 @@ void OpusDecoder::Init(std::stop_token stop_token) {
                 auto total_stream_count = s32(shared_memory->host_send_data[0]);
                 auto stereo_stream_count = s32(shared_memory->host_send_data[1]);
 
-                ASSERT(IsValidMultiStreamStreamCounts(total_stream_count, stereo_stream_count));
+                ASSERT(IsValidStreamCounts(total_stream_count, stereo_stream_count));
 
-                shared_memory->dsp_return_data[0] = OpusMultiStreamDecodeObject::GetWorkBufferSize(
-                    total_stream_count, stereo_stream_count);
+                shared_memory->dsp_return_data[0] = OpusGenericDecodeObject::GetWorkBufferSizeMultistream(total_stream_count, stereo_stream_count);
                 Send(Direction::Host, Message::GetWorkBufferSizeForMultiStreamOK);
                 break;
             }
@@ -195,17 +278,16 @@ void OpusDecoder::Init(std::stop_token stop_token) {
                 // dedicated buffer host side, so let's do as intended.
                 auto mappings = shared_memory->channel_mapping.data();
 
-                ASSERT(IsValidMultiStreamStreamCounts(total_stream_count, stereo_stream_count));
+                ASSERT(IsValidStreamCounts(total_stream_count, stereo_stream_count));
                 ASSERT(sample_rate >= 0);
-                ASSERT(buffer_size >= OpusMultiStreamDecodeObject::GetWorkBufferSize(total_stream_count, stereo_stream_count));
-
-                if (auto const it = ms_decode_objects.find(buffer); it != ms_decode_objects.end()) {
+                ASSERT(buffer_size >= OpusGenericDecodeObject::GetWorkBufferSizeMultistream(total_stream_count, stereo_stream_count));
+                if (auto const it = decode_objects.find(buffer); it != decode_objects.end()) {
                     it->second.Shutdown();
                     shared_memory->dsp_return_data[0] = it->second.InitializeDecoder(sample_rate, total_stream_count, channel_count, stereo_stream_count, mappings).raw;
                 } else {
-                    OpusMultiStreamDecodeObject obj{};
+                    OpusGenericDecodeObject obj{};
                     shared_memory->dsp_return_data[0] = obj.InitializeDecoder(sample_rate, total_stream_count, channel_count, stereo_stream_count, mappings).raw;
-                    ms_decode_objects.insert_or_assign(buffer, obj);
+                    decode_objects.insert_or_assign(buffer, obj);
                 }
                 Send(Direction::Host, Message::InitializeMultiStreamDecodeObjectOK);
                 break;
@@ -213,7 +295,7 @@ void OpusDecoder::Init(std::stop_token stop_token) {
             case ShutdownMultiStreamDecodeObject: {
                 auto buffer = shared_memory->host_send_data[0];
                 //[[maybe_unused]] auto buffer_size = shared_memory->host_send_data[1];
-                if (auto const it = ms_decode_objects.find(buffer); it != ms_decode_objects.end()) {
+                if (auto const it = decode_objects.find(buffer); it != decode_objects.end()) {
                     shared_memory->dsp_return_data[0] = it->second.Shutdown().raw;
                 } else {
                     LOG_ERROR(Audio_DSP, "operating unregistered buffer {}", buffer);
@@ -235,7 +317,7 @@ void OpusDecoder::Init(std::stop_token stop_token) {
 
                 u32 decoded_samples{0};
 
-                if (auto const it = ms_decode_objects.find(buffer); it != ms_decode_objects.end()) {
+                if (auto const it = decode_objects.find(buffer); it != decode_objects.end()) {
                     auto res = ResultSuccess;
                     if (reset_requested)
                         res = it->second.ResetDecoder();
@@ -258,8 +340,9 @@ void OpusDecoder::Init(std::stop_token stop_token) {
                 continue;
             }
         }
+        for (auto e : decode_objects)
+            e.second.Shutdown();
     });
-    running = true;
     Send(Direction::Host, Message::StartOK);
 }
 
