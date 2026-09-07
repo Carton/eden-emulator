@@ -1,5 +1,8 @@
 # Eden 本地开发笔记（Windows，仅本地使用）
 
+> **交接文档：性能优化全流程（基线/构建/输入自动化/profiling 管线/结论/脚本用法）已整理为
+> `F:\prof\HANDOFF.md`，新会话/新 agent 从那里开始读。**
+
 ## 项目简介
 
 Eden 是开源（GPLv3）Nintendo Switch 模拟器，yuzu 血统的社区延续项目。
