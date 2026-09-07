@@ -62,36 +62,43 @@ public:
         // However, native opus can also work with swrescale:
         // it uses planarfloat, we can resample to s16
         AVCodec const* codec = avcodec_find_decoder_by_name("libopus");
+        bool is_libopus = codec != nullptr;
         if (!codec) {
-            LOG_WARNING(Audio_DSP, "unable to find libopus decoder -- using builtin opus decoder");
+            LOG_WARNING(Audio_DSP, "using ffmpeg native opus decoder");
             codec = avcodec_find_decoder(AV_CODEC_ID_OPUS);
         }
         if (codec) {
             if ((avc = avc ? avc : avcodec_alloc_context3(codec))) {
-                const std::array<u8, 2> mapping_arr{0, 1};
-                mappings = mappings ? mappings : mapping_arr.data();
+                if (is_libopus) {
+                    const std::array<u8, 2> mapping_arr{0, 1};
+                    mappings = mappings ? mappings : mapping_arr.data();
 
-                std::array<u8, OPUS_HEAD_SIZE + 2 * OPUS_MAX_CHANNELS> edata{};
-                edata[9] = u8(channel_count); //channels
-                edata[10] = u8(0); //opus->pre_skip
-                edata[16] = u8(0); //gain_db
-                edata[18] = u8(0); //channel_map
-                edata[OPUS_HEAD_SIZE + 0] = u8(total_stream_count);
-                edata[OPUS_HEAD_SIZE + 1] = u8(stereo_stream_count);
-                if (channel_count >= 1) edata[OPUS_HEAD_SIZE + 2] = mappings[0];
-                if (channel_count >= 2) edata[OPUS_HEAD_SIZE + 3] = mappings[1];
+                    // freed by avcodec_context_free()
+                    u8 *edata = reinterpret_cast<u8*>(av_mallocz(OPUS_HEAD_SIZE + 2 * OPUS_MAX_CHANNELS + AV_INPUT_BUFFER_PADDING_SIZE));
+                    ASSERT(edata);
+                    edata[9] = u8(channel_count); //channels
+                    edata[10] = u8(0); //opus->pre_skip
+                    edata[16] = u8(0); //gain_db
+                    edata[18] = u8(0); //channel_map
+                    edata[OPUS_HEAD_SIZE + 0] = u8(total_stream_count);
+                    edata[OPUS_HEAD_SIZE + 1] = u8(stereo_stream_count);
+                    if (channel_count >= 1) edata[OPUS_HEAD_SIZE + 2] = mappings[0];
+                    if (channel_count >= 2) edata[OPUS_HEAD_SIZE + 3] = mappings[1];
+                    avc->extradata = edata;
+                    avc->extradata_size = OPUS_HEAD_SIZE + 2 * channel_count;
+                }
 
-                avc->extradata = edata.data();
-                avc->extradata_size = OPUS_HEAD_SIZE + 2 * channel_count;
+
                 // FFmpeg hardcodes sample rate
                 avc->sample_rate = sample_rate;
                 avc->request_sample_fmt = AV_SAMPLE_FMT_S16;
-
                 av_channel_layout_default(&avc->ch_layout, channel_count);
                 if (avcodec_open2(avc, codec, nullptr) >= 0) {
                     avpkt = av_packet_alloc();
                     frame = av_frame_alloc();
                     return ResultSuccess;
+                } else {
+                    avcodec_free_context(&avc);
                 }
             }
         }
@@ -99,17 +106,15 @@ public:
     }
 
     Result Shutdown() {
-        if (avc) avcodec_free_context(&avc);
-        if (frame) av_frame_free(&frame);
-        if (avpkt) av_packet_free(&avpkt);
+        avcodec_free_context(&avc);
+        av_frame_free(&frame);
+        av_packet_free(&avpkt);
         return ResultSuccess;
     }
 
     Result ResetDecoder() {
         if (avc) {
             if (avcodec_is_open(avc)) avcodec_flush_buffers(avc);
-            if (avpkt) av_packet_unref(avpkt);
-            if (frame) av_frame_unref(frame);
             return ResultSuccess;
         }
         return Service::Audio::ResultLibOpusInvalidState;
