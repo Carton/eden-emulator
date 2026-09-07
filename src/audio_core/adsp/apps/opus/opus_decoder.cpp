@@ -7,11 +7,14 @@
 #include <array>
 
 extern "C" {
+#include <libswresample/swresample.h>
 #include <libavcodec/avcodec.h>
 #include <libavcodec/codec.h>
 #include <libavcodec/packet.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/frame.h>
+#include <libavutil/opt.h>
+#include <libavutil/samplefmt.h>
 }
 
 #include "audio_core/adsp/apps/opus/shared_memory.h"
@@ -55,7 +58,12 @@ public:
 
     /// idempotency of initialize is guaranteed
     Result InitializeDecoder(u32 sample_rate, u32 total_stream_count, u32 channel_count, u32 stereo_stream_count, u8 const* mappings) {
-        if (auto codec = avcodec_find_decoder_by_name("libopus")) {
+        AVCodec const* codec = nullptr;// = avcodec_find_decoder_by_name("libopus");
+        if (!codec) {
+            LOG_WARNING(Audio_DSP, "unable to find libopus decoder -- using builtin opus decoder");
+            codec = avcodec_find_decoder(AV_CODEC_ID_OPUS);
+        }
+        if (codec) {
             if ((avc = avc ? avc : avcodec_alloc_context3(codec))) {
                 const std::array<u8, 2> mapping_arr{0, 1};
                 mappings = mappings ? mappings : mapping_arr.data();
@@ -83,8 +91,6 @@ public:
                     return ResultSuccess;
                 }
             }
-        } else {
-            LOG_ERROR(Audio_DSP, "unable to find libopus decoder, native opus decoder is unusable for s16");
         }
         return Service::Audio::ResultLibOpusInternalError;
     }
@@ -121,9 +127,36 @@ public:
                 } else if (r == AVERROR_EOF) {
                     break;
                 } else if (r >= 0) {
-                    auto const bsize = av_samples_get_buffer_size(nullptr, frame->ch_layout.nb_channels, frame->nb_samples, (enum AVSampleFormat)frame->format, 1);
-                    std::memcpy(reinterpret_cast<s16*>(output_data) + (int(output_data_size) - rem_output_bytes), frame->data[0], size_t(bsize));
-                    out_sample_count = frame->nb_samples;
+                    auto const bsize = av_samples_get_buffer_size(nullptr, frame->ch_layout.nb_channels, frame->nb_samples, AV_SAMPLE_FMT_S16, 1);
+                    if (frame->format == AV_SAMPLE_FMT_S16) {
+                        std::memcpy(reinterpret_cast<s16*>(output_data) + (int(output_data_size) - rem_output_bytes), frame->data[0], size_t(bsize));
+                    } else {
+                        SwrContext *swr = nullptr;
+                        if (swr_alloc_set_opts2(
+                            &swr,
+                            &avc->ch_layout,
+                            AV_SAMPLE_FMT_S16,
+                            48000,
+                            &avc->ch_layout,
+                            (enum AVSampleFormat)frame->format,
+                            48000,
+                            0,
+                            nullptr
+                        ) >= 0) {
+                            if (swr_init(swr) >= 0) {
+                                AVFrame *s16_frame = av_frame_alloc();
+                                s16_frame->format = AV_SAMPLE_FMT_S16;
+                                s16_frame->sample_rate = frame->sample_rate;
+                                av_channel_layout_copy(&s16_frame->ch_layout, &frame->ch_layout);
+                                s16_frame->nb_samples = frame->nb_samples;
+                                av_frame_get_buffer(s16_frame, 0);
+                                swr_convert(swr, s16_frame->data, s16_frame->nb_samples, (const uint8_t **)frame->data, frame->nb_samples);
+                                std::memcpy(reinterpret_cast<s16*>(output_data) + (int(output_data_size) - rem_output_bytes), s16_frame->data[0], size_t(bsize));
+                                swr_free(&swr);
+                            }
+                        }
+                    }
+                    out_sample_count += frame->nb_samples;
                     rem_output_bytes -= bsize;
                 } else {
                     LOG_ERROR(Audio_DSP, "{}", r);
