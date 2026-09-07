@@ -56,7 +56,7 @@ public:
     ~OpusDecoder();
 
     bool IsRunning() const noexcept {
-        return running;
+        return dsp_thread.joinable();
     }
 
     void Send(Direction dir, u32 message);
