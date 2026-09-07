@@ -55,7 +55,7 @@ public:
 
     /// idempotency of initialize is guaranteed
     Result InitializeDecoder(u32 sample_rate, u32 total_stream_count, u32 channel_count, u32 stereo_stream_count, u8 const* mappings) {
-        if (auto codec = avcodec_find_decoder(AV_CODEC_ID_OPUS)) {
+        if (auto codec = avcodec_find_decoder_by_name("libopus")) {
             if ((avc = avc ? avc : avcodec_alloc_context3(codec))) {
                 const std::array<u8, 2> mapping_arr{0, 1};
                 mappings = mappings ? mappings : mapping_arr.data();
@@ -73,7 +73,7 @@ public:
                 avc->extradata = edata.data();
                 avc->extradata_size = OPUS_HEAD_SIZE + 2 * channel_count;
                 // FFmpeg hardcodes sample rate
-                //avc->sample_rate = sample_rate;
+                avc->sample_rate = sample_rate;
                 avc->request_sample_fmt = AV_SAMPLE_FMT_S16;
 
                 av_channel_layout_default(&avc->ch_layout, channel_count);
@@ -83,6 +83,8 @@ public:
                     return ResultSuccess;
                 }
             }
+        } else {
+            LOG_ERROR(Audio_DSP, "unable to find libopus decoder, native opus decoder is unusable for s16");
         }
         return Service::Audio::ResultLibOpusInternalError;
     }
@@ -118,11 +120,14 @@ public:
                     ASSERT(r >= 0);
                 } else if (r == AVERROR_EOF) {
                     break;
-                } else {
+                } else if (r >= 0) {
                     auto const bsize = av_samples_get_buffer_size(nullptr, frame->ch_layout.nb_channels, frame->nb_samples, (enum AVSampleFormat)frame->format, 1);
                     std::memcpy(reinterpret_cast<s16*>(output_data) + (int(output_data_size) - rem_output_bytes), frame->data[0], size_t(bsize));
                     out_sample_count = frame->nb_samples;
                     rem_output_bytes -= bsize;
+                } else {
+                    LOG_ERROR(Audio_DSP, "{}", r);
+                    break;
                 }
             }
             ASSERT(rem_output_bytes == 0 && "remaining bytes!");
