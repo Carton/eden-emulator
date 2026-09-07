@@ -67,27 +67,12 @@ public:
     }
 
 private:
-    /// @brief Initializing thread, launched at audio_core boot to avoid blocking the main emu boot thread.
-    void Init(std::stop_token stop_token);
-    /**
-     * Main OpusDecoder thread, responsible for processing the incoming Opus packets.
-     */
-    void Main(std::stop_token stop_token);
-
     /// Mailbox to communicate messages with the host, drives the main thread
     Mailbox mailbox;
-    /// Core system
-    Core::System& system;
     /// Structure shared with the host, input data set by the host before sending a mailbox message,
     /// and the responses are written back by the OpusDecoder.
     SharedMemory* shared_memory{};
-    /// Init thread
-    std::jthread init_thread{};
-    /// Main thread
-    std::jthread main_thread{};
-
-    /// The current state
-    bool running{};
+    std::jthread dsp_thread{};
 };
 
 } // namespace AudioCore::ADSP::OpusDecoder

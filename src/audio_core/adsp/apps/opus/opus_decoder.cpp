@@ -183,43 +183,19 @@ public:
 };
 } // namespace
 
-OpusDecoder::OpusDecoder(Core::System& system_) : system{system_} {
-    init_thread = std::jthread([this](std::stop_token stop_token) { Init(stop_token); });
-}
+OpusDecoder::OpusDecoder(Core::System& system) {
+    dsp_thread = std::jthread([this, &system](std::stop_token stop_token) {
+        Common::SetCurrentThreadName("DSP_OpusDecoder");
+        if (Receive(Direction::DSP, stop_token) != Message::Start) {
+            LOG_ERROR(Service_Audio, "DSP OpusDecoder failed to receive Start message. Opus initialization failed.");
+            return;
+        }
+        Send(Direction::Host, Message::StartOK);
 
-OpusDecoder::~OpusDecoder() {
-    if (main_thread.joinable()) {
-        // Shutdown the thread
-        Send(Direction::DSP, Message::Shutdown);
-        auto msg = Receive(Direction::Host);
-        ASSERT_MSG(msg == Message::ShutdownOK, "Expected Opus shutdown code {}, got {}", Message::ShutdownOK, msg);
-        main_thread.request_stop();
-        main_thread.join();
-    } else {
-        init_thread.request_stop();
-    }
-}
-
-void OpusDecoder::Send(Direction dir, u32 message) {
-    mailbox.Send(dir, std::move(message));
-}
-
-u32 OpusDecoder::Receive(Direction dir, std::stop_token stop_token) {
-    return mailbox.Receive(dir, stop_token);
-}
-
-void OpusDecoder::Init(std::stop_token stop_token) {
-    Common::SetCurrentThreadName("DSP_OpusDecoder_Init");
-    if (Receive(Direction::DSP, stop_token) != Message::Start) {
-        LOG_ERROR(Service_Audio, "DSP OpusDecoder failed to receive Start message. Opus initialization failed.");
-        return;
-    }
-    // Main OpusDecoder thread, responsible for processing the incoming Opus packets.
-    main_thread = std::jthread([this](std::stop_token thread_stop_token) {
+        // Main OpusDecoder thread, responsible for processing the incoming Opus packets.
         ::Common::unordered_map<u64, OpusGenericDecodeObject> decode_objects;
-        Common::SetCurrentThreadName("DSP_OpusDecoder_Main");
-        while (!thread_stop_token.stop_requested()) {
-            auto msg = Receive(Direction::DSP, thread_stop_token);
+        while (!stop_token.stop_requested()) {
+            auto msg = Receive(Direction::DSP, stop_token);
             switch (msg) {
             case Shutdown:
                 Send(Direction::Host, Message::ShutdownOK);
@@ -399,7 +375,26 @@ void OpusDecoder::Init(std::stop_token stop_token) {
         for (auto e : decode_objects)
             e.second.Shutdown();
     });
-    Send(Direction::Host, Message::StartOK);
+}
+
+OpusDecoder::~OpusDecoder() {
+    if (dsp_thread.joinable()) {
+        // Shutdown the thread
+        auto const stop_token = dsp_thread.get_stop_token();
+        Send(Direction::DSP, Message::Shutdown);
+        auto msg = Receive(Direction::Host, stop_token);
+        ASSERT_MSG(msg == Message::ShutdownOK, "Expected Opus shutdown code {}, got {}", Message::ShutdownOK, msg);
+        dsp_thread.request_stop();
+        dsp_thread.join();
+    }
+}
+
+void OpusDecoder::Send(Direction dir, u32 message) {
+    mailbox.Send(dir, std::move(message));
+}
+
+u32 OpusDecoder::Receive(Direction dir, std::stop_token stop_token) {
+    return mailbox.Receive(dir, stop_token);
 }
 
 } // namespace AudioCore::ADSP::OpusDecoder
