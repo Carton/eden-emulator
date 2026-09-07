@@ -284,9 +284,12 @@ Result FSP_SRV::OpenSaveDataFileSystem(OutInterface<IFileSystem> out_interface,
         id = FileSys::StorageId::NandSystem;
         break;
     case FileSys::SaveDataSpaceId::Temporary:
+        id = FileSys::StorageId::NandUser;
+        break;
     case FileSys::SaveDataSpaceId::ProperSystem:
     case FileSys::SaveDataSpaceId::SafeMode:
-        ASSERT(false);
+        id = FileSys::StorageId::NandSystem;
+        break;
     }
 
     *out_interface =
@@ -324,9 +327,12 @@ Result FSP_SRV::OpenSaveDataFileSystemBySystemSaveDataId(OutInterface<IFileSyste
         id = FileSys::StorageId::NandSystem;
         break;
     case FileSys::SaveDataSpaceId::Temporary:
+        id = FileSys::StorageId::NandUser;
+        break;
     case FileSys::SaveDataSpaceId::ProperSystem:
     case FileSys::SaveDataSpaceId::SafeMode:
-        ASSERT(false);
+        id = FileSys::StorageId::NandSystem;
+        break;
     }
 
     *out_interface =
