@@ -103,6 +103,7 @@ struct ImageBase {
 
     u64 modification_tick = 0;
     size_t lru_index = SIZE_MAX;
+    u64 last_touch_tick = 0;
 
     std::array<u32, MAX_MIP_LEVELS> mip_level_offsets{};
 

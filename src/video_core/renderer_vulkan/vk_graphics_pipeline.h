@@ -109,9 +109,15 @@ public:
         if (key == current_key) {
             return this;
         }
-        const auto it{std::find(transition_keys.begin(), transition_keys.end(), current_key)};
-        return it != transition_keys.end() ? transitions[std::distance(transition_keys.begin(), it)]
-                                           : nullptr;
+        // Different pipeline: hash the key once, then scan precomputed transition
+        // hashes before falling back to the full key memcmp confirmation.
+        const size_t current_hash = current_key.Hash();
+        for (size_t i = 0; i < transition_keys.size(); ++i) {
+            if (transition_hashes[i] == current_hash && transition_keys[i] == current_key) {
+                return transitions[i];
+            }
+        }
+        return nullptr;
     }
 
     [[nodiscard]] bool IsBuilt() const noexcept {
@@ -152,6 +158,7 @@ private:
     bool (*configure_func)(GraphicsPipeline*, bool){};
 
     std::vector<GraphicsPipelineCacheKey> transition_keys;
+    std::vector<size_t> transition_hashes;
     std::vector<GraphicsPipeline*> transitions;
 
     std::array<vk::ShaderModule, NUM_STAGES> spv_modules;

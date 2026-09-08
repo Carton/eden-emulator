@@ -117,6 +117,9 @@ public:
         lru_id = lru_id_;
     }
 
+    /// Frame tick of the last LRU touch; skips repeated LRU probes per frame.
+    u64 last_touch_tick = 0;
+
     size_t SizeBytes() const {
         return size_bytes;
     }
