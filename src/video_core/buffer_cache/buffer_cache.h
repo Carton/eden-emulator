@@ -23,6 +23,7 @@ using Core::DEVICE_PAGESIZE;
 template <class P>
 BufferCache<P>::BufferCache(Tegra::MaxwellDeviceMemoryManager& device_memory_, Runtime& runtime_)
     : runtime{runtime_}, device_memory{device_memory_}, memory_tracker{device_memory} {
+    uniform_buffer_alignment_cache = runtime.GetUniformBufferAlignment();
     // Ensure the first slot is used for the null buffer
     void(slot_buffers.insert(runtime, NullBufferParams{}));
     gpu_modified_ranges.Clear();
@@ -447,9 +448,13 @@ bool BufferCache<P>::BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, 
 
     const auto& cbufs = maxwell3d->state.shader_stages[stage];
     const GPUVAddr ssbo_addr = cbufs.const_buffers[cbuf_index].address + cbuf_offset;
-    channel_state->storage_buffers[stage][ssbo_index] =
-        StorageBufferBinding(ssbo_addr, cbuf_index, is_written);
-    return (channel_state->storage_buffers[stage][ssbo_index].buffer_id != NULL_BUFFER_ID);
+    const Binding new_binding = StorageBufferBinding(ssbo_addr, cbuf_index, is_written);
+    Binding& binding = channel_state->storage_buffers[stage][ssbo_index];
+    if (new_binding.device_addr != binding.device_addr || new_binding.size != binding.size) {
+        binding = new_binding;
+    }
+    // Same target: keep the previously resolved buffer_id so FindBuffer can be skipped.
+    return binding.buffer_id != NULL_BUFFER_ID;
 }
 
 template <class P>
@@ -468,8 +473,12 @@ void BufferCache<P>::BindGraphicsTextureBuffer(size_t stage, size_t tbo_index, G
     if constexpr (SEPARATE_IMAGE_BUFFERS_BINDINGS) {
         channel_state->image_texture_buffers[stage] |= (is_image ? 1U : 0U) << tbo_index;
     }
-    channel_state->texture_buffers[stage][tbo_index] =
-        GetTextureBufferBinding(gpu_addr, size, format);
+    const TextureBufferBinding new_binding = GetTextureBufferBinding(gpu_addr, size, format);
+    TextureBufferBinding& binding = channel_state->texture_buffers[stage][tbo_index];
+    if (new_binding.device_addr != binding.device_addr || new_binding.size != binding.size ||
+        new_binding.format != binding.format) {
+        binding = new_binding;
+    }
 }
 
 template <class P>
@@ -936,7 +945,7 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
             if (!has_host_buffer) {
                 return false;
             }
-            const u32 alignment = runtime.GetUniformBufferAlignment();
+            const u32 alignment = uniform_buffer_alignment_cache;
             return alignment > 1 && (offset % alignment) != 0;
         }
     }();
@@ -1109,7 +1118,7 @@ void BufferCache<P>::BindHostComputeUniformBuffers() {
                 if (!has_host_buffer) {
                     return false;
                 }
-                const u32 alignment = runtime.GetUniformBufferAlignment();
+                const u32 alignment = uniform_buffer_alignment_cache;
                 return alignment > 1 && (offset % alignment) != 0;
             }
         }();
@@ -1350,10 +1359,12 @@ void BufferCache<P>::UpdateUniformBuffers(size_t stage) {
 template <class P>
 void BufferCache<P>::UpdateStorageBuffers(size_t stage) {
     ForEachEnabledBit(channel_state->enabled_storage_buffers[stage], [&](u32 index) {
-        // Resolve buffer
         Binding& binding = channel_state->storage_buffers[stage][index];
-        const BufferId buffer_id = FindBuffer(binding.device_addr, binding.size);
-        binding.buffer_id = buffer_id;
+        if (binding.buffer_id) {
+            // Already resolved; the writer resets this when the target changes
+            return;
+        }
+        binding.buffer_id = FindBuffer(binding.device_addr, binding.size);
     });
 }
 
@@ -1361,6 +1372,10 @@ template <class P>
 void BufferCache<P>::UpdateTextureBuffers(size_t stage) {
     ForEachEnabledBit(channel_state->enabled_texture_buffers[stage], [&](u32 index) {
         Binding& binding = channel_state->texture_buffers[stage][index];
+        if (binding.buffer_id) {
+            // Already resolved; the writer resets this when the target changes
+            return;
+        }
         binding.buffer_id = FindBuffer(binding.device_addr, binding.size);
     });
 }
@@ -1631,7 +1646,8 @@ void BufferCache<P>::ChangeRegister(BufferId buffer_id) {
 
 template <class P>
 void BufferCache<P>::TouchBuffer(Buffer& buffer, BufferId buffer_id) noexcept {
-    if (buffer_id != NULL_BUFFER_ID) {
+    if (buffer_id != NULL_BUFFER_ID && buffer.last_touch_tick != frame_tick) {
+        buffer.last_touch_tick = frame_tick;
         lru_cache.Touch(buffer.getLRUID(), frame_tick);
     }
 }
@@ -1857,6 +1873,14 @@ void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
     }
     std::ranges::for_each(channel_state->uniform_buffers, replace);
     std::ranges::for_each(channel_state->storage_buffers, replace);
+    for (auto& per_stage : channel_state->texture_buffers) {
+        for (auto& texture_binding : per_stage) {
+            scalar_replace(texture_binding);
+        }
+    }
+    for (auto& texture_binding : channel_state->compute_texture_buffers) {
+        scalar_replace(texture_binding);
+    }
     replace(channel_state->transform_feedback_buffers);
     replace(channel_state->compute_uniform_buffers);
     replace(channel_state->compute_storage_buffers);

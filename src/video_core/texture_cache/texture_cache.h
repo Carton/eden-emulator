@@ -1883,8 +1883,11 @@ std::pair<u32, u32> TextureCache<P>::PrepareDmaImage(ImageId dst_id, GPUVAddr ba
     const auto& image = slot_images[dst_id];
     const auto base = image.TryFindBase(base_addr);
     PrepareImage(dst_id, mark_as_modified, false);
-    const auto& new_image = slot_images[dst_id];
-    lru_cache.Touch(new_image.lru_index, frame_tick);
+    auto& new_image = slot_images[dst_id];
+    if (new_image.last_touch_tick != frame_tick) {
+        new_image.last_touch_tick = frame_tick;
+        lru_cache.Touch(new_image.lru_index, frame_tick);
+    }
     return std::make_pair(base->level, base->layer);
 }
 
@@ -2517,7 +2520,10 @@ void TextureCache<P>::PrepareImage(ImageId image_id, bool is_modification, bool 
     if (is_modification) {
         MarkModification(image);
     }
-    lru_cache.Touch(image.lru_index, frame_tick);
+    if (image.last_touch_tick != frame_tick) [[likely]] {
+        image.last_touch_tick = frame_tick;
+        lru_cache.Touch(image.lru_index, frame_tick);
+    }
 }
 
 template <class P>
