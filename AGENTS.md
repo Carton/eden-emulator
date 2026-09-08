@@ -200,6 +200,16 @@ MSYS_NO_PATHCONV=1 "$NSYS" profile -t wddm,vulkan -d 90 --force-overwrite=true \
 - 结论：优先优化 GPU 命令线程（eden 侧每 draw 开销，靶点明确）；模拟核是次级天花板。
 - 实验后分辨率配置已还原（`resolution_setup\default=true`）。
 
+### GPU 命令线程优化第一轮（2026-09-08 夜，详见 F:\prof\HANDOFF.md §6）
+- 五项微优化已提交 v0.2.1 worktree（7f1f534cd0，仅本地）：寄存器冗余写过滤（ProcessDirtyRegisters
+  4.23→1.66s）、LRU touch 帧内去重（两处合计 2.75→0.85s）、管线键 transition 哈希预比较、
+  uniform 对齐缓存、SSBO/TBO buffer_id 复用。GPU 线程总 CPU 105.9→102.4s（-3.3%），渲染验证通过。
+- **FPS 不动**（42-45 噪声内）：4 线程全饱和（3 JIT 核 + GPU 线程），帧时长=max(各级)；
+  中位帧时锁 24.99ms。下一杠杆在 JIT 模拟核（fastmem 生效性 / CPU 精度档），非 GPU 线程。
+- FPS 基准管线：eden 内建 `record_frame_times=true`（退出时逐帧 CSV）+ `confirmStop=2`（优雅关闭）+
+  `F:\prof\bench_run.py`（自动进游戏+测量+统计，历史在 bench_results.csv）。基线 43.21/44.65 FPS。
+  已封装 skill `eden-bench`（构建/基准/采集速查）。
+
 ### 本地补丁与工具（v0.2.1 worktree，勿提交上游）
 - `fsp_srv.cpp` 两处 `OpenSaveDataFileSystem` 的 `ASSERT(false)`（Temporary/ProperSystem/SafeMode
   空间）已改为正常映射 StorageId。原因：强杀进程后游戏残留 Temporary 存档，下次启动打开它即
