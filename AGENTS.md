@@ -210,7 +210,16 @@ MSYS_NO_PATHCONV=1 "$NSYS" profile -t wddm,vulkan -d 90 --force-overwrite=true \
   `F:\prof\bench_run.py`（自动进游戏+测量+统计，历史在 bench_results.csv）。基线 43.21/44.65 FPS。
   已封装 skill `eden-bench`（构建/基准/采集速查）。
 
+### 第二轮：fastmem 排查 + CPU 精度 Unsafe A/B（2026-09-08 深夜，详见 HANDOFF §6.3）
+- **fastmem 无问题**：缺页全家函数仅 0.08s/111.8s（0.07%），几乎无 miss；"6.6% 内核开销"
+  实为大半 ETW 采集自身抓栈成本 + 饱和负载调度税——解读 kernel 占比时记住这点。勿再查。
+- **CPU 精度 Unsafe：+2.0 FPS（44.8 vs 42.8）且 33ms 卡顿尖刺全消**（p99 33.4→25.4ms），
+  机制含 fastmem 地址位宽 39→64 免边界检查。qt-config 已留在 Unsafe；还原改 `cpu_accuracy=0`。
+- JIT 核 85.7% 纯游戏代码 → 无低垂果实，Unsafe 即该侧现实杠杆。skill 已迁至
+  `.agents/skills/eden-bench`（随仓库跟踪维护）。
+
 ### 本地补丁与工具（v0.2.1 worktree，勿提交上游）
+
 - `fsp_srv.cpp` 两处 `OpenSaveDataFileSystem` 的 `ASSERT(false)`（Temporary/ProperSystem/SafeMode
   空间）已改为正常映射 StorageId。原因：强杀进程后游戏残留 Temporary 存档，下次启动打开它即
   assert 闪退（启动 ~17s 死循环）。profiling 要反复强杀进程，必须有此补丁。
