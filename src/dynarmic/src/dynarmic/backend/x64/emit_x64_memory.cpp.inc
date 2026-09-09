@@ -1,3 +1,5 @@
+#include "dynarmic/backend/x64/jit_stats.h"
+
 /* This file is part of the dynarmic project.
  * Copyright (c) 2022 MerryMage
  * SPDX-License-Identifier: 0BSD
@@ -28,6 +30,7 @@ std::optional<AxxEmitX64::DoNotFastmemMarker> AxxEmitX64::ShouldFastmem(AxxEmitC
 }
 
 FakeCall AxxEmitX64::FastmemCallback(u64 rip_) {
+    Dynarmic::Backend::X64::JitStats::fastmem_faults.fetch_add(1, std::memory_order_relaxed);
     const auto iter = fastmem_patch_info.find(rip_);
     if (iter != fastmem_patch_info.end()) {
         FakeCall result{
