@@ -432,25 +432,29 @@ ntdll SRW 族 1.0s。fastmem 本身零缺页（fastmem_faults=0），此前的"f
 range_invalidations / full_clears / fastmem_faults，关闭时
 `LOG_INFO(Core_ARM, "dynarmic jit stats ...")` 打到 eden_log.txt。开销可忽略。
 
-### 11.3 TOTK 代码行为画像（计数器实测，199s 会话含启动+读档+90s 游戏）
+### 11.3 TOTK 代码行为画像（计数器实测，199s 会话含启动+读档+90s 游戏；
+**时间分布见 §11.8 修正：编译集中在前 ~30s 启动爆发，"持续 6.3k/s"是测量窗口落在爆发期的伪象**）
 
 | 指标 | 数值 | 推论 |
 |---|---|---|
 | dispatch_lookups（四级调度全 miss） | 2.72M（13.7k/s） | 块链接/RSB/FastDispatch 之外仍有海量新入口 |
-| **block_compiles** | **1.26M（6.3k/s）** | 持续编译，非一次热身 |
-| distinct PC 占比 | **99%**（40 万编译 39.6 万不同 PC） | **不是重编译 churn**，是持续的新代码 |
-| 64KB 区域直方图 | 782 区域，top 仅 0.53%，**完全平坦** | 无热点，均匀铺满 ~48MB |
+| **block_compiles** | **1.26M（会话总）**；时间戳分解：启动 30s ≈ 700k（23k/s）+ 加载/入局 ~550k，其后涓流 | 编译税前置，稳态极低 |
+| distinct PC 占比 | **核内 99%+**（见 §11.8：全局仅 48.6%，51% 是跨核重复） | 核内无 churn；跨核全是重复 |
+| 64KB 区域直方图 | 782 区域，top 仅 0.53%，**完全平坦** | 无热点，均匀铺满 ~48MB（启动扫全库所致） |
 | 采样点指令字节 | 函数序言/中段/尾混合（合法 ARM64） | 真代码，非数据误执行（日志无异常风暴） |
-| **主菜单静置 90s** | **697k 编译（3.6k/s），同样 99% distinct** | 与玩法无关的**后台系统性扫描** |
+| 主菜单静置（带时间戳复测） | 30s 爆发后 **<200/s，6 分钟后趋零** | 早期"菜单 3.6k/s"读数是爆发尾巴；菜单稳态安静 |
 | guest IC IVAU | 15,007 次，菜单局与游戏局**完全同数** | 全部发生在启动阶段；2023 年 yuzu 的 SMC 风暴已不复发 |
-| full_clears / fastmem_faults | 0 / 0 | 短会话无码缓存打穿、无缺页 |
+| full_clears / fastmem_faults | 0 / 0 | 会话无码缓存打穿、无缺页 |
 
-解读：TOTK（KingSystem 巨型模板化代码库）的后台子系统群持续触碰海量代码
-（每核 ~2400 新块/秒）。含义：①"热块分级/tier-up 优化"对该游戏**无效**（无稳定热集）；
-②每次冷执行都要付 翻译+发射+冷 I-cache/BTB 的税——这结构性解释了模拟核为什么 85.7% 都是
-JIT 代码时间；③按 ~150B/块估算，**512MiB 码缓存约 25-40 分钟打穿 → 全清 → 重编译风暴**
-（长会话掉帧的一个具体机制，用户报告的"玩久了变卡"吻合）。
-**处置：Windows x64 码缓存 512→2048MiB**（虚拟预留按需提交，无实际内存代价，c2d9148f7f）。
+解读（依 §11.8 时间戳数据修正）：TOTK 在**启动+首次加载**阶段一次性扫过巨型代码库
+（KingSystem 模板库全量初始化/注册），~30 秒烧掉 ~70 万块编译；游戏内加载再补 ~55 万；
+**稳态编译速率接近零**（菜单 <200/s 且趋零）。含义：
+①"热块分级/tier-up"仍无效（无稳定热集），但原因改为"编译税前置"而非"持续新代码流"；
+②码缓存打穿推算随之修正：单会话 ~1.3M 块 ≈ 200MB @150B，**常规一局到不了 512MiB**，
+"玩久了变卡 = 全清风暴"的假说被削弱（除非超长会话累计；2GiB 改动保留，reserve-only 无代价）；
+③稳态模拟核 85.7% 是已编译代码的**执行**时间——稳态 FPS 杠杆在执行质量
+（BL→host call、块合并、RA），编译量类优化（共享缓存/磁盘缓存）主要改善**启动/加载时长与前期卡顿**。
+**处置：Windows x64 码缓存 512→2048MiB 维持不变**（虚拟预留按需提交，c2d9148f7f）。
 
 ### 11.4 本轮实验结果
 
@@ -476,17 +480,31 @@ JIT 代码时间；③按 ~150B/块估算，**512MiB 码缓存约 25-40 分钟�
 - **不适用/勿做**：TSO/强内存序（方向反，ARM 弱序→x86 TSO 免屏障）、x87、
   全面 branchless、AVX-512、热块 tier-up（本游戏无热集）、LTO/PGO（已证中性）。
 
-### 11.6 JIT 侧剩余路线图（按性价比/工程量）
+### 11.6 JIT 侧剩余路线图（2026-09-09 依 §11.8/§11.9 证据修订；编译税已证实前置，分双轨）
 
-1. **跨会话磁盘代码缓存**（FEX FOZ / box64 DYNACACHE 式）：按 (PC, 代码 hash) 落盘复用
-   翻译块——直接消掉每个会话的 6.3k/s 编译+发射（~2%/核 + 发射带宽），SMC 安全性靠 hash
-   校验。中工程量，收益确定性较高。
-2. **guest BL→host call / RET→host ret**：dynarmic 后端手术（terminals + RSB 机制改造），
-   FEX 证明的大收益，高风险高回报。
-3. **3 核共享 JIT 块缓存**：3 个核跑同一游戏、各自编译同一批块（×3 浪费）——共享后编译量
-   /3、发射代码 I-cache 局部性更好；需动 dynarmic 每实例架构。
-4. **azahar fork backport**（identity pass 等）+ eden master #4303 jitState 重排——小收益闲时做。
-5. **RasterizerCached 慢路径**（§11.1 的 2.5%+锁竞争）：GPU 无 pending 工作时免锁快查。
+**A 轨——启动/加载时长与前期卡顿**（编译量集中在头 ~2 分钟，~1.3M 块）：
+
+1. **3 核共享 JIT 块缓存**：§11.8 实测 **51% 编译是跨核重复**（57.7% 的块被 ≥2 核编过）
+   ——浪费量从推测变为实锤，FEX #4479 同型修复实测省 11~26% JIT 时间。两条实现路径：
+   (a) FEX 式共享缓冲+共享查找表（需解决 dynarmic 烘焙绝对地址/Xbyak 无重定位，大工程）；
+   (b) **单 Jit 实例 + 3 份 JitState 轮换**（拓扑等价，改动集中 eden 侧，先评估）。
+   另可顺手借鉴 FEX "满不清老、换大缓冲老代码续命"替代全清风暴。
+2. **跨会话磁盘代码缓存**：每个 eden.exe 进程生命周期（"会话"）内 JIT 全部从零——
+   每次启动重付 ~1.3M 次编译税；落盘复用可直接砍启动/加载的编译时间。
+   **设计要点（§11.8 实测）**：guest 模块基址逐会话漂移 → 键须 (模块 ID+偏移+内容 hash)；
+   host 代码含绝对地址 → 要么固定预留地址加载、要么存重定位表；SMC 安全靠内容 hash 校验。
+   参考 FEX AOT（序列化 IR，缓存前端产物回避重定位）。中偏大工程，收益确定性高。
+
+**B 轨——稳态 FPS**（稳态编译≈0，模拟核 85.7% 是已编译代码执行时间，杠杆=执行质量）：
+
+3. **guest BL→host call / RET→host ret**：dynarmic 后端手术（影子返回栈+多入口块+链接改造），
+   FEX 实证最大单项（Cyberpunk +39%）；x64 无 ret-reg 是最大不确定项。高风险高回报。
+4. **块合并/multiblock**：29% 的块 ≤2 条指令、中位 4 条，62% 块以条件分支收尾——
+   每块固定开销（序言/终端/调度）占比畸高；FEX multiblock 有先例。
+   与 3 可同做（多入口块是共同前置）。
+5. **azahar fork backport** + eden master #4303 jitState 重排；FEX RA 可移植件
+   （tied/spill 启发/post-RA 窥孔）归此类，SRA 在 x64 上不可移植。
+6. **RasterizerCached 慢路径**（§11.1 的 2.5%+锁竞争）：GPU 无 pending 工作时免锁快查。
 
 ### 11.7 本轮产物
 
@@ -495,3 +513,96 @@ JIT 代码时间；③按 ~150B/块估算，**512MiB 码缓存约 25-40 分钟�
   `EDEN_DIR=.../build-lto/bin` 切换）；配置命令见 §1.4 加 `-DENABLE_LTO=ON -B build-lto`
 - `bench_run.py` 新增 `--no-tap`（菜单静置对照）与 `EDEN_DIR` 环境变量
 - 诊断期临时补丁（PC 去重集/直方图/指令转储）已移除，只保留基础计数器
+
+### 11.8 块级 dump 实验（2026-09-09 深夜：重复内容/块形态定量）
+
+工具：`EDEN_JIT_BLOCKDUMP=1` 环境变量 → 每次 GetBlock 编译时写一行
+`tid,start_pc,end_pc,FNV内容hash,ms,terminal类型` 到 exe 旁 `jit_blocks.csv`；
+离线分析 `F:\prof\analyze_blocks.py`。两轮独立会话（标准 bench ~5min + 游戏内静置 8min）
+数字完全一致，代表性可信。**注意 printf 格式串曾编译失败被 tail 掩盖退出码**——
+构建命令必须检查 BUILD_OK/退出码，勿信管道尾部。
+
+| 指标 | 数值（bench 局 / hold 局） | 含义 |
+|---|---|---|
+| 总编译 | 1.26M / 1.29M | 与计数器口径一致 |
+| 核内重复编译 | 0.3~0.8% | **单核 JIT 自身缓存健康**（仅启动期失效/FPCR churn） |
+| **跨核重复编译** | **51.1% / 51.4%** | 同一 PC 被 2~3 个核各编一份 |
+| 被 ≥2 核编过的 PC | 57.0% / 57.7% | TOTK 线程在核间高频迁移，3 套 JIT 互不知情 |
+| **内容级重复** | **21.8%**（13.6 万 PC） | 不同地址上字节完全相同的块（模板/静态库多副本）；最热同款 6 指令序列 ×4451 份、1 指令 ×2997 份 |
+| 块长（指令数） | med 4 / mean 6 / p90 12；**29% ≤2 条** | 游戏分支密度高（比较链/switch/模板校验），非引擎切块问题：DMB/DSB 不切块，仅 ISB/MSR/分支/异常切 |
+| 块中入口碎片化 | 5.8% | 从已编译块中部进入的新块，正常范围，非主要浪费 |
+| 代码足迹 | 8.9k 个 4K 页 = 34.7MB，跨度 78MB，3 簇（43.67+7.83+6.38MB span） | 3 簇 = main + 两个 subsdk 模块 |
+| **guest 模块基址** | 0x80efc000 vs 0x803c7000（两局不同，簇大小相同） | **模块加载地址逐会话漂移** → 磁盘码缓存的键不能用裸 guest PC，须模块相对+内容 hash |
+
+回答"是不是 JIT 引擎的问题、这么大缓存没有重复内容吗"：
+1. **核内**：无缺陷，重复率 <1%；
+2. **跨核**：51% 编译是纯重复——这是 eden/dynarmic "每核一套 JIT 实例"架构的真实代价，
+   FEX #4479 修的就是这个（他们省 11~26% JIT 时间，我们的重复率更高，收益应更大）；
+3. **跨地址**：21.8% 的块内容与其他块完全相同（游戏链接器把模板代码复制到多个地址/模块），
+   理论上可内容寻址去重，但 IR 里烘焙了绝对 guest 地址，需重定基，工程复杂收益次之；
+4. 块小是游戏性质（分支密），不是 bug；真正可动的是"块合并/multiblock"（FEX 有先例）。
+
+**时间分布（带时间戳局，菜单静置 466s；两轮独立菜单局 709k/705k 完全一致）**：
+t=0-30s 爆发 **22.9k/s**（≈97% 的编译量，即启动+初始化扫全库），30s 后 <200/s，
+6 分钟后趋零。→ 早期"持续 6.3k/s"结论作废（测量窗口在爆发尾巴）。
+游戏内稳态由总量三角定位：游戏局 1.26-1.29M = 菜单底座 ~0.71M + 进图/加载爆发
+~0.55M + 360s 静置 × 稳态 → **游戏内稳态亦仅 ~100/s 量级**（编译税同样前置）。
+（hold-v2/v3 两轮 tap 焦点抢夺失败停在菜单，反成两次独立的菜单复测；游戏局总量
+来自 bench 与 hold-v1。）
+**块终止类型分布**（全量）：CheckBit 34.4% + If 27.6%（合计 62% = 条件分支收尾，
+印证分支密度）、LinkBlockFast 23.3%（直连跳转）、PopRSBHint 8.9%（返回）、
+FastDispatchHint 5.8%（间接跳转）、CheckHalt/ReturnToDispatch ≈0。
+
+### 11.9 FEX 三大招代码级调研（仓库已克隆 `F:\devel\opensource\FEX` @ 208e9c3）
+
+**① call-ret 影子栈（PR #4670，FEX-2508，Cyberpunk +39% FPS / Clang +10%）**
+机制：专用 host 寄存器 x25 作影子返回栈指针，每项 16B `{guest RIP, host 返回落点}`。
+guest CALL：返回地址照写 guest 栈（正确性），同时 `stp` 压影子栈，发射真 host `bl`
+（首次经 thunk，执行后 backpatch 成直接 bl）；guest RET：无条件弹影子栈，比对弹出的
+guest RIP 与实际返回目标——相等则 `ret TMP2` 直落 CALL 点后（硬件 RAS 完美预测），
+不等则走 L1 查表→dispatcher（仍以 `ret` 返回，保持 host call/ret 配对）。
+兜底四层：返回块未知时压哑元保持深度同步；guard page 溢出 SIGSEGV 重置 x25 到栈中部；
+cache 失效时整栈清零（陈旧 host 指针必然值不匹配）；前置要求 = 多入口块
+（返回地址即块入口）+ 重写的块链接（call/branch 可区分的 patch 标记）。
+关键代码：`FEXCore/Source/Interface/Core/JIT/BranchOps.cpp:160-238`（发射）、
+`JIT.cpp:531-612`（运行时链接/backpatch）、`Frontend.cpp:1140-1161`（返回地址登记为入口）。
+**dynarmic 移植难点**：x64 无 `ret reg`（须 `push target; ret` 且 host SP 由 JIT 掌控，
+或退化为 `jmp` 丢 RSB 收益——这是 +39% 能否复现的最大变量）；rel32 ±2GB 需 thunk 两级；
+AArch64 guest 大量 tail call 靠值不匹配回退兜底；dynarmic 的 BL 写 X30（寄存器而非栈），
+比对反而比 x86 简单。
+
+**② RA 内联进 IR（PR #4580，FEX-2506）——注意：与传闻不同**
+实际是"把分配结果（物理寄存器号）内联进 IR 数据结构"（`OrderedNode::Reg` 1 字节 +
+参数槽改写为 PhysicalRegister 立即数），RA 仍是独立 pass。真正的算法重写是 2024-05
+`725d0e18`：两遍 block-local 线性分配，利用 FEX IR 不变量"无跨块活跃值"（跨块状态
+住在 SRA 固定 host 寄存器：arm64 主机 pin 18 GPR + 16 FPR）。move 消除四支柱：
+PreferredReg 归位 coalescing、TiedSource 绑定、post-RA 窥孔（mov 折叠/压弹栈配对）、
+furthest-first spill + 常量 remat。
+**dynarmic 对照**：其 x64 RA 本就是块局部在线分配（`reg_alloc.cpp`），已有 last-use 覆写；
+可移植件 = tied 元数据/spill 启发/post-RA 窥孔（中工程量，收益边际）；
+SRA 常驻在 x64 16 GPR 上 pin 不下（需要 34 个），**不可移植**——move 消除的最大来源天然缺失。
+
+**③ 跨线程共享 JIT 缓冲（PR #4479，-25% JIT 时间；Tracy 实测 Mirror's Edge 26%/GoW 19%）**
+机制：进程单块 RWX 大缓冲，无锁原子 bump 分割；线程先编到私有临时缓冲再 memcpy 重定位
+进共享区（避免全局锁，早期全局锁方案实测吃掉 JIT 时间 5~14%）；**共享 L3 guest→host
+查找表**才是省时的本体——别的线程编过的块直接复用，"每块恰好编译一份"是软不变量
+（竞态窗口容忍泄漏一份重复）。缓冲满不清老：换 2× 新缓冲、老缓冲只读续命
+（"partially persistent"）——**这是对全清风暴的结构性解法**，值得借鉴到 2GiB 打穿场景。
+**dynarmic 移植障碍**（比 FEX 多一层）：生成代码烘焙了 per-instance 绝对地址
+（Devirtualize 回调+this、tpidr 存储、prelude 地址），Xbyak 单阶段直写无重定位，
+patch 注册表/emitter 私有，失效协议 per-instance。**§11.8 实测 51% 跨核重复 →
+收益直接可期**；务实折中 = 单 Jit 实例 + 3 份 JitState 轮换进入（拓扑等价，改动集中
+在 eden 侧持有模型）。
+
+先例补充：FEX 另有 AOT 工具链（`Source/Tools/FEXInterpreter/AOT/`，序列化 IR 供离线
+编译——缓存的是前端产物而非机器码，天然回避重定位），是磁盘码缓存设计的重要参考。
+
+### 11.10 本轮（09-09 深夜）产物
+
+- v0.2.1 worktree：块 dump 补丁（`a64_interface.cpp`，env `EDEN_JIT_BLOCKDUMP` 门控，
+  正式提交见 git log "block dump instrumentation"）；开启时对 FPS 无可测影响（44.85）
+- `F:\prof\analyze_blocks.py`（去重/碎片化/块长/簇/terminal/衰减 离线分析）
+- `F:\prof\jit_blocks_gameplay_0909.csv`、`jit_blocks_hold360_0909.csv`（4 列原始 dump 存档）、
+  `jit_blocks_holdv2_0909.csv`、`jit_blocks_holdv3_0909.csv`（6 列带时间戳/terminal，两轮菜单复测）
+- `F:\devel\opensource\FEX`（浅克隆 master @ 208e9c3，代码级调研用）
+- 坑：构建命令带 `| tail` 会掩盖失败退出码——检查产物时间戳或显式 echo 标记
