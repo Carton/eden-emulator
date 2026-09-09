@@ -6,9 +6,14 @@
  * SPDX-License-Identifier: 0BSD
  */
 
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <thread>
 
 #include <boost/icl/interval_set.hpp>
 #include "common/assert.h"
@@ -31,6 +36,21 @@
 namespace Dynarmic::A64 {
 
 using namespace Backend::X64;
+
+namespace {
+// Local profiling (see PROFILE_PROGRESS.md): EDEN_JIT_BLOCKDUMP=1 records one
+// line per compiled block for offline dedup/fragmentation analysis.
+std::mutex g_blockdump_mutex;
+FILE* g_blockdump_file = nullptr;
+
+bool BlockDumpEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("EDEN_JIT_BLOCKDUMP");
+        return env != nullptr && env[0] != '\0' && env[0] != '0';
+    }();
+    return enabled;
+}
+}  // namespace
 
 static RunCodeCallbacks GenRunCodeCallbacks(A64::UserCallbacks* cb, CodePtr (*LookupBlock)(void* lookup_block_arg), void* arg, const A64::UserConfig& conf) {
     return RunCodeCallbacks{
@@ -263,6 +283,29 @@ private:
         A64::Translate(ir_block, arch_descriptor, get_code, {conf.define_unpredictable_behaviour, conf.wall_clock_cntpct});
         Optimization::Optimize(ir_block, conf, polyfill_options);
         JitStats::block_compiles.fetch_add(1, std::memory_order_relaxed);
+        if (BlockDumpEnabled()) [[unlikely]] {
+            const u64 start_pc = arch_descriptor.PC();
+            const u64 end_pc = A64::LocationDescriptor{ir_block.EndLocation()}.PC();
+            u64 h = 1469598103934665603ull;
+            for (u64 a = start_pc; a < end_pc; a += 4) {
+                h = (h ^ conf.callbacks->MemoryReadCode(a).value_or(0)) * 1099511628211ull;
+            }
+            std::scoped_lock lock{g_blockdump_mutex};
+            if (!g_blockdump_file) {
+                g_blockdump_file = std::fopen("jit_blocks.csv", "w");
+            }
+            if (g_blockdump_file) {
+                const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch())
+                                        .count();
+                std::fprintf(g_blockdump_file, "%llx,%llx,%llx,%016llx,%lld,%d\n",
+                             (unsigned long long)std::hash<std::thread::id>{}(
+                                 std::this_thread::get_id()),
+                             (unsigned long long)start_pc, (unsigned long long)end_pc,
+                             (unsigned long long)h, (long long)now_ms,
+                             (int)ir_block.GetTerminal().which());
+            }
+        }
         return emitter.Emit(ir_block).entrypoint;
     }
 
