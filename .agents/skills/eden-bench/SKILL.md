@@ -5,7 +5,7 @@ description: Eden 模拟器（TOTK）性能基准与 profiling 工作流——�
 
 # Eden TOTK 性能基准与 Profiling
 
-完整背景读 `F:\prof\HANDOFF.md`（交接文档，含所有坑）。本 skill 是速查卡。
+完整背景读仓库根目录 `PROFILE_PROGRESS.md`（性能进度记录，含所有坑）。本 skill 是速查卡。
 
 ## 关键路径
 

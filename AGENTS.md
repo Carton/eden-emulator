@@ -1,7 +1,7 @@
 # Eden 本地开发笔记（Windows，仅本地使用）
 
 > **交接文档：性能优化全流程（基线/构建/输入自动化/profiling 管线/结论/脚本用法）已整理为
-> `F:\prof\HANDOFF.md`，新会话/新 agent 从那里开始读。**
+> `PROFILE_PROGRESS.md`（本仓库根目录，随 git 跟踪），新会话/新 agent 从那里开始读。**
 
 ## 项目简介
 
@@ -200,7 +200,7 @@ MSYS_NO_PATHCONV=1 "$NSYS" profile -t wddm,vulkan -d 90 --force-overwrite=true \
 - 结论：优先优化 GPU 命令线程（eden 侧每 draw 开销，靶点明确）；模拟核是次级天花板。
 - 实验后分辨率配置已还原（`resolution_setup\default=true`）。
 
-### GPU 命令线程优化第一轮（2026-09-08 夜，详见 F:\prof\HANDOFF.md §6）
+### GPU 命令线程优化第一轮（2026-09-08 夜，详见 PROFILE_PROGRESS.md §6）
 - 五项微优化已提交 v0.2.1 worktree（7f1f534cd0，仅本地）：寄存器冗余写过滤（ProcessDirtyRegisters
   4.23→1.66s）、LRU touch 帧内去重（两处合计 2.75→0.85s）、管线键 transition 哈希预比较、
   uniform 对齐缓存、SSBO/TBO buffer_id 复用。GPU 线程总 CPU 105.9→102.4s（-3.3%），渲染验证通过。
@@ -210,7 +210,7 @@ MSYS_NO_PATHCONV=1 "$NSYS" profile -t wddm,vulkan -d 90 --force-overwrite=true \
   `F:\prof\bench_run.py`（自动进游戏+测量+统计，历史在 bench_results.csv）。基线 43.21/44.65 FPS。
   已封装 skill `eden-bench`（构建/基准/采集速查）。
 
-### 第二轮：fastmem 排查 + CPU 精度 Unsafe A/B（2026-09-08 深夜，详见 HANDOFF §6.3）
+### 第二轮：fastmem 排查 + CPU 精度 Unsafe A/B（2026-09-08 深夜，详见 PROFILE_PROGRESS.md §6.3）
 - **fastmem 无问题**：缺页全家函数仅 0.08s/111.8s（0.07%），几乎无 miss；"6.6% 内核开销"
   实为大半 ETW 采集自身抓栈成本 + 饱和负载调度税——解读 kernel 占比时记住这点。勿再查。
 - **CPU 精度 Unsafe：+2.0 FPS（44.8 vs 42.8）且 33ms 卡顿尖刺全消**（p99 33.4→25.4ms），

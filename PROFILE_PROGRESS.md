@@ -1,0 +1,399 @@
+# Eden TOTK 性能优化进度记录（Profile Progress）
+
+> 写给接手的 agent / 开发者；随仓库跟踪维护，每轮实验后更新。原 `F:\prof\HANDOFF.md` 已并入本文件。
+> 目标：在 Eden 模拟器（yuzu 血统）上优化《塞尔达传说 王国之泪》
+> 的运行帧率。本文档记录当前基线、已验证的工具链、初步分析结论、实验方法和所有脚本的用法。
+> **纪律：本目录及一切 AI 生成内容仅限本地使用，禁止以任何形式提交到上游仓库 / issue / PR。**
+
+---
+
+## 0. 一句话现状（TL;DR，2026-09-09 更新）
+
+- 测试基线：**`F:\devel\opensource\eden-v0.2.1`**，分支 `local-profiling` =
+  v0.2.1(58c1e20) + fsp_srv 崩溃修复(3ea74e6) + **第一轮 GPU 线程微优化(7f1f534cd0)**。
+- 瓶颈画像（已两轮验证）：**CPU 侧四核全饱和**——3 个 JIT 模拟核（85.7% 纯游戏代码）+
+  GPU 命令线程；设备 GPU 利用率 37% 有余量。帧时长 = 流水线最慢一级。
+- 已完成：GPU 线程微优化五项（CPU 时间 105.9→102.4s，-3.3%）；fastmem 排查（无 miss，勿再查）；
+  **CPU 精度切到 Unsafe（+2.0 FPS 且 33ms 尖刺全消，qt-config 已留在 Unsafe！）**。
+  当前实际帧率：**44.8 FPS**（原始基线 43.9）。后续任何 FPS 对比都要基于 Unsafe 档跑，
+  或先切回 `cpu_accuracy=0` 再比（见 §6.3）。
+- 结论性判断：两侧低垂果实已摘完。剩余方向见 §6.4（结构性改动 / VulkanWorker 卸载 / 等 master 修复）。
+- 速查 skill：`.agents/skills/eden-bench`（master 仓库内，构建/基准/微 profile 全流程）。
+  完整分析报告：[`F:\prof\totk_profile_report.html`](F:/prof/totk_profile_report.html)。
+
+---
+
+## 1. 测试环境与构建方法
+
+### 1.1 机器
+- Windows 11 x64，12 逻辑核，NVIDIA RTX 2060（驱动 591.86）
+- 用户偏好：安装软件放 D 盘或 G 盘，**不要 C 盘**；`F:\Switch\Yuzu`（官方安装）**只读，不许改**
+
+### 1.2 两个仓库，分工明确
+| 路径 | 用途 | 状态 |
+|---|---|---|
+| `F:\devel\opensource\eden-v0.2.1` | **性能实验的工作基线**（git worktree） | 分支 `local-profiling` = tag v0.2.1(58c1e20) + `3ea74e6`（fsp_srv 崩溃修复 §8）+ `7f1f534cd0`（GPU 线程微优化 §6.1） |
+| `F:\devel\opensource\eden-emulator` | master，仅当代码参考 / 笔记宿主 | 本地领先 origin/master 3 个纯文档提交（AGENTS.md），**永不 push**；master 本身构建物不能跑 TOTK（历史问题，勿浪费时间） |
+
+上游仓库 `https://git.eden-emu.dev/eden-emu/eden`（GitHub 镜像 `eden-emulator/mirror`）。
+
+### 1.3 工具链（全部已装好）
+- **VS2022 Community** @ `D:\Program Files\Microsoft Visual Studio\2022\Community`
+  （MSVC 19.44；CMake 3.31.6 / Ninja 为 VS 自带，不在系统 PATH）
+- glslang 16.5.0 @ `G:\Tools\glslang`（构建期 shader 编译）
+- PerfView @ `G:\Tools\perfview\PerfView.exe`（火焰图，见 §6）
+- Git Bash（MSYS）+ Python 3.12；**当前 agent shell 无提权**，但 UAC 为"从不通知"，
+  `powershell Start-Process -Verb RunAs` 可**静默提权**（这是所有采集脚本的工作前提）
+
+### 1.4 构建命令（Git Bash，v0.2.1 增量约几十秒～几分钟）
+```bash
+cd /f/devel/opensource/eden-v0.2.1
+source /f/devel/opensource/eden-emulator/tools/windows/load-msvc-env.sh   # vswhere 自动找 VS2022
+export PATH="/g/Tools/glslang/bin:$(dirname "$(command -v cl.exe)"):/d/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin:/d/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja:$PATH"
+cmake.exe --build build    # 已配置过；产物 build/bin/eden.exe + .pdb
+```
+完整重配置（仅首次/改 CMake 选项）：
+```bash
+cmake.exe -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DYUZU_TESTS=OFF \
+  "-DCMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO=/DEBUG /INCREMENTAL:NO /OPT:REF /OPT:ICF"
+```
+注意：MSVC bin 必须在 PATH 里排在 `/usr/bin/link.exe` 之前（上面的 export 已处理）。
+RelWithDebInfo = `/O2 /Ob1 /Zi` + `/DEBUG /OPT:REF /OPT:ICF`，就是 profile 友好配置；**分析阶段不要开 PGO**。
+小坑：`/OPT:ICF` 会折叠相同函数体，火焰图里个别符号会合并，属正常噪声。
+
+### 1.5 游戏与运行
+- 游戏文件：`F:\prof\TOTK.nsp` —— 是 `F:\Switch\Games\塞尔达王国之泪\[APP][0100F2C0115B6000][1.0.0][US][16.0.0].nsp`
+  的 **NTFS 硬链接**（`ln` 创建，零拷贝）。存在原因是部分工具（nsys）无法处理中文路径。
+  另有升级包 `[UPD]...1.4.2...nsp` 未装入（游戏内显示 1.4.2 是 UltraCam 模组组的说法）。
+- 运行：在 `build/bin/` 下 `./eden.exe F:/prof/TOTK.nsp`；exe 旁的 `user/` 目录 = portable 数据
+  （密钥/存档/配置都在里面）。日志在 `user/log/eden_log.txt`（每次启动覆盖）。
+- 游戏启动后 ~40s 到主菜单（"继续游戏"默认高亮），按 A（见 §2）→ 存档列表 → 确认 → ~25s 读档进游戏。
+  **性能测试的标准场景**：卡卡利科村营地（当前存档位置），角色站立，43-45 FPS。
+- **勿用 eden-cli 跑 TOTK**：shader 编译段必崩（`CollectStorageBuffers` segfault，官方同期版同样），
+  profile 一律用 GUI 的 eden.exe。
+
+---
+
+## 2. 输入自动化（"模拟手柄点击"）
+
+### 2.1 原理
+两个前置条件，都已配置好（配置在 `build/bin/user/config/qt-config.ini`）：
+1. `keyboard_enabled=true`（同时把 `keyboard_enabled\default=true` 改成 `=false`，见 §9 配置坑）
+2. player_0 的按键改绑键盘：`player_0_button_a="engine:keyboard,code:88"`（X 键=Switch A）、
+   `button_b=code:90`（Z）、`button_plus=code:78`（N）。**原手柄配置备份在
+   `qt-config.ini.bak-controller`，想还原手柄操作就把它拷回去。**
+
+注入机制（`F:\prof\focus_test.ps1` / `auto_play.ps1` 内的 C# `Win32` 类）：
+1. `Process.GetProcessesByName("eden")` 拿 `MainWindowHandle`
+2. 抢焦点：`ShowWindow(SW_RESTORE)` + `AttachThreadInput` + `SetForegroundWindow`，
+   失败则先发一个**单独的 Left Alt（扫描码 0x38）**再重试（"Alt-trick"，让系统认为我们有输入权）
+3. 焦点确认 `GetForegroundWindow()==hwnd` 后，`SendInput` 发**扫描码**（不是虚拟键码！SDL 认扫描码）：
+   X=0x2D。`KEYEVENTF_SCANCODE` 标志，INPUT 结构体大小必须传 40（x64）
+
+### 2.2 脚本用法
+| 脚本 | 作用 | 用法 |
+|---|---|---|
+| `focus_test.ps1` | 单发一次 A 键（先抢焦点） | `powershell -NoProfile -ExecutionPolicy Bypass -File F:/prof/focus_test.ps1`，输出 `focus_ok=True/False` |
+| `auto_play.ps1` | 全自动进游戏：等 eden 窗口（≤60s）→ 睡 110s（等启动到主菜单，时间是为配合 nsys/wpr 启动定的）→ 每 12s 按 A×5（覆盖 菜单→存档列表→确认→读档→误按无害）→ 结果写 `auto_play.log` | 由 `master_run.ps1` 自动拉起；单独用也行。**调时序就改里面的 `Start-Sleep -Seconds 110` 和循环** |
+| `cleanup.cmd` | 提权强杀 eden.exe / nsys.exe / LosslessScaling.exe | `powershell -NoProfile -Command "Start-Process -Verb RunAs -WindowStyle Minimized -FilePath 'F:\prof\cleanup.cmd'"` |
+
+实测流程（已验证可复现）：启动 eden → `sleep 45` → focus_test ×3（间隔 8s）→ `sleep 26` → 在游戏内。
+
+### 2.3 血泪坑（务必读）
+- **Windows 前台锁**：用户正在打字时，后台进程**抢不赢**前台（SetForegroundWindow 被拒），
+  按键会打进用户的前台窗口（曾把 X 打进用户的 byobu 终端和记事本+输入法）。采集期间必须
+  **用户完全停手**。Alt-trick 在用户活跃时也会失败。
+- **提权不匹配**：UIPI 规则——低权限进程的 SendInput 无法送达高权限窗口；`computer-use` 截图/
+  按键也无法作用于提权进程。因此**游戏用普通权限跑**（直接 bash 启动），auto_play 也普通权限即可。
+  如果游戏是被提权的 nsys 拉起来的，auto_play 也必须提权，且截图会被 UIPI 挡。
+- **焦点 ≠ 焦点**：发键前必须验证 `GetForegroundWindow()==游戏hwnd`。日志里 fg 标题显示单字符
+  'E'/'F' 是 `GetWindowTextW` 的 StringBuilder 编组 bug（只取到 1 个字符），'E'=Eden 窗口、
+  'F'=编辑器窗口路径开头，仅影响日志观感不影响功能。
+- **输入法**：目标窗口开着中文 IME 时按键会被当拼音吃掉（曾全部变成"x"）。跑自动化前关输入法
+  或确保焦点在游戏。
+- MSYS/Git Bash 坑：`/参数` 会被路径转换（`MSYS_NO_PATHCONV=1` 或 `MSYS2_ARG_CONV_EXCL="*"`）；
+  反斜杠路径经过工具层会被吃一层（用正斜杠或 python 改文件）；`cmd //c` 之类双斜杠写法在
+  ARG_CONV_EXCL 下失效。
+
+---
+
+## 3. Profiling 管线（主力：wpr + ETW MCP）
+
+### 3.1 为什么是这条管线
+- eden 代码**没有** Tracy/microprofile 内建插桩 → 只能采样式。
+- nsys 路线（Nsight Systems）被放弃：它要提权启动游戏才给 WDDM/CPU 采样数据 → 游戏变提权进程
+  → 输入自动化失效 + computer-use 被 UIPI 挡 + 报告生成 10 分钟且怕误关窗口。
+  如果将来要用：`nsys profile -t wddm -d 300 -o F:/prof/xxx ./eden.exe F:/prof/TOTK.nsp`（必须提权
+  运行 nsys、必须 ASCII 路径），交互火焰图/时间轴看 `nsys-ui`。备选方案：研究 `nsys-ui` 的
+  GUI attach（先普通权限起游戏再附加），能解决提权矛盾。
+- **wpr（Windows 内置）无此约束**：系统级 ETW 采集，游戏随便什么权限，还能被 ETW MCP 直接符号级分析。
+
+### 3.2 采集步骤（已脚本化）
+```bash
+# 0) 游戏普通权限启动 + auto_play 进游戏（见 §2.2）
+# 1) 一体化采集脚本（启动→采 100s→落盘，必须同一提权进程！）
+powershell.exe -NoProfile -Command "Start-Process -Verb RunAs -WindowStyle Minimized -FilePath 'F:\prof\wpr_run.cmd'"
+#    wpr_run.cmd 内容 = wpr -start CPU -start GPU -filemode → timeout 100 → wpr -stop F:\prof\totk_cpugpu.etl
+# 2) 轮询 F:\prof\wpr_run.log 出现 WPR_DONE 即完成（25s 小样本用 wpr_run2.cmd → totk_cpu25.etl）
+```
+- **坑 1**：`wpr -start` 和 `wpr -stop` 分在两个脚本/两次调用会丢采集会话（实测踩坑）——必须一体化。
+- **坑 2**：`wpr -start` 需要管理员（提权方式见上）；`wpr -profiles` 可列出全部档位（CPU/GPU/DiskIO/...）。
+- **坑 3**：采集时确保 Lossless Scaling 之类后台工具没在跑（会污染数据）。
+- 采集大小参考：100s CPU+GPU ≈ 4.6GB；25s CPU-only ≈ 1.1GB。
+
+### 3.3 分析：ETW MCP（agent 会话内可直接调用）
+```
+mcp__etw__save_symbol_configuration(symCachePath="D:\\SymCache",
+    symbolPath="srv*D:\\SymServer*https://msdl.microsoft.com/download/symbols")   # 已配置过
+mcp__etw__process_trace(filePath="F:\\prof\\totk_cpugpu.etl",
+    categoryNames=["Sampled CPU Usage Data","CPU Scheduling Data","Ready Thread Data","Processes Data"])
+mcp__etw__list_traces()      # → traceId
+mcp__etw__start_new_query(traceId=..., category="Sampled CPU Usage Data",
+    targetCollection="Samples", logicalOperator="And",
+    conditions=[{"property":"Process.ImageName","operator":"Equal","value":"eden.exe"}],
+    groupings=[{"property":"Thread.Name"},{"property":"Thread.Id"}],      # 嵌套分组
+    aggregations=[{"name":"cpu_time","property":"Duration","type":"Sum"},
+                  {"name":"samples","property":"Duration","type":"Count"}])
+mcp__etw__perform_query(queryId=...)      # 全量查询要 allowQueryingAllData=true
+```
+**ETW MCP 的关键行为与坑**：
+- 单次 MCP 调用 **30s 超时**，但 `process_trace` / 大查询**在后台继续跑**！超时后用
+  `list_traces` 确认处理完成，再重新 `perform_query`（queryId 仍在，重发即重查）。
+- `FunctionName` 全量分组在大 trace 上必超时。**套路：先按 `ModuleName` 分组（快），
+  再加 `ModuleName=="eden.exe"` / `Thread.Id==...` 过滤后按 `FunctionName` 分组。**
+- Schema：`Samples` 集合，字段含 `Process.ImageName / Thread.Name / Thread.Id / FunctionName /
+  ModuleName / CallStack / Duration / Timestamp`；`Duration` 求和即 CPU 时间（采样粒度 ~1ms/样本）。
+- 注意：**MCP 重启后 trace 列表会清空**（需重新 process_trace，符号缓存 D:\SymCache 仍在所以第二次快）。
+- 可查询类别里**没有 GPU/DxgKrnl**——GPU 侧只能靠 nvidia-smi 轮询（§4）或 nsys。
+
+### 3.4 辅助测量
+- **GPU 设备利用率**：`nvidia-smi --query-gpu=utilization.gpu,utilization.memory,clocks.sm --format=csv,noheader,nounits -l 2`（轮询写入文件再 awk 求均值；GPU-bound 判定的金标准）。
+- **FPS 读数**：eden 叠加层（右下角 `Game: NN FPS / Frame: NN.NN ms / Scale: Nx`），用
+  computer-use 全屏截图读取（`mcp__computer-use__screenshot`，对提权进程的 app 级截图会被 UIPI 挡，
+  全屏截图不受影响）。
+
+---
+
+## 4. 火焰图怎么看
+
+### PerfView（推荐，已下载 `G:\Tools\perfview\PerfView.exe`，单文件免安装）
+1. `PerfView.exe` → **File → Open** → 选 `F:\prof\totk_cpugpu.etl`
+2. 展开后双击 **CPU Sampling (Precise)**（打开 stack 视图；首次可能弹符号窗口，eden 的 PDB 在
+   exe 旁边会自动命中；系统 DLL 符号可选 Symbol Server）
+3. 顶部 Filter 框输 `eden.exe` 只看模拟器进程
+4. 菜单/右键选 **Flame Graph**：矩形宽度 = 该函数（含子调用）的采样占比，高度 = 调用栈深度，
+   顶层宽块 = 热点函数。宽而矮的"平顶"= 该函数自身耗时间（self time），是要优化的点；
+   宽而高的"塔"= 调用链入口（顺着往下看是哪个子层吃掉的）
+5. 想要经典 SVG：复制 collapsed 栈（PerfView 可导出）→ brendangregg/FlameGraph 的
+   `flamegraph.pl collapsed.txt > flame.svg`（需要 Perl；也可以让 agent 直接生成 HTML）
+
+### 注意
+- `F:\prof\totk_profile_report.html` 里的横向条形图是**函数自时间排行**（无调用关系），火焰图才是
+  带调用链的完整视图。两者结合看：报告找"谁最热"，火焰图回答"它被谁调用、为什么被调"。
+- 采样是**栈顶自时间**归因；`/OPT:ICF` 会折叠相同函数体，符号偶有合并噪声。
+
+---
+
+## 5. 已完成的实验与数据
+
+### 实验 1：基线画像（99s 卡卡利科村，1x 分辨率，43→45 FPS）
+- eden.exe 总占用 ≈5.2 核（514 CPU·s / 99s）。
+- **四个线程打满**：CPUCore_0/1/2（TOTK 恰好用 3 个 Switch 核）各 ~100s，GPU 命令线程 105.9s；
+  VulkanWorker 52.9s（50%，有余量）；其余线程可忽略。
+- 模拟核组成：86% JIT 后游戏代码（匿名内存）、6.6% 内核、5.1% eden（HLE 服务）→ 是真工作量，非自旋。
+- GPU 命令线程组成：67% eden 自身代码、17% 内核、7% CRT、**显卡驱动 <1%**。
+- eden 模块内函数热点 Top（自时间，总 70.7s）：
+  `DmaPusher::ProcessCommands` 4.94s · `Maxwell3D::ProcessDirtyRegisters` 4.23s ·
+  `DmaPusher::CallMethod` 3.76s · `PushImageDescriptors` 2.01s ·
+  `BufferCache::BindHostGraphicsUniformBuffer` 1.97s · `MemoryManager::GpuToCpuAddress` 1.55s ·
+  `BufferCache::TouchBuffer` 1.48s · TextureCache LRU `Touch` 1.27s ·
+  `GraphicsPipeline::ConfigureImpl<VertexFragment>` 1.23s · `WordManager::IterateWords` 1.12s ·
+  `BufferCache::FindBuffer` 0.97s · `RefreshContents` 0.90s · `BindHostVertexBuffers` 0.90s ·
+  `Buffer::MarkUsage` 0.80s · `ConsumeSinkImpl` 0.74s · `GraphicsPipelineCacheKey::operator==` 0.67s …
+
+### 实验 2：设备 GPU 排除法（对照实验）
+| 条件 | GPU 设备利用率 | FPS |
+|---|---|---|
+| 1x 分辨率 | **37%**（29 样本） | 43 |
+| 0.25x 分辨率（像素负载↓4~16 倍） | 25% | 45（+4.7%） |
+结论：绘制负载对帧率几乎无影响 → **设备 GPU 不是瓶颈，帧率完全由 CPU 侧流水线决定**。
+（分辨率配置已还原默认；`resolution_setup` 的值 0=0.5x/2=1x，改值必须同时把
+`resolution_setup\default=true` 改成 `=false` 才生效。）
+
+### 排除项 / 已知死路（别再浪费时间）
+- master 分支构建物跑 TOTK 卡 launching（VS2026/14.51 时代疑似误编译，未定论）；
+  master+VS2022 因 CPM 静态 Qt 的 STL 符号链接失败 → **master 只当参考，实验都在 v0.2.1**。
+- eden-cli 跑 TOTK 必崩（官方同期版同样），profile 用 GUI eden.exe。
+- PGO 在分析阶段不开。
+- **fastmem miss 排查**（09-08 已排除）：缺页路径仅占模拟核 0.07%，fastmem 工作正常（§6.3）。
+- **用 FPS 评估 <4% 的微优化**：噪声 ±1.5 FPS 掩盖一切，必须用 wpr+ETW 函数级时间（§6.2）。
+- **砍分辨率/调 GPU 精度找帧率**：设备 GPU 利用率 37% 且 0.25x 只 +2 FPS（实验 2），死路。
+
+---
+
+## 6. 初步结论与优化重点建议（优先级序）
+
+**判定：CPU 侧双重瓶颈。3 个模拟核与 GPU 命令线程同时饱和；设备 GPU 利用率 37% 有大余量。**
+
+### 6.1 优化实施记录（2026-09-08 起，GPU 命令线程第一优先）
+
+**FPS 基准管线（替代截图读数）**：eden 内建 `record_frame_times`（qt-config.ini `[Debugging]`
+`record_frame_times=true`）→ 游戏退出时 `~PerfStats()` 把**每帧帧时间(ms)逐行**写到
+`build/bin/user/log/<日期-时刻>_<titleid>.csv`（容量 216000 帧）。配合 `confirmStop=2`
+（Ask_Never，`\default=false`）实现 `taskkill /IM eden.exe`（**不带 /F**，发 WM_CLOSE）优雅退出
+→ CSV 落盘。**强杀（/F）会丢 CSV。**
+一键基准：`python F:/prof/bench_run.py LABEL [--measure 90]`（杀残留→清旧 CSV→启动→自动 A 键
+进游戏→测量→优雅关闭→解析最后 90s 帧时间→追加到 `F:\prof\bench_results.csv`）。
+基线（2026-09-08，卡卡利科村，commit 3ea74e6b0e）：**43.21 / 44.65 FPS（均值 43.9）**，
+中位帧时 24.99ms 极稳定，fps_mean 与 ms_median 是主指标。跑基准时用户不能碰键盘（前台锁）。
+
+**优化项实测结果（2026-09-08/09 夜，均已提交 local-profiling @ 7f1f534cd0）**：
+| # | 改动 | 靶点热点（基线→实测） | 结论 |
+|---|---|---|---|
+| P0 | maxwell_3d `ProcessDirtyRegisters` 冗余写过滤（值没变直接 return） | 4.23s → **1.66s**（-61%；ConsumeSink+dirty 合计 4.97→2.88s） | ✅ 生效 |
+| P1 | LRU touch 帧内去重（BufferBase/ImageBase 加 `last_touch_tick`） | TouchBuffer 1.48→**0.55s**；纹理 Touch 1.27→**0.30s** | ✅ 生效 |
+| P3a | uniform buffer 对齐值构造期缓存 | 消除每次虚拟调用 | ✅ 小收益 |
+| P2 | 管线键 transition 哈希预比较（懒计算：仅自键 miss 时算 CityHash） | operator== 归因消失（memcmp_avx2 吸收），量级小 | ✅ 无回退 |
+| P4 | SSBO/TBO 解析结果复用（writer 保留 buffer_id + Update 守卫 + DeleteBuffer 补清 texture_buffers） | FindBuffer 0.97→0.87s（-10%：SSBO 描述符本身常变，剩余主要是 UpdateVertexBuffer） | ⚠️ 收益小于预期但无回退 |
+| P5/P8 | MarkUsage tick / GpuToCpuAddress 页表缓存 | 未做（收益 ≤0.8% / 需先看调用量） | 暂缓 |
+
+**GPU 命令线程总 CPU：105.9s → 102.4s（-3.3%），渲染正确性截图验证通过。**
+
+### 6.2 关键实验结论：为什么 GPU 线程省了 3.5% 而 FPS 不动
+
+- FPS 基准（同场景 ×2）：基线 43.21/44.65，优化版 42.10/43.51——**分布在噪声内，无提升**。
+- 但**每次运行中位帧时都精确锁在 24.99ms**（≈40.0 FPS）→ 帧时长被量化/节流，均值差异只来自快帧占比。
+- 优化版 wpr（100s）：**4 核全部打满**——CPUCore_0/1/2 = 102.3/111.8/101.2s，GPU 线程 102.4s，
+  VulkanWorker 52.4s。帧时长 = 流水线最慢一级；GPU 线程单点 -3.5% 改变不了 max。
+- **下一个真正的 FPS 杠杆在 3 个 JIT 模拟核**（86% 是游戏代码）：查 fastmem 是否生效
+  （ntoskrnl 页保护开销 6.6% 是否为 fastmem miss 的页错误处理）、CPU 精度 Unsafe 档 A/B、
+  或做更大的 GPU 线程结构性削减（DmaPusher::ProcessCommands+CallMethod 合计仍有 8.6s，
+  描述符 payload 每 draw 全量重放）——但后者要动核心数据流，风险高。
+- FPS 微基准注意事项：bench_run.py 早期版本会清掉历史 TOTK CSV（已改掉）；
+  游戏内时钟会漂移（1 real min = 1 game hr），A/B 尽量背靠背交错跑。
+
+### 6.3 第二轮实验（2026-09-08 深夜）：fastmem 排查 + CPU 精度 A/B
+
+**fastmem 生效性排查（用 09-08 优化版 trace，CPUCore_1 = 111.8s）**：
+- 模块构成：85.7% JIT 游戏代码（匿名内存）/ 6.5% ntoskrnl / 5.6% eden 自身。
+- ntoskrnl 7.25s 函数明细：**缺页机制全家（MiUserFault/KiPageFault/MiResolveProtoPteFault 等）
+  合计仅 ~0.08s = 该核 0.07% → fastmem 工作正常，几乎无 miss，无可修**。
+- "6.6% 内核开销"的真实构成：~3.3s 栈展开/栈回溯族（RtlpUnwindPrologue/RtlpLookupFunctionEntry
+  **ForStackWalks**/RtlpxVirtualUnwind）+ Etwp* 0.35s——**大半是 ETW 采集器自身开销**（采样抓栈），
+  剩 ~3s 是 5.2 核饱和负载的正常调度/IPI。以后解读 kernel 占比时记住这 ~3-4% 是测量税+调度税。
+- **结论：JIT 侧没有低垂果实；Unsafe 精度档是该侧唯一现实杠杆。**勿再查 fastmem。
+
+**CPU 精度 Unsafe A/B（同一构建 7f1f534cd0，仅改 `cpu_accuracy` 0=Auto → 2=Unsafe）**：
+| 配置 | fps（×2 轮） | p99 帧时 |
+|---|---|---|
+| Auto（=Accurate） | 42.10 / 43.51 | 33.40 / 33.34 ms |
+| **Unsafe** | **44.80 / 44.81** | **25.19 / 25.42 ms** |
+
+**+2.0 FPS（+4.7%）且 33ms 卡顿尖刺完全消失**，两轮一致性极佳。机制：Unsafe 启用
+unsafe IR 优化（UnfuseFMA/ReducedErrorFP/InaccurateNaN/IgnoreGlobalMonitor）且
+`fastmem_address_space_bits` 39→64（免每访存边界检查）。**当前 qt-config 已留在 Unsafe**；
+要还原：`cpu_accuracy\default=false` + `cpu_accuracy=0`（GUI：模拟→CPU→精度）。
+注意 Unsafe 对个别游戏可能有精度问题，TOTK 实测画面正常（帧数/帧时分布正常，未逐帧目检）。
+
+**基准历史（完整数据在 `bench_results.csv`，原始逐帧 CSV 在 `build/bin/user/log/`）**：
+| 标签 | 构建 | 精度 | fps | p99 |
+|---|---|---|---|---|
+| baseline-1/2 | 3ea74e6b0e | Auto | 43.21 / 44.65 | 33.35 / 25.37 ms |
+| opt-AB-1/2 | 3ea74e6b0e* | Auto | 42.10 / 43.51 | 33.40 / 33.34 ms |
+| unsafe-1/2 | 7f1f534cd0 | **Unsafe** | **44.80 / 44.81** | 25.19 / 25.42 ms |
+
+*opt-AB 的 exe 是优化版构建但当时未提交（commit 列写的是旧值）；7f1f534cd0 之后构建与提交一致。
+教训：一次无效运行（按键注入被前台锁吃掉，游戏停在 60FPS 菜单）产出 59.81 的假结果——
+bench_run 已有 `fps>52 → SUSPICIOUS` 提示；看到它或 taps 的 focus_ok=False 就重跑，别采信。
+中位帧时恒为 24.99ms（40FPS 量化）是场景特征，横向对比用 fps_mean / p99。
+
+
+### 6.4 后续方向（给接手 agent，按 性价比/风险 排序）
+
+上一轮（§6.1-6.3）已把两侧的低垂果实摘完。剩余可做的：
+
+1. **验证 Unsafe 的长期稳定性**（低成本）：换个场景/时段跑几轮 bench + 目检画面，
+   确认无精度性花屏/物理异常。已开 Unsafe 的 44.8 FPS 是当前"新基线"。
+2. **VulkanWorker 卸载**（中风险，收益不确定）：VulkanWorker 仅 ~52% 利用率，GPU 线程 100%。
+   研究 `vk_scheduler` 的 worker 队列，把描述符更新/staging 上传等 CPU 侧工作从 GPU 线程
+   挪到 worker（上游 master 的多线程重构 #4254 做了类似事，可读它的 diff 找思路，但勿直接搬）。
+3. **GPU 线程结构性削减**（高风险）：
+   - `DmaPusher::ProcessCommands + CallMethod` 合计仍有 8.6s——命令循环本身，
+     需要重写批处理（method_sink 机制已是 eden 自有优化，再往下是硬骨头）。
+   - 描述符 payload 每 draw 全量重放（PushImageDescriptors 1.93s + ConfigureDraw 的模板更新）：
+     可做"payload 未变则跳过"的整块比较（memcmp 上一次 payload），但涉及正确性边界。
+4. **小尾巴**（≤1% 收益，闲时做）：P5 MarkUsage 帧内去重；GpuToCpuAddress 1.43s
+   （本质是大页表 cache miss，加 1-entry 缓存收益存疑）。
+5. **换基线**（等待型）：master 修复 TOTK 启动问题 + VS2022 链接问题后，把实验迁到新基线
+   （上游已有 bindless descriptors #4251、多线程重构 #4254 等大改，届时本文件的热点表需重测）。
+
+**验证闭环（每次改动）**：改代码 → `cmake --build build` → `python F:/prof/bench_run.py LABEL`
+×2 → 若 FPS 无感（<4% 改动）必须用 wpr+ETW 微 profile 判定（skill `eden-bench` 有完整步骤；
+进游戏后等 ≥30s 稳定再触发采集）。FPS 噪声 ±1.5，不要拿单轮下结论。
+
+---
+
+## 7. F:\prof 文件与脚本清单
+
+| 文件 | 说明 |
+|---|---|
+| `TOTK.nsp` | 游戏文件的 ASCII 路径硬链接（指向 F:\Switch\Games\...），给工具链用 |
+| `focus_test.ps1` | 单发 A 键注入（含抢焦点），用于交互测试/手动推进菜单 |
+| `auto_play.ps1` | 全自动进游戏（等窗口→110s→A×5 每 12s），日志 `auto_play.log` |
+| `master_run.ps1` | 编排器：提权拉起 auto_play + cap_only（均隐藏窗口）——nsys 时代遗留 |
+| `cap_only.ps1` | nsys 采集脚本（-t wddm -d 300）——nsys 路线遗留，当前不用 |
+| `wpr_run.cmd` | **主力采集**：提权一体化 CPU+GPU 100s → `totk_cpugpu.etl` |
+| `wpr_run2.cmd` | 快查版：CPU-only 25s → `totk_cpu25.etl` |
+| `wpr_start.cmd` / `wpr_stop.cmd` | 分离式启停（有丢会话坑，仅参考） |
+| `cleanup.cmd` | 提权强杀 eden/nsys/LosslessScaling |
+| `bench_run.py` | **FPS 基准一键脚本**：`python bench_run.py LABEL [--measure 90]`（自动进游戏→测 90s→优雅关闭→解析帧时间 CSV）；`--hold N` 为保持模式（供 wpr 采集用）；结果追加 `bench_results.csv` |
+| `bench_results.csv` | 历次基准结果（时间/标签/commit/帧数/fps/1%low/中位/p95/p99） |
+| `totk_cpugpu_0907_baseline.etl` | 09-07 基线 trace（v0.2.1 原版，本文件 §5 数据源） |
+| `totk_cpugpu.etl` | 09-08 优化版 trace（7f1f534cd0，§6.1 数据源） |
+| `totk_cpu25.etl` | 25s CPU-only trace（快速查询用） |
+| `totk_profile_report.html` | **静态分析报告**（结论/线程表/热点条形图） |
+| `gpu_util_1x.csv` / `gpu_util_05x.csv` | 实验 2 的 nvidia-smi 原始数据 |
+| `auto_play.log` / `wpr_run*.log` / `nsys_p1*.log` | 各次运行日志 |
+| `build/bin/user/log/*_0100F2C0115B6000.csv` | 每次运行的**逐帧帧时间原始数据**（record_frame_times，退出时落盘；文件名=日期+titleid） |
+
+提权启动模板（UAC 静默，无弹窗）：
+```bash
+powershell.exe -NoProfile -Command "Start-Process -Verb RunAs -WindowStyle Minimized -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','F:\prof\xxx.ps1'"
+```
+
+---
+
+## 8. 必须知道的本地补丁与配置现状
+
+- **`fsp_srv.cpp` 补丁**（v0.2.1 已提交 3ea74e6，2 处）：`OpenSaveDataFileSystem` 遇
+  Temporary/ProperSystem/SafeMode 空间原本 `ASSERT(false)`；强杀进程残留的 Temporary 存档会让
+  下次启动 ~17s 必崩死循环。已改为映射 NandUser/NandSystem。**只要还会强杀游戏进程，此补丁必须保留。**
+- **键盘改绑现状**：`qt-config.ini` 中 `keyboard_enabled=true`、player_0 A/B/plus 绑键盘
+  （code 88/90/78）；手柄原始配置备份 `qt-config.ini.bak-controller`，用户要亲手玩时还原。
+- **性能相关配置快照（2026-09-09，做对比实验前先核对）**：`cpu_accuracy=2`（**Unsafe**，
+  `\default=false`，A/B 结论见 §6.3）；`record_frame_times=true`（`[Debugging]` 段）；
+  `confirmStop=2`（Ask_Never，配合 taskkill 优雅退出落 CSV）；`resolution_setup` 已还原默认。
+- **符号缓存**：`D:\SymCache`（eden PDB 在 exe 旁自动命中；系统 DLL 走 MS 服务器，已拉过一次）。
+- **磁盘**：F:\prof 现 ~6GB（两个 etl）；分析产生的 sqlite 导出可能很大（曾生成 17.5GB，已删），
+  导出前想清楚。
+
+## 9. 配置文件编辑的坑（qt-config.ini）
+
+- `key\default=true` 表示"用编译默认值"，此时 `key=...` 行被忽略；改配置必须同时改
+  `key\default=false` + `key=新值` 两行。
+- 文件是 LF、UTF-8。反斜杠（`\default`）经 shell/工具层会被吃，**用 python 按行改最稳**：
+  ```python
+  L = open('qt-config.ini', encoding='utf-8').read().split('\n')
+  L[行号-1] = 'keyboard_enabled\\default=false'   # python 源里 \\d 会得到 \d
+  open('qt-config.ini','w',encoding='utf-8',newline='\n').write('\n'.join(L))
+  ```
+- 游戏正常退出会重写此文件；**强杀（taskkill /F）不会**。改配置前先杀游戏。
+
+## 10. 其他背景（少走弯路）
+
+- 上游（git.eden-emu.dev/eden-emu/eden）master 比我们的 tag 新很多；master 本地仓库已 rebase
+  到 origin/master 且本地领先若干纯文档/技能提交（AGENTS.md + .agents/skills/eden-bench）——
+  **永远不要 push**。
+- 键盘注入不能作用于提权进程（UIPI）；computer-use 的 app 级截图/按键同样被 UIPI 挡（全屏截图可以）。
+- WPR 有 `GPU` 档但 **ETW MCP 的可查询类别里没有 GPU**——GPU 侧数据用 nvidia-smi 轮询或 nsys。
+- 采集期间系统里的 ZCode 会话自身占 ~0.8 核（对照数据时心里有数）。
