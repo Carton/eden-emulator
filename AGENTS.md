@@ -218,6 +218,15 @@ MSYS_NO_PATHCONV=1 "$NSYS" profile -t wddm,vulkan -d 90 --force-overwrite=true \
 - JIT 核 85.7% 纯游戏代码 → 无低垂果实，Unsafe 即该侧现实杠杆。skill 已迁至
   `.agents/skills/eden-bench`（随仓库跟踪维护）。
 
+### JIT 模拟核攻坚轮（2026-09-09，详见 PROFILE_PROGRESS.md §11）
+- 计数器实测：TOTK **6300 新块/秒持续编译**（主菜单静置也有 3600/秒），99% 不同 PC、
+  均匀铺满 ~48MB 代码集、无热点 → 热块分级类优化无效；512MB 码缓存 ~25-40 分钟打穿
+  引发全清风暴（已改 2GiB，c2d9148f7f，含常驻 JIT 计数器，关闭时打 eden_log）。
+- LTO 全量构建 A/B：**中性**（44.82 vs 44.80，build-lto/ 目录保留）；PGO 跳过。
+- 领域调研：dynarmic 上游已死（azahar fork 唯一活跃）；FEX 的 BL→host call、RA 内联、
+  共享 JIT 缓冲是可借鉴大方向；TSO/x87/LTO/PGO 不适用或已证无效。剩余路线见 §11.6
+  （磁盘码缓存性价比最高）。
+
 ### 本地补丁与工具（v0.2.1 worktree，勿提交上游）
 
 - `fsp_srv.cpp` 两处 `OpenSaveDataFileSystem` 的 `ASSERT(false)`（Temporary/ProperSystem/SafeMode

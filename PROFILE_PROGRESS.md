@@ -10,14 +10,18 @@
 ## 0. 一句话现状（TL;DR，2026-09-09 更新）
 
 - 测试基线：**`F:\devel\opensource\eden-v0.2.1`**，分支 `local-profiling` =
-  v0.2.1(58c1e20) + fsp_srv 崩溃修复(3ea74e6) + **第一轮 GPU 线程微优化(7f1f534cd0)**。
+  v0.2.1(58c1e20) + fsp_srv 崩溃修复(3ea74e6) + GPU 线程微优化(7f1f534cd0) +
+  **JIT 计数器+2GiB 码缓存(c2d9148f7f，§11)**。
 - 瓶颈画像（已两轮验证）：**CPU 侧四核全饱和**——3 个 JIT 模拟核（85.7% 纯游戏代码）+
   GPU 命令线程；设备 GPU 利用率 37% 有余量。帧时长 = 流水线最慢一级。
 - 已完成：GPU 线程微优化五项（CPU 时间 105.9→102.4s，-3.3%）；fastmem 排查（无 miss，勿再查）；
   **CPU 精度切到 Unsafe（+2.0 FPS 且 33ms 尖刺全消，qt-config 已留在 Unsafe！）**。
   当前实际帧率：**44.8 FPS**（原始基线 43.9）。后续任何 FPS 对比都要基于 Unsafe 档跑，
   或先切回 `cpu_accuracy=0` 再比（见 §6.3）。
-- 结论性判断：两侧低垂果实已摘完。剩余方向见 §6.4（结构性改动 / VulkanWorker 卸载 / 等 master 修复）。
+- 结论性判断：两侧低垂果实已摘完；JIT 攻坚轮（§11）已完成量化+调研+实验，
+  关键发现：**TOTK 以 ~6300 新块/秒持续编译（连主菜单静置也有 3600/秒），99% 不同 PC、
+  均匀铺满 ~48MB 代码工作集、无热点**——这是该游戏 JIT 重的结构性原因；
+  长会话 512MB 码缓存会被打穿引发全清风暴（已改 2GiB）。剩余方向见 §6.4 与 §11.6。
 - 速查 skill：`.agents/skills/eden-bench`（master 仓库内，构建/基准/微 profile 全流程）。
   完整分析报告：[`F:\prof\totk_profile_report.html`](F:/prof/totk_profile_report.html)。
 
@@ -397,3 +401,97 @@ powershell.exe -NoProfile -Command "Start-Process -Verb RunAs -WindowStyle Minim
 - 键盘注入不能作用于提权进程（UIPI）；computer-use 的 app 级截图/按键同样被 UIPI 挡（全屏截图可以）。
 - WPR 有 `GPU` 档但 **ETW MCP 的可查询类别里没有 GPU**——GPU 侧数据用 nvidia-smi 轮询或 nsys。
 - 采集期间系统里的 ZCode 会话自身占 ~0.8 核（对照数据时心里有数）。
+
+---
+
+## 11. JIT 模拟核攻坚轮（2026-09-09：量化 + 领域调研 + 实验）
+
+### 11.1 模拟核时间解剖（CPUCore_1，111.8s / 100s，优化版 trace）
+
+| 成分 | CPU 时间 | 占比 | 说明 |
+|---|---|---|---|
+| **JIT 发射代码**（匿名内存） | 95.85s | **85.7%** | 翻译后的游戏代码本体 |
+| ntoskrnl | 7.25s | 6.5% | ≈一半是 ETW 采集自身抓栈成本，其余为饱和负载调度/IPI |
+| **HLE 内核调度/SVC** | ~2.0s | ~1.8% | KPriorityQueue::GetFront 0.28s、KAddressArbiter、fiber 切换等 |
+| **内存回调+光栅化切换+锁竞争簇** | ~2.8s | ~2.5% | 见下 |
+| dynarmic FP 软浮点助手 | 0.53s | 0.5% | FPRSqrtEstimate/FPUnpack/NaNHandler 等 |
+| dynarmic 调度/上下文/块查找 | 0.47s | 0.4% | 分层调度工作良好，无优化空间 |
+| ntdll（SRW 锁竞争） | 1.36s | 1.2% | Contended 0.43s + Backoff 0.25s 等 |
+
+**锁竞争簇的机制**：RasterizerCachedMemory 页在页表里**故意置空指针**
+（`page_table.h:134`）→ CPU 每次访问 GPU 关注内存必走慢回调
+（`Memory::Impl::Read/Write` → `HandleRasterizerDownload/Write` → `GPU().OnCPURead/Write`
+→ 拿 texture/buffer 缓存大锁 → 与 GPU 线程互等）。ETW 可见：Read64 0.30s +
+HandleRasterizerDownload 0.37s + GetPointerFromDebugMemory 0.17s + `_Mtx_lock` 0.49s +
+ntdll SRW 族 1.0s。fastmem 本身零缺页（fastmem_faults=0），此前的"fastmem 干净"结论仍成立，
+但"GPU 关注内存慢路径"是模拟核侧最大的**可识别**非 JIT 开销（~2.5%）。
+
+### 11.2 JIT 活动计数器（新基础设施，已提交 c2d9148f7f 常驻）
+
+`src/dynarmic/.../backend/x64/jit_stats.h`：block_lookups / block_compiles /
+range_invalidations / full_clears / fastmem_faults，关闭时
+`LOG_INFO(Core_ARM, "dynarmic jit stats ...")` 打到 eden_log.txt。开销可忽略。
+
+### 11.3 TOTK 代码行为画像（计数器实测，199s 会话含启动+读档+90s 游戏）
+
+| 指标 | 数值 | 推论 |
+|---|---|---|
+| dispatch_lookups（四级调度全 miss） | 2.72M（13.7k/s） | 块链接/RSB/FastDispatch 之外仍有海量新入口 |
+| **block_compiles** | **1.26M（6.3k/s）** | 持续编译，非一次热身 |
+| distinct PC 占比 | **99%**（40 万编译 39.6 万不同 PC） | **不是重编译 churn**，是持续的新代码 |
+| 64KB 区域直方图 | 782 区域，top 仅 0.53%，**完全平坦** | 无热点，均匀铺满 ~48MB |
+| 采样点指令字节 | 函数序言/中段/尾混合（合法 ARM64） | 真代码，非数据误执行（日志无异常风暴） |
+| **主菜单静置 90s** | **697k 编译（3.6k/s），同样 99% distinct** | 与玩法无关的**后台系统性扫描** |
+| guest IC IVAU | 15,007 次，菜单局与游戏局**完全同数** | 全部发生在启动阶段；2023 年 yuzu 的 SMC 风暴已不复发 |
+| full_clears / fastmem_faults | 0 / 0 | 短会话无码缓存打穿、无缺页 |
+
+解读：TOTK（KingSystem 巨型模板化代码库）的后台子系统群持续触碰海量代码
+（每核 ~2400 新块/秒）。含义：①"热块分级/tier-up 优化"对该游戏**无效**（无稳定热集）；
+②每次冷执行都要付 翻译+发射+冷 I-cache/BTB 的税——这结构性解释了模拟核为什么 85.7% 都是
+JIT 代码时间；③按 ~150B/块估算，**512MiB 码缓存约 25-40 分钟打穿 → 全清 → 重编译风暴**
+（长会话掉帧的一个具体机制，用户报告的"玩久了变卡"吻合）。
+**处置：Windows x64 码缓存 512→2048MiB**（虚拟预留按需提交，无实际内存代价，c2d9148f7f）。
+
+### 11.4 本轮实验结果
+
+| 实验 | 结果 | 结论 |
+|---|---|---|
+| LTO（`build-lto/`，`-DENABLE_LTO=ON` 全量构建） | 44.82/44.78 vs 44.80 | **中性**（Δ<0.1%）；eden 自身代码不是限制因素；构建目录保留可复用 |
+| PGO | 未跑 | LTO 中性 + 25ms 帧时量化 → 预期同样中性，跳过 |
+| 块入口 32B 对齐 | 未做 | dynarmic 已 16B 对齐（xbyak align 默认），Zen3 边际收益存疑 |
+| JIT 计数器 | 已常驻 | 后续任何会话可免费观测 JIT 活动 |
+
+### 11.5 领域调研结论（ARM64→x64 重编译，2026-09 时点）
+
+- **dynarmic 上游已死**：MerryMage 2024-03 删除仓库（yuzu 下架潮），末版 6.7.0；
+  **azahar-emu/dynarmic 是唯一活跃 fork**（RA 去随机化、IR identity pass、SSSE3 向量 emit）。
+  eden master 的 fork（7.0.0）自带 #4303/#4328 修（jitState 重排/CPUID 静态化）——可 backport 但均为小收益。
+- **FEX-Emu 最可借鉴**（fex-emu.com 博客编号）：**guest BL→host call、RET→host ret**
+  （FEX-2508，用硬件返回预测器替代软件 RSB，Cyberpunk 单月 +39%）；**RA 内联进 SSA IR**
+  +发射期常量折叠（FEX-2506，消除寄存器搬移/溢出）；**跨线程共享 JIT 缓冲**（同客代码只编译
+  一次，-25% JIT 时间）；multiblock/始终探索条件落空（FEX-2503/2509）。
+- **box64**：FORWARD 前向跳块延续、延迟 flags 反向活跃度、ymm0 追踪。
+- **Rosetta 2**：AOT 优先 + 块化 NZCV liveness（FFRI Champollion 系列逆向）。
+- **Zen3（本机 5600）**：热块 16/32B 对齐（已有 16B）、op-cache 密度、cmp+jcc 相邻宏融合。
+- **不适用/勿做**：TSO/强内存序（方向反，ARM 弱序→x86 TSO 免屏障）、x87、
+  全面 branchless、AVX-512、热块 tier-up（本游戏无热集）、LTO/PGO（已证中性）。
+
+### 11.6 JIT 侧剩余路线图（按性价比/工程量）
+
+1. **跨会话磁盘代码缓存**（FEX FOZ / box64 DYNACACHE 式）：按 (PC, 代码 hash) 落盘复用
+   翻译块——直接消掉每个会话的 6.3k/s 编译+发射（~2%/核 + 发射带宽），SMC 安全性靠 hash
+   校验。中工程量，收益确定性较高。
+2. **guest BL→host call / RET→host ret**：dynarmic 后端手术（terminals + RSB 机制改造），
+   FEX 证明的大收益，高风险高回报。
+3. **3 核共享 JIT 块缓存**：3 个核跑同一游戏、各自编译同一批块（×3 浪费）——共享后编译量
+   /3、发射代码 I-cache 局部性更好；需动 dynarmic 每实例架构。
+4. **azahar fork backport**（identity pass 等）+ eden master #4303 jitState 重排——小收益闲时做。
+5. **RasterizerCached 慢路径**（§11.1 的 2.5%+锁竞争）：GPU 无 pending 工作时免锁快查。
+
+### 11.7 本轮产物
+
+- v0.2.1 worktree 提交 **c2d9148f7f**（计数器 + 2GiB 码缓存，bench 44.85 无回退）
+- `build-lto/` 完整 LTO 构建目录（与 `build/` 共享 user 目录 junction，bench 用
+  `EDEN_DIR=.../build-lto/bin` 切换）；配置命令见 §1.4 加 `-DENABLE_LTO=ON -B build-lto`
+- `bench_run.py` 新增 `--no-tap`（菜单静置对照）与 `EDEN_DIR` 环境变量
+- 诊断期临时补丁（PC 去重集/直方图/指令转储）已移除，只保留基础计数器
