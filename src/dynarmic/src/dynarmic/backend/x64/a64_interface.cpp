@@ -26,6 +26,7 @@
 #include "dynarmic/interface/A64/a64.h"
 #include "dynarmic/ir/basic_block.h"
 #include "dynarmic/ir/opt_passes.h"
+#include "dynarmic/backend/x64/jit_stats.h"
 
 namespace Dynarmic::A64 {
 
@@ -242,6 +243,7 @@ private:
     }
 
     CodePtr GetBlock(IR::LocationDescriptor descriptor) {
+        JitStats::block_lookups.fetch_add(1, std::memory_order_relaxed);
         if (auto block = emitter.GetBasicBlock(descriptor))
             return block->entrypoint;
 
@@ -260,8 +262,11 @@ private:
         ir_block.Reset(arch_descriptor);
         A64::Translate(ir_block, arch_descriptor, get_code, {conf.define_unpredictable_behaviour, conf.wall_clock_cntpct});
         Optimization::Optimize(ir_block, conf, polyfill_options);
+        JitStats::block_compiles.fetch_add(1, std::memory_order_relaxed);
         return emitter.Emit(ir_block).entrypoint;
     }
+
+
 
     void PerformRequestedCacheInvalidation(HaltReason hr) {
         if (Has(hr, HaltReason::CacheInvalidation)) {
@@ -275,9 +280,11 @@ private:
 
             jit_state.ResetRSB();
             if (invalidate_entire_cache) {
+                JitStats::full_clears.fetch_add(1, std::memory_order_relaxed);
                 block_of_code.ClearCache();
                 emitter.ClearCache();
             } else {
+                JitStats::range_invalidations.fetch_add(1, std::memory_order_relaxed);
                 emitter.InvalidateCacheRanges(invalid_cache_ranges);
             }
             invalid_cache_ranges.clear();

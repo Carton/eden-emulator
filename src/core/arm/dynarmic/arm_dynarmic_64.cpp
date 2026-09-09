@@ -4,7 +4,10 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <mutex>
 #include "common/settings.h"
+#include "common/logging.h"
+#include "dynarmic/backend/x64/jit_stats.h"
 #include "core/arm/dynarmic/arm_dynarmic.h"
 #include "core/arm/dynarmic/arm_dynarmic_64.h"
 #include "core/arm/dynarmic/dynarmic_exclusive_monitor.h"
@@ -255,7 +258,10 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
 #if defined(ARCHITECTURE_arm64) || defined(__sun__) || defined(__NetBSD__) || defined(__DragonFly__) || defined(__OpenBSD__)
     config.code_cache_size = std::uint32_t(128_MiB);
 #else
-    config.code_cache_size = std::uint32_t(512_MiB);
+    // Local profiling: TOTK sustains ~2.4k new blocks/s/core (uniform ~48MB code
+    // working set, see PROFILE_PROGRESS.md); 512 MiB fills in ~25-40 min of play and
+    // triggers a full-clear recompile storm. 2 GiB is reserve-only, committed on demand.
+    config.code_cache_size = std::uint32_t(2048_MiB);
 #endif
 
     // Allow memory fault handling to work
@@ -400,7 +406,18 @@ ArmDynarmic64::ArmDynarmic64(System& system, bool uses_wall_clock, Kernel::KProc
     MakeJit(&page_table_impl, page_table.GetAddressSpaceWidth());
 }
 
-ArmDynarmic64::~ArmDynarmic64() = default;
+ArmDynarmic64::~ArmDynarmic64() {
+    using namespace Dynarmic::Backend::X64;
+    static std::once_flag stats_logged;
+    std::call_once(stats_logged, [] {
+        LOG_INFO(Core_ARM,
+                 "dynarmic jit stats (process totals): dispatch_lookups={} block_compiles={} "
+                 "range_invalidations={} full_clears={} fastmem_faults={}",
+                 JitStats::block_lookups.load(), JitStats::block_compiles.load(),
+                 JitStats::range_invalidations.load(), JitStats::full_clears.load(),
+                 JitStats::fastmem_faults.load());
+    });
+}
 
 void ArmDynarmic64::SetTpidrroEl0(u64 value) {
     m_cb->m_tpidrro_el0 = value;
