@@ -119,9 +119,10 @@ std::shared_ptr<ILibraryAppletAccessor> CreateGuestApplet(Core::System& system,
         Firmware2000 = 20,
         Firmware2100 = 21,
         Firmware2200 = 22,
+        Firmware2300 = 23,
     };
 
-    auto process = CreateProcess(system, program_id, Firmware1400, Firmware2200);
+    auto process = CreateProcess(system, program_id, Firmware1400, Firmware2300);
     if (process) {
         const auto applet = std::make_shared<Applet>(system, std::move(process), false);
         applet->program_id = program_id;
