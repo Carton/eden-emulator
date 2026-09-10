@@ -456,6 +456,14 @@ HostLoc RegAlloc::SelectARegister(std::bitset<32> desired_locations) const noexc
 }
 
 std::optional<HostLoc> RegAlloc::ValueLocation(const IR::Inst* value) const noexcept {
+    const unsigned name = value->GetName();
+    if (name != 0 && name < kMaxTrackedNames) [[likely]] {
+        const u8 entry = name_to_hostloc[name];
+        if (entry != 0) {
+            return HostLoc(entry - 1);
+        }
+        return std::nullopt;
+    }
     for (size_t i = 0; i < hostloc_info.size(); i++)
         if (hostloc_info[i].ContainsValue(value)) {
             //for (size_t j = 0; j < hostloc_info.size(); ++j)
@@ -468,6 +476,7 @@ std::optional<HostLoc> RegAlloc::ValueLocation(const IR::Inst* value) const noex
 void RegAlloc::DefineValueImpl(BlockOfCode& code, IR::Inst* def_inst, HostLoc host_loc) noexcept {
     ASSERT(!ValueLocation(def_inst) && "def_inst has already been defined");
     LocInfo(host_loc).AddValue(host_loc, def_inst);
+    TrackValueLoc(def_inst, host_loc);
     ASSERT(*ValueLocation(def_inst) == host_loc);
 }
 
@@ -491,6 +500,7 @@ void RegAlloc::Move(BlockOfCode& code, HostLoc to, HostLoc from) noexcept {
     ASSERT(!LocInfo(from).IsEmpty() && "Mov eliminated");
     EmitMove(code, bit_width, to, from);
     LocInfo(to) = std::exchange(LocInfo(from), {});
+    RetrackLocation(to);
 }
 
 void RegAlloc::CopyToScratch(BlockOfCode& code, size_t bit_width, HostLoc to, HostLoc from) noexcept {
@@ -510,6 +520,8 @@ void RegAlloc::Exchange(BlockOfCode& code, HostLoc a, HostLoc b) noexcept {
     } else {
         EmitExchange(code, a, b);
         std::swap(LocInfo(a), LocInfo(b));
+        RetrackLocation(a);
+        RetrackLocation(b);
     }
 }
 
