@@ -25,6 +25,7 @@
 #include "dynarmic/backend/x64/a64_jitstate.h"
 #include "dynarmic/backend/x64/block_of_code.h"
 #include "dynarmic/backend/x64/devirtualize.h"
+#include "dynarmic/backend/x64/ir_cache.h"
 #include "dynarmic/backend/x64/jitstate_info.h"
 #include "dynarmic/common/atomic.h"
 #include "dynarmic/frontend/A64/translate/a64_translate.h"
@@ -276,20 +277,56 @@ private:
         block_of_code.EnsureMemoryCommitted(MINIMUM_REMAINING_CODESIZE);
 
         // JIT Compile
-        const auto get_code = [this](u64 vaddr) { return conf.callbacks->MemoryReadCode(vaddr); };
         // LocationDescriptor ctor() does important ops (like tflags) do not skip
         auto const arch_descriptor = A64::LocationDescriptor{descriptor};
-        ir_block.Reset(arch_descriptor);
-        A64::Translate(ir_block, arch_descriptor, get_code, {conf.define_unpredictable_behaviour, conf.wall_clock_cntpct});
-        Optimization::Optimize(ir_block, conf, polyfill_options);
-        JitStats::block_compiles.fetch_add(1, std::memory_order_relaxed);
-        if (BlockDumpEnabled()) [[unlikely]] {
-            const u64 start_pc = arch_descriptor.PC();
-            const u64 end_pc = A64::LocationDescriptor{ir_block.EndLocation()}.PC();
-            u64 h = 1469598103934665603ull;
-            for (u64 a = start_pc; a < end_pc; a += 4) {
-                h = (h ^ conf.callbacks->MemoryReadCode(a).value_or(0)) * 1099511628211ull;
+        const u64 start_pc = arch_descriptor.PC();
+        const auto dur = [](auto a, auto b) {
+            return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count();
+        };
+
+        // Content hash accumulates from the exact words fed to the translator,
+        // so a stored cache entry always describes the bytes that produced it.
+        u64 content_hash = 1469598103934665603ull;
+        const auto get_code_hashed = [this, &content_hash](u64 vaddr) {
+            const auto word = conf.callbacks->MemoryReadCode(vaddr);
+            content_hash = (content_hash ^ word.value_or(0)) * 1099511628211ull;
+            return word;
+        };
+
+        if (IRCache::Enabled()) {
+            const IRCache::EntryPtr cached = IRCache::Lookup(descriptor.Value());
+            if (cached && cached->start_pc == start_pc) {
+                u64 h = 1469598103934665603ull;
+                for (u64 a = start_pc; a < cached->end_pc; a += 4) {
+                    h = (h ^ conf.callbacks->MemoryReadCode(a).value_or(0)) * 1099511628211ull;
+                }
+                if (h == cached->content_hash) {
+                    ir_block.Reset(arch_descriptor);
+                    if (IRCache::Load(*cached, ir_block)) {
+                        JitStats::block_compiles.fetch_add(1, std::memory_order_relaxed);
+                        JitStats::ir_hits.fetch_add(1, std::memory_order_relaxed);
+                        const auto t3 = std::chrono::steady_clock::now();
+                        const auto hit_entrypoint = emitter.Emit(ir_block).entrypoint;
+                        const auto t4 = std::chrono::steady_clock::now();
+                        JitStats::emit_ns.fetch_add(dur(t3, t4), std::memory_order_relaxed);
+                        return hit_entrypoint;
+                    }
+                    // Malformed entry: fall through to a full compile.
+                } else {
+                    JitStats::ir_hash_mismatch.fetch_add(1, std::memory_order_relaxed);
+                }
             }
+        }
+
+        const auto t0 = std::chrono::steady_clock::now();
+        ir_block.Reset(arch_descriptor);
+        A64::Translate(ir_block, arch_descriptor, get_code_hashed, {conf.define_unpredictable_behaviour, conf.wall_clock_cntpct});
+        const auto t1 = std::chrono::steady_clock::now();
+        Optimization::Optimize(ir_block, conf, polyfill_options);
+        const auto t2 = std::chrono::steady_clock::now();
+        JitStats::block_compiles.fetch_add(1, std::memory_order_relaxed);
+        const u64 end_pc = A64::LocationDescriptor{ir_block.EndLocation()}.PC();
+        if (BlockDumpEnabled()) [[unlikely]] {
             std::scoped_lock lock{g_blockdump_mutex};
             if (!g_blockdump_file) {
                 g_blockdump_file = std::fopen("jit_blocks.csv", "w");
@@ -302,11 +339,21 @@ private:
                              (unsigned long long)std::hash<std::thread::id>{}(
                                  std::this_thread::get_id()),
                              (unsigned long long)start_pc, (unsigned long long)end_pc,
-                             (unsigned long long)h, (long long)now_ms,
+                             (unsigned long long)content_hash, (long long)now_ms,
                              (int)ir_block.GetTerminal().which());
             }
         }
-        return emitter.Emit(ir_block).entrypoint;
+        if (IRCache::Enabled()) {
+            IRCache::Store(descriptor.Value(), ir_block, start_pc, end_pc, content_hash);
+            JitStats::ir_stores.fetch_add(1, std::memory_order_relaxed);
+        }
+        const auto t3 = std::chrono::steady_clock::now();
+        const auto entry = emitter.Emit(ir_block).entrypoint;
+        const auto t4 = std::chrono::steady_clock::now();
+        JitStats::translate_ns.fetch_add(dur(t0, t1), std::memory_order_relaxed);
+        JitStats::optimize_ns.fetch_add(dur(t1, t2), std::memory_order_relaxed);
+        JitStats::emit_ns.fetch_add(dur(t3, t4), std::memory_order_relaxed);
+        return entry;
     }
 
 

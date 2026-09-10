@@ -417,6 +417,16 @@ ArmDynarmic64::~ArmDynarmic64() {
                  JitStats::block_lookups.load(), JitStats::block_compiles.load(),
                  JitStats::range_invalidations.load(), JitStats::full_clears.load(),
                  JitStats::fastmem_faults.load());
+        LOG_INFO(Core_ARM,
+                 "dynarmic jit compile time: translate={:.2f}s optimize={:.2f}s emit={:.2f}s",
+                 static_cast<double>(JitStats::translate_ns.load()) / 1e9,
+                 static_cast<double>(JitStats::optimize_ns.load()) / 1e9,
+                 static_cast<double>(JitStats::emit_ns.load()) / 1e9);
+        LOG_INFO(Core_ARM,
+                 "dynarmic ir cache: hits={} stores={} hash_mismatch={} entries={} bytes={}",
+                 JitStats::ir_hits.load(), JitStats::ir_stores.load(),
+                 JitStats::ir_hash_mismatch.load(), JitStats::ir_cache_entries.load(),
+                 JitStats::ir_cache_bytes.load());
     });
 }
 
