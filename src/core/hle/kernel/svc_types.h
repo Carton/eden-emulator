@@ -158,6 +158,11 @@ enum class InfoType : u32 {
     IoRegionHint = 27,
     AliasRegionExtraSize = 28,
 
+    TransferMemoryHint = 34,
+
+    Unknown37 = 37,
+    Unknown38 = 38,
+
     MesosphereMeta = 65000,
     MesosphereCurrentProcess = 65001,
 };
