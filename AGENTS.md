@@ -244,6 +244,17 @@ MSYS_NO_PATHCONV=1 "$NSYS" profile -t wddm,vulkan -d 90 --force-overwrite=true \
 - 坑：构建命令带 `| tail` 掩盖失败退出码（printf 格式串错误因此漏检跑了一轮旧 exe）——
   构建后必须验证产物时间戳/显式成功标记。
 
+### FEX 移植实战轮（2026-09-10 深夜，详见 PROFILE_PROGRESS.md §12）
+- 三段微基准：**Emit 占编译成本 83.5%**（translate 2.4µs/optimize 1.8µs/emit 21.7µs 每块）
+  → IR 级缓存收益上限仅 16.5%，"磁盘码缓存"估值随之打折（除非做机器码级+重定位）。
+- 移植一：**跨核 IR 共享缓存**（c10446fecc，`EDEN_JIT_IRCACHE=1` 默认关）——实测 hit 50.6%
+  与 51% 跨核重复精确吻合、hash 校验 0 失配、FPS 平；定位=磁盘码缓存基建。
+- 移植二（实际赢家）：**RegAlloc ValueLocation O(1) 反向索引**（c3bc2c60d0，FEX-2506
+  RegToSSA 思想）——ETW 解剖出 ValueLocation 线性扫+ReleaseAll 占 eden.exe ~17%；
+  name→hostloc 稠密表仅三处重跟踪。**emit -18~20.5%（21.7→17.9µs/块）**，正确性全流程验证。
+- 两提交在 worktree 现分支 `test/v0.2.1-profiling`（用户整理过分支，已跟踪远端）。
+- Emit 剩余热点排队：ReleaseAll（7.9%）→Xbyak label 机制（3.4%）→descriptors map（1.2%）。
+
 ### 本地补丁与工具（v0.2.1 worktree，勿提交上游）
 
 - `fsp_srv.cpp` 两处 `OpenSaveDataFileSystem` 的 `ASSERT(false)`（Temporary/ProperSystem/SafeMode

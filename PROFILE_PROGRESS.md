@@ -606,3 +606,54 @@ patch 注册表/emitter 私有，失效协议 per-instance。**§11.8 实测 51%
   `jit_blocks_holdv2_0909.csv`、`jit_blocks_holdv3_0909.csv`（6 列带时间戳/terminal，两轮菜单复测）
 - `F:\devel\opensource\FEX`（浅克隆 master @ 208e9c3，代码级调研用）
 - 坑：构建命令带 `| tail` 会掩盖失败退出码——检查产物时间戳或显式 echo 标记
+
+## 12. FEX 移植实战轮（2026-09-10 深夜：编译成本解剖 → IR 缓存 → RegAlloc O(1)）
+
+### 12.1 决策依据：三段微基准（GetBlock 计时，jit_stats 常驻）
+
+菜单 hold 局（703k 编译）：**translate=1.71s（2.4µs/块）optimize=1.30s（1.8µs/块）
+emit=15.27s（21.7µs/块）——Emit（RA+x64 发射）占编译成本 83.5%**。
+推论：①IR 级共享/缓存（只跳过 translate+optimize）收益上限仅 ~16.5%；
+②此前"磁盘码缓存性价比最高"的估值隐含全编译成本假设，**只缓存 IR 的版本同样要打折**；
+③编译税的真靶子在 Emit 内部。
+
+### 12.2 实施一：进程级跨核 IR 共享缓存（c10446fecc，EDEN_JIT_IRCACHE=1，默认关）
+
+设计：`ir_cache.h/cpp`——Optimize 后的 IR 序列化进全局 map（键=LocationDescriptor u64，
+内容=inst{op,name,args}/terminal 递归/块元数据）；其他核命中时反序列化跳过
+Translate+Optimize（Emit 仍各自做）。**正确性核心两点**：
+- 内容 hash 在翻译时"边读边织"（get_code 包装器累积 FNV）——条目哈希与产生它的字节
+  天然一致，SMC/重译竞态窗口不存在；
+- hit 路径重算 hash 校验当前 guest 字节，不匹配即 miss 重译（替代主动失效）。
+反序列化用 SetArg 语义自动重建 use_count 与伪指令链；块 >30 指令时复刻
+PrependNewInst 的池分配逻辑（两阶段：先建 inst 后连 arg）。
+实测（游戏局 1.26M 编译）：**hits=639k/stores=624k（50.6%，与 51% 跨核重复实测吻合），
+hash_mismatch=0，FPS 44.76 无回退**；代价 335MB/62 万条。定位=实验特性+磁盘码缓存基建
+（收益 ~2.8s CPU/会话，本身性价比有限）。
+
+### 12.3 实施二：RegAlloc ValueLocation O(1) 反向索引（c3bc2c60d0）——本轮实际赢家
+
+ETW 启动期采样（totk_boot_emit.etl，50s 爆发窗口）函数级 Top（eden.exe 35.3k 采样）：
+**HostLocInfo::ReleaseAll 7.9% + RegAlloc::ValueLocation 5.7% + __std_find_trivial_impl
+3.3%**——`ValueLocation` 每次 Use/Define 都 O(48) 线性扫全部 HostLoc（内层还是 std::find）。
+这正是 FEX-2506 RA 重写消灭的东西（他们的 RA 状态=Available 位图 + RegToSSA[32] 直接映射）。
+
+dynarmic 移植（最小切口）：`name_to_hostloc[4096]`（u8，inst 名→hostloc+1，0=未跟踪），
+NamingPass 的块内稠密编号 1..N 做键；RegAlloc 每块 placement-new 天然清零；
+**死值的陈旧项无害**（uses 耗尽后永不再查询）→ 只需 Define/Move/Exchange 三处重跟踪；
+>4096 指令的块回退原线性扫描。审计确认 AddValue/values 触碰点仅 reg_alloc.*。
+
+实测：菜单局 emit **15.27→12.54s（-17.9%）**；游戏局 **22.5→17.9µs/块（-20.5%）**；
+translate/optimize 每块成本不变；游戏全流程+FPS 44.4（基线带内）验证正确性。
+
+### 12.4 结论与下一步
+
+- 两个提交都在 `test/v0.2.1-profiling`（worktree 现所在分支）：c10446fecc + c3bc2c60d0
+- Emit 剩余 17.9µs/块的下一批热点（按 ETW 排）：ReleaseAll（7.9%，48 个 HostLoc 的
+  small_vector 清理——可用占用位图跳过空槽）、Xbyak label/编码机制（~3.4%）、
+  descriptors/patch map（~1.2%）。FEX RA 的 furthest-first spill/tied 绑定在此之上。
+- 稳态 FPS 不受编译优化影响（稳态编译≈0）；本轮收益=启动/加载更快更顺 + 长加载场景
+  （读图/传送）卡顿减少。
+- 工具沉淀：GetBlock 三段计时常驻（每局 eden_log 可见）；ETW 查询大 trace 的正确姿势
+  =先模块分组（秒回）再加 ModuleName 过滤做函数分组（直接函数分组会 30s 超时）；
+  PerfView CLI 备选。UAC 提权采 wpr：powershell Start-Process -Verb RunAs。
