@@ -657,3 +657,76 @@ translate/optimize 每块成本不变；游戏全流程+FPS 44.4（基线带内�
 - 工具沉淀：GetBlock 三段计时常驻（每局 eden_log 可见）；ETW 查询大 trace 的正确姿势
   =先模块分组（秒回）再加 ModuleName 过滤做函数分组（直接函数分组会 30s 超时）；
   PerfView CLI 备选。UAC 提权采 wpr：powershell Start-Process -Verb RunAs。
+
+## 13. 帧率天花板调查轮（2026-09-11：45 FPS 之谜 → 栅格量化 + work-bound 铁证）
+
+### 13.1 问题与线索
+
+用户实测默认帧率无法超过 45 FPS。逐帧 CSV 分析发现帧时长不是连续分布而是**严格量化**：
+游戏内 `25.0, 25.0, 16.7` 循环（3 帧和恰 66.7ms = 精确 45.00 FPS），菜单则完美锁 60.00
+（纯 16.67ms）。均值 44.8 = ~2/3 帧 25.0ms + ~1/3 帧 16.67ms 的混合。
+
+### 13.2 节拍机制溯源（代码级）
+
+帧 CSV 边界 = `nvdisp_disp0::Composite`（游戏经 HOS 合成器提交显示的时刻，非主机呈现）。
+驱动链：`VI::Conductor`（core_timing 循环事件）→ `ProcessVsync` → `ComposeLocked`。
+**Conductor 周期 = 16.67ms × speed_scale**，`speed_scale = (100/speed_limit) / compose_speed_scale`。
+
+探针实测（bbcf1eb47a，每 600 帧打 raw_swap_interval/speed_scale）：
+**TOTK 游戏内以 `swap_interval=0` 提交 buffer**（其动态 FPS 引擎行为）→ eden 的
+NormalizeSwapInterval 把非正值当"速度倍率"（×2）→ **合成器 120Hz 运转，栅格 8.33ms**
+（日志时间戳每 5.0s 恰 600 tick 验证）。25.0ms=3 栅格、16.67=2 栅格：游戏每帧占
+2~3 个栅格，[3,3,2] 节拍 → 45.00 FPS 整。菜单负载轻 → 恒 2 栅格 → 60.00。
+
+另：user/load 里有 TOTK mod（"!!!!TOTK Optimizer" exefs 补丁 + 10xDurability，
+自 yuzu 安装复制而来）——45fps 意味着游戏以 1.5 倍速运行（TOTK 标称 30fps）。
+
+### 13.3 三连对照实验（同 exe、同场景、仅改 qt-config）
+
+| 实验 | 配置 | FPS | med | 结论 |
+|---|---|---|---|---|
+| A grid-default | 默认（限速 100%） | 44.84 | 24.98ms（量化） | 栅格 [3,3,2] 节拍 |
+| B grid-unlock | use_speed_limit=false | 44.89 | **22.27ms（连续）** | **真实工作速率 44.9** |
+| C grid-boost | fast_cpu_time=Boost(2.0×) | 44.85 | 24.98ms | 超频无效 |
+
+- B：speed_scale=0.01 → 合成器 ~6kHz → 量化消失，med=p95≈p99≈22.3ms → **纯工作
+  吞吐 = 44.9 FPS，栅格不损失吞吐**（[25,25,16.7] 均值 22.2 与工作速率一致）。
+- C：模拟时钟 ×2 完全不影响帧率 → governor 无等待偷时，**100% work-bound**。
+- 排除项复核：sync_core_speed=false（默认）→ 经典限速器路径本就不生效；
+  fast_cpu_time 超频只改游戏内部时间流速不改 FPS（work-bound 下的预期行为）。
+
+### 13.4 结论：为什么优化了却不动 FPS + 真正的杠杆
+
+1. **45 不是巧合也不是软上限，是 22.27ms/帧工作量的 120Hz 栅格量化显示**。
+2. **帧率只能整量跳变**：45（3 栅格）→ 60（2 栅格）。工作砍 10% → 解锁模式可见
+   49fps，但栅格模式仍是 45 不动；**必须 ≤16.67ms（-25.1%）才跳 60**。这解释了
+   GPU 线程 -3.3%、emit -20%、LTO 全中性——都没跨过栅格阈值，也没砍到稳态关键路径。
+3. **关键路径 = 4 个全饱和线程的流水线**（3 个 JIT 模拟核 + gpu_thread），
+   每帧每线程满负荷 ~22.27ms。**单线程砍 25% 无效**（其余 3 个还卡着）；
+   CPU Unsafe 是过去唯一动了 FPS 的优化（+2），因为它同时砍了全部 3 个模拟核。
+4. **按预期帧率收益排序的方向**（B 轨正式定级）：
+   - **JIT 执行质量**（唯一够得着 -25% 的公共乘数，作用于 86% 的模拟核时间）：
+     BL→host call 影子栈、块合并/尾重复、FEX RA 思想深化；
+   - **gpu_thread 摘出关键路径**：VulkanWorker 仅 ~50% 利用率，命令处理并行化/
+     批量化（PushImageDescriptors/绑定缓存/管线键比较再砍）；
+   - 已到顶：CPU Unsafe（已开）、分辨率无关性（已证）、超频（已证无效）、
+     异步 shader（只影响卡顿不影响均值）。
+   - 待查的免费项：12 逻辑核上 4 个饱和线程的超线程配对争抢（亲和性检查）。
+5. **方法论**：以后一切稳态优化判定改用**解锁模式基准**（use_speed_limit=false，
+   看 med ms 连续反映工作速率，无量化失真；本实验 1%low 还从 35.05 提到 38.64，
+   自旋无观测开销）。栅格模式只用于还原用户真实体验。
+
+### 13.5 IR cache 默认开启（76a192eb28，本轮顺带完成）
+
+EDEN_JIT_IRCACHE 默认值反转为**开**（EDEN_JIT_IRCACHE=0 关闭），加 512MiB 内存上限
+（EDEN_JIT_IRCACHE_MAXBYTES 可调；TOTK 整局实测 335MB 不触顶）。Run A 无 env 验证：
+hits=629k/stores=635k（49.7%）、hash_mismatch=0、translate+optimize 从 ~9.3s 降至
+2.73s（**编译期 CPU -71%**）、FPS 44.84 基线带内无回退。收益定位：启动/加载更快
+更顺（编译税前置在启动 30s 爆发期）+ 未来磁盘码缓存的现成基建。
+
+### 13.6 本轮产物
+
+- 提交：76a192eb28（IR cache 默认开+cap）、bbcf1eb47a（HWC 节拍探针，常驻，
+  每局 eden_log 可看 raw_swap_interval/speed_scale）。
+- bench_results.csv 新增 grid-default / grid-unlock / grid-boost 三行。
+- qt-config 已还原（speed_limit=100 默认、fast_cpu_time=Off）。

@@ -255,6 +255,22 @@ MSYS_NO_PATHCONV=1 "$NSYS" profile -t wddm,vulkan -d 90 --force-overwrite=true \
 - 两提交在 worktree 现分支 `test/v0.2.1-profiling`（用户整理过分支，已跟踪远端）。
 - Emit 剩余热点排队：ReleaseAll（7.9%）→Xbyak label 机制（3.4%）→descriptors map（1.2%）。
 
+### 帧率天花板调查轮（2026-09-11，详见 PROFILE_PROGRESS.md §13）
+- **45 FPS 之谜破解**：TOTK 游戏内以 swap_interval=0 提交（动态 FPS 引擎）→ eden
+  倍率扩展 → **合成器 120Hz 栅格（8.33ms）**；帧时长量化为 [25,25,16.7] 循环 =
+  精确 45.00。菜单轻负载恒 2 栅格 = 60.00。
+- **三连对照铁证 work-bound**：默认 44.84（med 24.98 量化）/ 解锁限速 44.89
+  （med 22.27 连续 = 真实工作速率）/ 模拟时钟 2× 超频 44.85（纹丝不动）。
+- **帧率只能整量跳变**（45→60 需每帧工作 ≤16.67ms 即 **-25.1%**）——解释了历轮
+  微优化为何 FPS 全不动。关键路径 = 4 个全饱和线程（3 JIT 核 + gpu_thread）流水线，
+  **单线程砍 25% 无效，必须砍公共乘数**：JIT 执行质量（BL→host call/块合并，作用于
+  86% 模拟核时间）是唯一够得着 -25% 的方向；gpu_thread 需借 VulkanWorker 空闲
+  50% 并行化摘出关键路径。
+- **方法论**：稳态优化一律用解锁基准（use_speed_limit=false，看 med ms，无量化
+  失真，1%low 还更好）；栅格模式只还原用户体验。
+- IR cache 已默认开启（76a192eb28，EDEN_JIT_IRCACHE=0 关，512MiB 上限）：hits 49.7%、
+  编译期 CPU -71%、FPS 无回退。HWC 节拍探针常驻（bbcf1eb47a）。
+
 ### 本地补丁与工具（v0.2.1 worktree，勿提交上游）
 
 - `fsp_srv.cpp` 两处 `OpenSaveDataFileSystem` 的 `ASSERT(false)`（Temporary/ProperSystem/SafeMode
