@@ -8,6 +8,7 @@
 
 #include <boost/container/small_vector.hpp>
 
+#include "common/logging.h"
 #include "core/hle/service/nvdrv/devices/nvdisp_disp0.h"
 #include "core/hle/service/nvnflinger/buffer_item.h"
 #include "core/hle/service/nvnflinger/buffer_item_consumer.h"
@@ -72,6 +73,7 @@ u32 HardwareComposer::ComposeLocked(f32* out_speed_scale, Display& display,
 
     // Determine the number of vsync periods to wait before composing again.
     std::optional<s32> swap_interval{};
+    std::optional<s32> raw_swap_interval{};
     bool has_acquired_buffer{};
 
     // Acquire all necessary framebuffers.
@@ -138,6 +140,9 @@ u32 HardwareComposer::ComposeLocked(f32* out_speed_scale, Display& display,
         // be released, or exactly on the vsync period it should be released.
         const s32 item_swap_interval = NormalizeSwapInterval(out_speed_scale, item.swap_interval);
 
+        // (local-only) pacing probe: capture the raw game-issued interval.
+        raw_swap_interval = item.swap_interval;
+
         // TODO: handle cases where swap intervals are relatively prime. So far,
         // only swap intervals of 0, 1 and 2 have been observed, but if 3 were
         // to be introduced, this would cause an issue.
@@ -146,6 +151,12 @@ u32 HardwareComposer::ComposeLocked(f32* out_speed_scale, Display& display,
         } else {
             swap_interval = item_swap_interval;
         }
+    }
+
+    // (local-only) pacing probe: log every ~10s at 60Hz compositing.
+    if (raw_swap_interval && m_frame_number % 600 == 0) {
+        LOG_INFO(Service_VI, "HWC pacing: frame={} raw_swap_interval={} swap_interval={} speed_scale={:.2f}",
+                 m_frame_number, *raw_swap_interval, swap_interval.value_or(-1), *out_speed_scale);
     }
 
     // If any new buffers were acquired, we can present.
