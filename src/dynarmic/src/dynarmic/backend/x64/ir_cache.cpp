@@ -380,8 +380,20 @@ SharedState& GetState() {
 }
 
 bool EnvEnabled() {
+    // Default on; EDEN_JIT_IRCACHE=0 disables.
     const char* env = std::getenv("EDEN_JIT_IRCACHE");
-    return env != nullptr && env[0] != '\0' && env[0] != '0';
+    return !(env != nullptr && env[0] == '0');
+}
+
+std::size_t MaxCacheBytes() {
+    // Bound resident memory; TOTK measures ~335 MiB for a full session.
+    constexpr std::size_t kDefaultMax = std::size_t(512) << 20;
+    const char* env = std::getenv("EDEN_JIT_IRCACHE_MAXBYTES");
+    if (env == nullptr || env[0] == '\0') {
+        return kDefaultMax;
+    }
+    const unsigned long long v = std::strtoull(env, nullptr, 10);
+    return v == 0 ? kDefaultMax : static_cast<std::size_t>(v);
 }
 
 }  // namespace
@@ -404,6 +416,9 @@ IRCache::EntryPtr IRCache::Lookup(std::uint64_t descriptor_value) {
 void IRCache::Store(std::uint64_t descriptor_value, const IR::Block& block,
                     std::uint64_t start_pc, std::uint64_t end_pc,
                     std::uint64_t content_hash) {
+    if (GetState().total_bytes >= MaxCacheBytes()) {
+        return;  // cap reached; lookups still serve what is cached
+    }
     auto entry = std::make_shared<Entry>();
     entry->bytes = Serialize(block);
     entry->start_pc = start_pc;
