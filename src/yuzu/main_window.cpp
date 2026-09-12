@@ -2051,6 +2051,10 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
                           StartGameType type) {
     LOG_INFO(Frontend, "Eden starting...");
 
+    // Remember the configured speed limiter state so shutdown can restore the
+    // user's preference instead of forcing the limiter back on. (local-only)
+    pre_boot_use_speed_limit = Settings::values.use_speed_limit.GetValue();
+
     if (params.program_id == 0 ||
         params.program_id > static_cast<u64>(Service::AM::AppletProgramId::MaxProgramId)) {
         StoreRecentFile(filename); // Put the filename on top of the list
@@ -2203,8 +2207,11 @@ bool MainWindow::OnShutdownBegin() {
 
     AllowOSSleep();
 
-    // Disable unlimited frame rate and turbo/slow modes
-    Settings::values.use_speed_limit.SetValue(true);
+    // Reset turbo/slow modes, and restore the speed limiter to whatever the
+    // user had configured before the game booted (upstream forced `true` here,
+    // silently re-checking "Limit Speed Percent" after every game exit).
+    // (local-only)
+    Settings::values.use_speed_limit.SetValue(pre_boot_use_speed_limit);
     Settings::values.current_speed_mode = Settings::SpeedMode::Standard;
 
     if (QtCommon::system->IsShuttingDown()) {

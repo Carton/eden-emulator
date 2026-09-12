@@ -537,7 +537,9 @@ private:
     std::unique_ptr<QtConfig> config;
 
     // Whether emulation is currently running in yuzu.
-    bool emulation_running = false;
+    bool emulation_running = false;    // Speed-limit setting as configured before the current game booted;
+    // restored on shutdown instead of forcing the limiter back on. (local-only)
+    bool pre_boot_use_speed_limit = true;
     std::unique_ptr<EmuThread> emu_thread;
     // The path to the game currently running
     QString current_game_path;
