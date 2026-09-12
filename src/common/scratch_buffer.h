@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <iterator>
 
 #include "common/make_unique_for_overwrite.h"
