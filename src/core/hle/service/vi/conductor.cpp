@@ -97,8 +97,12 @@ s64 Conductor::GetNextTicks() const {
             // SpeedLimiter::DoSpeedLimiting.
             speed_scale = 100.f / Settings::SpeedLimit();
         } else {
-            // Run at unlocked framerate.
-            speed_scale = 0.01f;
+            // Run at unlocked framerate. Keep a floor so the composition event
+            // polls at ~600 Hz instead of ~6 kHz: measured on TOTK, a 0.01
+            // scale burns ~36% of one core (HostTiming) and ~19% (VSyncThread)
+            // for no perceptible gain, and disturbs scheduling of the four
+            // saturated pipeline threads. (local-only)
+            speed_scale = 0.1f;
         }
     }
 
