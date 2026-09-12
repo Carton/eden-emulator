@@ -58,6 +58,16 @@ if ("x86_64" IN_LIST ARCHITECTURE)
         native/preserve_xmm.cpp
     )
 
+    # Separate processes are required: environment switches are read once.
+    foreach(mode IN ITEMS on off)
+        add_test(NAME dynarmic_ir_cache_${mode}
+            COMMAND dynarmic_tests "[ir-cache],[ir-cache-execution],[reg-alloc],[jit-policy]")
+    endforeach()
+    set_tests_properties(dynarmic_ir_cache_on PROPERTIES
+        ENVIRONMENT "EDEN_JIT_IRCACHE=1;EDEN_JIT_STATS=1")
+    set_tests_properties(dynarmic_ir_cache_off PROPERTIES
+        ENVIRONMENT "EDEN_JIT_IRCACHE=0;EDEN_JIT_STATS=0")
+
     if (NOT MSVC AND NOT MULTIARCH_BUILD)
         target_sources(dynarmic_tests PRIVATE
             rsqrt_test.cpp

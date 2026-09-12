@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <cstdlib>
+
 #include <catch2/catch_test_macros.hpp>
 
 #include "dynarmic/backend/x64/ir_cache.h"
@@ -25,6 +27,20 @@ void StepAdd(A64::Jit& jit, A64TestEnv& env) {
     jit.SetRegister(2, 3);
     jit.Step();
 }
+}
+
+TEST_CASE("JIT profiling switches respect platform defaults and overrides", "[jit-policy]") {
+#ifdef _WIN32
+    constexpr bool platform_default = true;
+#else
+    constexpr bool platform_default = false;
+#endif
+    const char* cache = std::getenv("EDEN_JIT_IRCACHE");
+    const char* stats = std::getenv("EDEN_JIT_STATS");
+    REQUIRE(Backend::X64::IRCache::Enabled() ==
+            (cache ? cache[0] != '0' : platform_default));
+    REQUIRE(Stats::Enabled() ==
+            (stats ? stats[0] != '0' || stats[1] != '\0' : platform_default));
 }
 
 TEST_CASE("A64 IR reuse checks translation configuration", "[ir-cache-execution]") {

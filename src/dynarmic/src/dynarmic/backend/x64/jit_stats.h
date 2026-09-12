@@ -17,7 +17,15 @@ namespace Dynarmic::Backend::X64::JitStats {
 // size gauges and the independently enabled block dump are not disabled.
 inline const bool enabled = [] {
     const char* value = std::getenv("EDEN_JIT_STATS");
-    return !value || value[0] != '0' || value[1] != '\0';
+    if (value) {
+        return value[0] != '0' || value[1] != '\0';
+    }
+    // Local profiling is opt-in outside the measured Windows environment.
+#ifdef _WIN32
+    return true;
+#else
+    return false;
+#endif
 }();
 
 inline bool Enabled() {
