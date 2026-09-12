@@ -6,7 +6,6 @@
  * SPDX-License-Identifier: 0BSD
  */
 
-#include "dynarmic/backend/x64/jit_stats.h"
 #include "dynarmic/backend/x64/a64_emit_x64.h"
 
 #include <fmt/format.h>

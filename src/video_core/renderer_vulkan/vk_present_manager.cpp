@@ -279,7 +279,7 @@ void PresentManager::PresentThread(std::stop_token token) {
             // By exchanging the lock ownership we take the swapchain lock
             // before the queue lock goes out of scope. This way the swapchain
             // lock in WaitPresent is guaranteed to occur after here.
-            std::exchange(lock, std::unique_lock{swapchain_mutex});
+            static_cast<void>(std::exchange(lock, std::unique_lock{swapchain_mutex}));
             CopyToSwapchain(frame);
 
             // Free the frame for reuse

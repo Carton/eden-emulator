@@ -41,15 +41,40 @@ using namespace Backend::X64;
 namespace {
 // Local profiling (see PROFILE_PROGRESS.md): EDEN_JIT_BLOCKDUMP=1 records one
 // line per compiled block for offline dedup/fragmentation analysis.
-std::mutex g_blockdump_mutex;
-FILE* g_blockdump_file = nullptr;
-
 bool BlockDumpEnabled() {
     static const bool enabled = [] {
         const char* env = std::getenv("EDEN_JIT_BLOCKDUMP");
         return env != nullptr && env[0] != '\0' && env[0] != '0';
     }();
     return enabled;
+}
+
+void DumpBlock(const IR::Block& block, u64 content_hash) {
+    if (!BlockDumpEnabled()) {
+        return;
+    }
+    struct Output {
+        std::mutex mutex;
+        FILE* file = std::fopen("jit_blocks.csv", "w"); // relative to the working directory
+        ~Output() {
+            if (file) {
+                std::fclose(file);
+            }
+        }
+    };
+    static Output output;
+    std::scoped_lock lock{output.mutex};
+    if (!output.file) {
+        return;
+    }
+    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count();
+    std::fprintf(output.file, "%llx,%llx,%llx,%016llx,%lld,%d\n",
+                 (unsigned long long)std::hash<std::thread::id>{}(std::this_thread::get_id()),
+                 (unsigned long long)A64::LocationDescriptor{block.Location()}.PC(),
+                 (unsigned long long)A64::LocationDescriptor{block.EndLocation()}.PC(),
+                 (unsigned long long)content_hash, (long long)now_ms,
+                 (int)block.GetTerminal().which());
 }
 }  // namespace
 
@@ -89,9 +114,10 @@ public:
         , polyfill_options(GenPolyfillOptions(block_of_code))
     {
         ASSERT(conf.page_table_address_space_bits >= 12 && conf.page_table_address_space_bits <= 64);
+        IRCache::RegisterJit();
     }
 
-    ~Impl() = default;
+    ~Impl() { IRCache::UnregisterJit(); }
 
     HaltReason Run() {
         ASSERT(!is_executing);
@@ -264,10 +290,11 @@ private:
     }
 
     CodePtr GetBlock(IR::LocationDescriptor descriptor) {
-        JitStats::block_lookups.fetch_add(1, std::memory_order_relaxed);
+        JitStats::Count(JitStats::block_lookups, 1);
         if (auto block = emitter.GetBasicBlock(descriptor))
             return block->entrypoint;
 
+        const auto compile_begin = JitStats::Now();
         constexpr size_t MINIMUM_REMAINING_CODESIZE = 1 * 1024 * 1024;
         if (block_of_code.SpaceRemaining() < MINIMUM_REMAINING_CODESIZE) {
             // Immediately evacuate cache
@@ -280,83 +307,86 @@ private:
         // LocationDescriptor ctor() does important ops (like tflags) do not skip
         auto const arch_descriptor = A64::LocationDescriptor{descriptor};
         const u64 start_pc = arch_descriptor.PC();
+        const IRCache::Config cache_config{
+            conf.define_unpredictable_behaviour,
+            conf.wall_clock_cntpct,
+            conf.check_halt_on_memory_access,
+            conf.hook_data_cache_operations,
+            conf.HasOptimization(OptimizationFlag::GetSetElimination),
+            conf.HasOptimization(OptimizationFlag::ConstProp),
+            conf.HasOptimization(OptimizationFlag::DisableVerification),
+            conf.dczid_el0,
+            polyfill_options,
+        };
         const auto dur = [](auto a, auto b) {
             return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count();
+        };
+        const auto emit_block = [&](u64 hash) {
+            DumpBlock(ir_block, hash);
+            const auto begin = JitStats::Now();
+            const auto entry = emitter.Emit(ir_block).entrypoint;
+            const auto end = JitStats::Now();
+            JitStats::Count(JitStats::block_compiles, 1);
+            JitStats::Count(JitStats::emit_ns, dur(begin, end));
+            // Includes validation, serialization, cache locks and dump overhead.
+            JitStats::Count(JitStats::compile_ns, dur(compile_begin, end));
+            return entry;
         };
 
         // Content hash accumulates from the exact words fed to the translator,
         // so a stored cache entry always describes the bytes that produced it.
         u64 content_hash = 1469598103934665603ull;
-        const auto get_code_hashed = [this, &content_hash](u64 vaddr) {
+        std::vector<u32> guest_code;
+        bool readable_code = true;
+        const auto get_code_hashed = [this, &content_hash, &guest_code, &readable_code](u64 vaddr) {
             const auto word = conf.callbacks->MemoryReadCode(vaddr);
             content_hash = (content_hash ^ word.value_or(0)) * 1099511628211ull;
+            readable_code &= word.has_value();
+            if (IRCache::Enabled() && word) {
+                guest_code.push_back(*word);
+            }
             return word;
         };
 
         if (IRCache::Enabled()) {
             const IRCache::EntryPtr cached = IRCache::Lookup(descriptor.Value());
-            if (cached && cached->start_pc == start_pc) {
-                u64 h = 1469598103934665603ull;
-                for (u64 a = start_pc; a < cached->end_pc; a += 4) {
-                    h = (h ^ conf.callbacks->MemoryReadCode(a).value_or(0)) * 1099511628211ull;
+            if (cached && cached->start_pc == start_pc && cached->config == cache_config) {
+                bool matches = true;
+                for (std::size_t i = 0; i < cached->code.size(); ++i) {
+                    const auto word = conf.callbacks->MemoryReadCode(start_pc + i * 4);
+                    if (!word || *word != cached->code[i]) {
+                        matches = false;
+                        break;
+                    }
                 }
-                if (h == cached->content_hash) {
+                if (matches) {
                     ir_block.Reset(arch_descriptor);
                     if (IRCache::Load(*cached, ir_block)) {
-                        JitStats::block_compiles.fetch_add(1, std::memory_order_relaxed);
-                        JitStats::ir_hits.fetch_add(1, std::memory_order_relaxed);
-                        const auto t3 = std::chrono::steady_clock::now();
-                        const auto hit_entrypoint = emitter.Emit(ir_block).entrypoint;
-                        const auto t4 = std::chrono::steady_clock::now();
-                        JitStats::emit_ns.fetch_add(dur(t3, t4), std::memory_order_relaxed);
-                        return hit_entrypoint;
+                        JitStats::Count(JitStats::ir_hits, 1);
+                        return emit_block(cached->content_hash);
                     }
                     // Malformed entry: fall through to a full compile.
                 } else {
-                    JitStats::ir_hash_mismatch.fetch_add(1, std::memory_order_relaxed);
+                    JitStats::Count(JitStats::ir_hash_mismatch, 1);
                 }
             }
         }
 
-        const auto t0 = std::chrono::steady_clock::now();
+        const auto t0 = JitStats::Now();
         ir_block.Reset(arch_descriptor);
         A64::Translate(ir_block, arch_descriptor, get_code_hashed, {conf.define_unpredictable_behaviour, conf.wall_clock_cntpct});
-        const auto t1 = std::chrono::steady_clock::now();
+        const auto t1 = JitStats::Now();
         Optimization::Optimize(ir_block, conf, polyfill_options);
-        const auto t2 = std::chrono::steady_clock::now();
-        JitStats::block_compiles.fetch_add(1, std::memory_order_relaxed);
+        const auto t2 = JitStats::Now();
         const u64 end_pc = A64::LocationDescriptor{ir_block.EndLocation()}.PC();
-        if (BlockDumpEnabled()) [[unlikely]] {
-            std::scoped_lock lock{g_blockdump_mutex};
-            if (!g_blockdump_file) {
-                g_blockdump_file = std::fopen("jit_blocks.csv", "w");
-            }
-            if (g_blockdump_file) {
-                const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                        std::chrono::steady_clock::now().time_since_epoch())
-                                        .count();
-                std::fprintf(g_blockdump_file, "%llx,%llx,%llx,%016llx,%lld,%d\n",
-                             (unsigned long long)std::hash<std::thread::id>{}(
-                                 std::this_thread::get_id()),
-                             (unsigned long long)start_pc, (unsigned long long)end_pc,
-                             (unsigned long long)content_hash, (long long)now_ms,
-                             (int)ir_block.GetTerminal().which());
-            }
+        if (IRCache::Enabled() && readable_code) {
+            IRCache::Store(descriptor.Value(), ir_block, start_pc, end_pc, content_hash,
+                           cache_config, std::move(guest_code));
         }
-        if (IRCache::Enabled()) {
-            IRCache::Store(descriptor.Value(), ir_block, start_pc, end_pc, content_hash);
-            JitStats::ir_stores.fetch_add(1, std::memory_order_relaxed);
-        }
-        const auto t3 = std::chrono::steady_clock::now();
-        const auto entry = emitter.Emit(ir_block).entrypoint;
-        const auto t4 = std::chrono::steady_clock::now();
-        JitStats::translate_ns.fetch_add(dur(t0, t1), std::memory_order_relaxed);
-        JitStats::optimize_ns.fetch_add(dur(t1, t2), std::memory_order_relaxed);
-        JitStats::emit_ns.fetch_add(dur(t3, t4), std::memory_order_relaxed);
-        return entry;
+        JitStats::Count(JitStats::translate_ns, dur(t0, t1));
+        JitStats::Count(JitStats::optimize_ns, dur(t1, t2));
+        return emit_block(content_hash);
     }
-
-
 
     void PerformRequestedCacheInvalidation(HaltReason hr) {
         if (Has(hr, HaltReason::CacheInvalidation)) {
@@ -370,11 +400,11 @@ private:
 
             jit_state.ResetRSB();
             if (invalidate_entire_cache) {
-                JitStats::full_clears.fetch_add(1, std::memory_order_relaxed);
+                JitStats::Count(JitStats::full_clears, 1);
                 block_of_code.ClearCache();
                 emitter.ClearCache();
             } else {
-                JitStats::range_invalidations.fetch_add(1, std::memory_order_relaxed);
+                JitStats::Count(JitStats::range_invalidations, 1);
                 emitter.InvalidateCacheRanges(invalid_cache_ranges);
             }
             invalid_cache_ranges.clear();

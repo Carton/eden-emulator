@@ -1741,7 +1741,7 @@ void Image::UploadMemory(VkBuffer buffer, VkDeviceSize offset,
 
         runtime->msaa_copy_pass->CopyImage(*this, *temp_wrapper, image_copies,
                                            /*msaa_to_non_msaa=*/false);
-        std::exchange(initialized, true);
+        static_cast<void>(std::exchange(initialized, true));
 
         const u64 tick = scheduler->Flush();
         scheduler->Wait(tick);

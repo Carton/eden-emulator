@@ -47,6 +47,31 @@
 
 namespace Service::FileSystem {
 
+namespace {
+Result GetSaveDataStorageId(FileSys::StorageId& id, FileSys::SaveDataSpaceId space_id) {
+    switch (space_id) {
+    case FileSys::SaveDataSpaceId::User:
+    case FileSys::SaveDataSpaceId::Temporary:
+        id = FileSys::StorageId::NandUser;
+        break;
+    case FileSys::SaveDataSpaceId::SdUser:
+        id = FileSys::StorageId::SdCard;
+        break;
+    case FileSys::SaveDataSpaceId::System:
+        id = FileSys::StorageId::NandSystem;
+        break;
+    case FileSys::SaveDataSpaceId::SdSystem:
+    case FileSys::SaveDataSpaceId::ProperSystem:
+    case FileSys::SaveDataSpaceId::SafeMode:
+        // SaveDataFactory has no directory mapping for these spaces yet.
+        R_RETURN(FileSys::ResultNotImplemented);
+    default:
+        R_RETURN(FileSys::ResultInvalidArgument);
+    }
+    R_SUCCEED();
+}
+} // namespace
+
 FSP_SRV::FSP_SRV(Core::System& system_)
     : ServiceFramework{system_, "fsp-srv"}, fsc{system.GetFileSystemController()},
       content_provider{system.GetContentProvider()}, reporter{system.GetReporter()} {
@@ -268,29 +293,10 @@ Result FSP_SRV::OpenSaveDataFileSystem(OutInterface<IFileSystem> out_interface,
                                        FileSys::SaveDataAttribute attribute) {
     LOG_INFO(Service_FS, "called.");
 
+    FileSys::StorageId id{};
+    R_TRY(GetSaveDataStorageId(id, space_id));
     FileSys::VirtualDir dir{};
     R_TRY(save_data_controller->OpenSaveData(&dir, space_id, attribute));
-
-    FileSys::StorageId id{};
-    switch (space_id) {
-    case FileSys::SaveDataSpaceId::User:
-        id = FileSys::StorageId::NandUser;
-        break;
-    case FileSys::SaveDataSpaceId::SdSystem:
-    case FileSys::SaveDataSpaceId::SdUser:
-        id = FileSys::StorageId::SdCard;
-        break;
-    case FileSys::SaveDataSpaceId::System:
-        id = FileSys::StorageId::NandSystem;
-        break;
-    case FileSys::SaveDataSpaceId::Temporary:
-        id = FileSys::StorageId::NandUser;
-        break;
-    case FileSys::SaveDataSpaceId::ProperSystem:
-    case FileSys::SaveDataSpaceId::SafeMode:
-        id = FileSys::StorageId::NandSystem;
-        break;
-    }
 
     *out_interface =
         std::make_shared<IFileSystem>(system, std::move(dir), SizeGetter::FromStorageId(fsc, id));
@@ -311,29 +317,10 @@ Result FSP_SRV::OpenSaveDataFileSystemBySystemSaveDataId(OutInterface<IFileSyste
         attribute.program_id = program_id;
     }
 
+    FileSys::StorageId id{};
+    R_TRY(GetSaveDataStorageId(id, space_id));
     FileSys::VirtualDir dir{};
     R_TRY(save_data_controller->OpenSaveData(&dir, space_id, attribute));
-
-    FileSys::StorageId id{};
-    switch (space_id) {
-    case FileSys::SaveDataSpaceId::User:
-        id = FileSys::StorageId::NandUser;
-        break;
-    case FileSys::SaveDataSpaceId::SdSystem:
-    case FileSys::SaveDataSpaceId::SdUser:
-        id = FileSys::StorageId::SdCard;
-        break;
-    case FileSys::SaveDataSpaceId::System:
-        id = FileSys::StorageId::NandSystem;
-        break;
-    case FileSys::SaveDataSpaceId::Temporary:
-        id = FileSys::StorageId::NandUser;
-        break;
-    case FileSys::SaveDataSpaceId::ProperSystem:
-    case FileSys::SaveDataSpaceId::SafeMode:
-        id = FileSys::StorageId::NandSystem;
-        break;
-    }
 
     *out_interface =
         std::make_shared<IFileSystem>(system, std::move(dir), SizeGetter::FromStorageId(fsc, id));

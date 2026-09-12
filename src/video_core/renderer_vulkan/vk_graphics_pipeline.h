@@ -109,6 +109,14 @@ public:
         if (key == current_key) {
             return this;
         }
+        if (transition_keys.empty()) {
+            return nullptr;
+        }
+        // One candidate still needs equality confirmation; hashing first can
+        // only add work, especially for keys that differ near the beginning.
+        if (transition_keys.size() == 1) {
+            return transition_keys.front() == current_key ? transitions.front() : nullptr;
+        }
         // Different pipeline: hash the key once, then scan precomputed transition
         // hashes before falling back to the full key memcmp confirmation.
         const size_t current_hash = current_key.Hash();

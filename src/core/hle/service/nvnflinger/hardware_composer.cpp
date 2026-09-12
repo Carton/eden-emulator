@@ -153,9 +153,10 @@ u32 HardwareComposer::ComposeLocked(f32* out_speed_scale, Display& display,
         }
     }
 
-    // (local-only) pacing probe: log every ~10s at 60Hz compositing.
+    // Optional diagnostic: every 600 composition ticks, not presented frames.
+    // Multiple game layers may contribute; raw_swap_interval is the last one.
     if (raw_swap_interval && m_frame_number % 600 == 0) {
-        LOG_INFO(Service_VI, "HWC pacing: frame={} raw_swap_interval={} swap_interval={} speed_scale={:.2f}",
+        LOG_DEBUG(Service_VI, "HWC pacing: compose_tick={} last_layer_raw_swap_interval={} swap_interval={} speed_scale={:.2f}",
                  m_frame_number, *raw_swap_interval, swap_interval.value_or(-1), *out_speed_scale);
     }
 
