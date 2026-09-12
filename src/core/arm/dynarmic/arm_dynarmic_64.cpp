@@ -4,10 +4,11 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <mutex>
 #include "common/settings.h"
 #include "common/logging.h"
+#ifdef ARCHITECTURE_x86_64
 #include "dynarmic/backend/x64/jit_stats.h"
+#endif
 #include "core/arm/dynarmic/arm_dynarmic.h"
 #include "core/arm/dynarmic/arm_dynarmic_64.h"
 #include "core/arm/dynarmic/dynarmic_exclusive_monitor.h"
@@ -405,26 +406,33 @@ ArmDynarmic64::ArmDynarmic64(System& system, bool uses_wall_clock, Kernel::KProc
 }
 
 ArmDynarmic64::~ArmDynarmic64() {
+#ifdef ARCHITECTURE_x86_64
+    // A cumulative snapshot per guest process, including repeated game launches.
+    // Other cores may still exist here; this is not a final session total.
+    if (m_core_index != 0) {
+        return;
+    }
     using namespace Dynarmic::Backend::X64;
-    static std::once_flag stats_logged;
-    std::call_once(stats_logged, [] {
-        LOG_INFO(Core_ARM,
-                 "dynarmic jit stats (process totals): dispatch_lookups={} block_compiles={} "
-                 "range_invalidations={} full_clears={} fastmem_faults={}",
-                 JitStats::block_lookups.load(), JitStats::block_compiles.load(),
-                 JitStats::range_invalidations.load(), JitStats::full_clears.load(),
-                 JitStats::fastmem_faults.load());
-        LOG_INFO(Core_ARM,
-                 "dynarmic jit compile time: translate={:.2f}s optimize={:.2f}s emit={:.2f}s",
-                 static_cast<double>(JitStats::translate_ns.load()) / 1e9,
-                 static_cast<double>(JitStats::optimize_ns.load()) / 1e9,
-                 static_cast<double>(JitStats::emit_ns.load()) / 1e9);
-        LOG_INFO(Core_ARM,
-                 "dynarmic ir cache: hits={} stores={} hash_mismatch={} entries={} bytes={}",
-                 JitStats::ir_hits.load(), JitStats::ir_stores.load(),
-                 JitStats::ir_hash_mismatch.load(), JitStats::ir_cache_entries.load(),
-                 JitStats::ir_cache_bytes.load());
-    });
+    LOG_INFO(Core_ARM,
+             "dynarmic jit stats (process cumulative snapshot): dispatch_lookups={} block_compiles={} "
+             "range_invalidations={} full_clears={} fastmem_faults={}",
+             JitStats::block_lookups.load(), JitStats::block_compiles.load(),
+             JitStats::range_invalidations.load(), JitStats::full_clears.load(),
+             JitStats::fastmem_faults.load());
+    LOG_INFO(Core_ARM,
+             "dynarmic jit compile time (process cumulative): total={:.2f}s translate={:.2f}s "
+             "optimize={:.2f}s emit={:.2f}s",
+             static_cast<double>(JitStats::compile_ns.load()) / 1e9,
+             static_cast<double>(JitStats::translate_ns.load()) / 1e9,
+             static_cast<double>(JitStats::optimize_ns.load()) / 1e9,
+             static_cast<double>(JitStats::emit_ns.load()) / 1e9);
+    LOG_INFO(Core_ARM,
+             "dynarmic ir cache: cumulative_hits={} cumulative_stores={} cumulative_code_mismatch={} "
+             "live_entries={} payload_bytes={}",
+             JitStats::ir_hits.load(), JitStats::ir_stores.load(),
+             JitStats::ir_hash_mismatch.load(), JitStats::ir_cache_entries.load(),
+             JitStats::ir_cache_bytes.load());
+#endif
 }
 
 void ArmDynarmic64::SetTpidrroEl0(u64 value) {
