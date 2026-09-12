@@ -53,6 +53,7 @@ if ("x86_64" IN_LIST ARCHITECTURE)
     target_architecture_specific_sources(dynarmic_tests "x86_64"
         ir_cache.cpp
         ir_cache_execution.cpp
+        reg_alloc.cpp
         x64_cpu_info.cpp
         native/preserve_xmm.cpp
     )
