@@ -483,7 +483,7 @@ void IRCache::Store(std::uint64_t descriptor_value, const IR::Block& block,
     }
     s.map.insert_or_assign(descriptor_value, std::move(entry));
     s.total_bytes = retained_size + new_size;
-    JitStats::ir_stores.fetch_add(1, std::memory_order_relaxed);
+    JitStats::Count(JitStats::ir_stores, 1);
     JitStats::ir_cache_entries.store(s.map.size(), std::memory_order_relaxed);
     JitStats::ir_cache_bytes.store(s.total_bytes, std::memory_order_relaxed);
 }

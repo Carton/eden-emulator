@@ -408,7 +408,7 @@ ArmDynarmic64::~ArmDynarmic64() {
 #ifdef ARCHITECTURE_x86_64
     // A cumulative snapshot per guest process, including repeated game launches.
     // Other cores may still exist here; this is not a final session total.
-    if (m_core_index != 0) {
+    if (m_core_index != 0 || !Dynarmic::Backend::X64::JitStats::Enabled()) {
         return;
     }
     using namespace Dynarmic::Backend::X64;
