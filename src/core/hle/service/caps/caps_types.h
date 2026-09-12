@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include <array>
+#include <type_traits>
+
 #include "common/common_funcs.h"
 #include "common/common_types.h"
 
@@ -160,7 +163,7 @@ struct ScreenShotAttribute {
     AlbumImageOrientation orientation;
     u32 unknown_1;
     u32 unknown_2;
-    INSERT_PADDING_BYTES_NOINIT(0x30);
+    std::array<u8, 0x30> padding;
 };
 static_assert(sizeof(ScreenShotAttribute) == 0x40, "ScreenShotAttribute is an invalid size");
 static_assert(std::is_trivial_v<ScreenShotAttribute>,
@@ -176,7 +179,7 @@ struct LoadAlbumScreenShotImageOutput {
     s64 width;
     s64 height;
     ScreenShotAttribute attribute;
-    INSERT_PADDING_BYTES_NOINIT(0x400);
+    std::array<u8, 0x400> padding;
 };
 static_assert(sizeof(LoadAlbumScreenShotImageOutput) == 0x450,
               "LoadAlbumScreenShotImageOutput is an invalid size");
