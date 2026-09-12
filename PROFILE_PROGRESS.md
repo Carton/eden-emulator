@@ -816,3 +816,56 @@ A/B（同 async shaders on，2×4 窗口）：
   GPU 线程吞吐方向，非本轮新问题。
 - 代码级可做（后续）：ASTC 异步解码路径的 worker 池化质量（现走 Common::ThreadWorker）、
   纹理缓存 LRU 预算自适应；rot_test.py 脚本内帧映射 bug 仍未修（用 sidecar 离线分析绕过）。
+
+## 15. 第一梯队收官轮（2026-09-12 午：复测验证 → 剩余尖刺定性 → 600Hz quick win）
+
+### 15.1 新配置复测（totk_rot.etl 第二版，CpuAsynchronous+Bc3+解锁）
+
+- **纹理摘出 GPU 线程已证实**：新 trace 旋转窗口 GPU 线程函数级分布中
+  SwizzleImpl/RemoveImageViewReferences/RefreshContents 几乎归零（旧配置分别
+  249/124/100 采样）——§14 的配置修复机制闭环。
+- ImageTranscode 解码 worker 全程仅 431 采样（~0.4%）——解码池不是瓶颈（B1 优化证伪）。
+- **剩余 140ms 级尖刺定性**（确定性复现于旋转起手 ~1s）：尖刺窗口 GPU 线程
+  92% 满负荷跑**常规命令流**（ProcessCommands/CallMethod/PushImageDescriptors 均匀分布，
+  无单一大热点、无长等待）——是"新视野内容 draw 命令洪峰的量堆积"，属 GPU 线程
+  每 draw 吞吐范畴（第三梯队），不再是纹理路径。
+- 注意：带 ETW 采集时该尖刺放大到 140ms（采集税 ~15-20%）；无采集时同场景
+  max 58-63ms——用户日常以无采集数字为准。
+
+### 15.2 解锁自旋税与 600Hz quick win（c8b0c853f8）
+
+- 复测发现解锁（use_speed_limit=false，speed_scale=0.01）的代价被低估：
+  **HostTiming 线程 36% 核 + VSyncThread 19%**（6-12kHz 节拍自旋+唤醒风暴），
+  对 4 线程饱和流水线是净干扰。
+- **修复**：conductor.cpp 解锁 speed_scale 下限 0.1（≈600Hz 轮询，栅格 1.67ms
+  仍比帧时长细 13 倍，视觉无损）。
+- **验收**（解锁+CpuAsync+Bc3+600Hz，2×4 窗口 vs 6kHz 基线）：旋转尖刺>30ms
+  **53→30（-43%）**、>50ms **7→3**、max 63.2（首见窗口偶发）、med 22.48ms
+  连续无量化、fps 持平（rot 44.4 / idle 44.8）——调度干扰降低的净收益。
+
+### 15.3 环境事故与坑（本轮连环排雷，全部记录）
+
+1. **ETW MCP 进程吃 24.5GB commit**（两个 9.1GB trace 的处理数据常驻）——
+   close_trace 30s 超时没释放，直接 taskkill 进程（trace 文件在磁盘无损）。
+2. **僵尸 DiagTrack 会话**（`WPR_initiated_DiagTrackMiniLogger_*_20260908`，挂了
+   4 天）——logman stop 报"找不到元素"，**重启 DiagTrack 服务**（net stop/start）
+   才清掉。wpr_run.cmd 的自愈 cancel 只管 wpr profile 会话，管不了 DiagTrack 的。
+3. **内存计数器假读数**：上述清理后 WMI/Get-Counter 仍报 FreeCommit=0.01GB/
+   FreeRAM=0.01GB，但系统流畅、所有进程合计 ~3GB——读数坏了（可能被杀的
+   MCP 进程留下的计数器状态）；eden 实测能正常 8GiB reserve，无视读数。
+   判别法：看系统是否流畅+进程总和，别只信计数器。
+4. **qt-config 的 use_speed_limit 会被游戏退出写回 true**：外部改 ini 后游戏
+   正常退出时按配置分层重写，解锁丢失（启动时读到的是 false，运行时确实解锁，
+   但下次启动前又被覆盖）——**持久解锁需在 GUI 里关一次"限制速度"**（GUI 写盘
+   语义完整）。排障时记得每局启动前 grep 确认。
+5. rot_hold.ps1 的 stderr 偶发 None（进程捕获竞态）——拼接前 `or ""` 防御。
+
+### 15.4 第一梯队结论
+
+- 纹理工作摘出 GPU 线程：**配置级达成**（CpuAsync+Bc3），代码级 B1（解码池）证伪、
+  B2/B3（swizzle/逐出）目标已被配置覆盖，无需再动。
+- 旋转场景当前状态：idle 44.8-44.9fps 零尖刺；旋转 44.4fps、尖刺 30 个/80s、
+  max ~60ms——从最初（idle 也有噪声、旋转 107 尖刺、max 303ms）改善：
+  **尖刺 -72%、最大卡顿 -80%、fps 掉幅 -75%**。
+- 剩余项=draw 洪峰堆积（第三梯队 GPU 线程每 draw 吞吐）+ 模拟核 JIT 执行质量
+  （第二梯队 45→60 主战场）。

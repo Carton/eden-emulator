@@ -288,6 +288,18 @@ MSYS_NO_PATHCONV=1 "$NSYS" profile -t wddm,vulkan -d 90 --force-overwrite=true \
 - wpr 坑：C 盘 99% 满导致采集会话中途自灭（0xc5583000），**必须 -recordtempto F:**
   且脚本先 wpr -cancel 自愈（僵尸会话会让下次 0xc5583001）。
 
+### 第一梯队收官轮（2026-09-12 午，详见 PROFILE_PROGRESS.md §15）
+- **纹理摘出 GPU 线程已证实**（新 trace GPU 线程函数级：Swizzle/逐出/Refresh 归零）；
+  解码 worker 全程空闲（B1 证伪）；剩余 140ms 尖刺=旋转起手 draw 洪峰量堆积
+  （GPU 线程 92% 跑常规命令流，无单点热点）——归第三梯队每 draw 吞吐。
+- **解锁自旋税修复（c8b0c853f8）**：解锁 speed_scale 下限 0.1（~600Hz，原 6-12kHz），
+  HostTiming 36%核+VSync 19% 的自旋砍掉；验收旋转尖刺 53→30（-43%）、>50ms 7→3、
+  med 22.48ms 连续无量化、fps 持平。
+- **环境坑**：ETW MCP 进程常驻 24.5GB（close 超时不放，taskkill 干净）；僵尸
+  DiagTrack 会话要重启 DiagTrack 服务才清；内存计数器可能假读数（判别：进程总和+流畅度）；
+  **use_speed_limit 被游戏退出写回 true——持久解锁需 GUI 里关一次"限制速度"**，
+  脚本排障每局启动前 grep 确认。
+
 ### 本地补丁与工具（v0.2.1 worktree，勿提交上游）
 
 - `fsp_srv.cpp` 两处 `OpenSaveDataFileSystem` 的 `ASSERT(false)`（Temporary/ProperSystem/SafeMode
