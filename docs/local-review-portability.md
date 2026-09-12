@@ -2,6 +2,9 @@
 
 仅用于本地实验，不推送上游。功能测试通过不代表帧率提升，也不代表全平台无回退。
 
+后续交叉构建进展见 [wsl-windows-build.md](wsl-windows-build.md)：配套重编 OpenSSL
+和 Qt 后 Windows GUI/CLI 均已成功链接。下文的 SDK/链接阻碍保留为前一阶段的调查记录。
+
 ## 适用范围与风险
 
 | 方向 | 适用范围 | 跨平台判断 |
