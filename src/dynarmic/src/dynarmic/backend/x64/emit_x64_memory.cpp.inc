@@ -1,5 +1,3 @@
-#include "dynarmic/backend/x64/jit_stats.h"
-
 /* This file is part of the dynarmic project.
  * Copyright (c) 2022 MerryMage
  * SPDX-License-Identifier: 0BSD
