@@ -1872,10 +1872,18 @@ void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
         }
     }
     std::ranges::for_each(channel_state->uniform_buffers, replace);
-    std::ranges::for_each(channel_state->storage_buffers, replace);
-    for (auto& per_stage : channel_state->texture_buffers) {
-        for (auto& texture_binding : per_stage) {
-            scalar_replace(texture_binding);
+    // Resolved graphics bindings survive channel switches. Invalidate every
+    // live channel before the slot can be reused by a different buffer.
+    {
+        std::scoped_lock lock{this->config_mutex};
+        for (const auto channel_id : this->active_channel_ids) {
+            auto& state = this->channel_storage[channel_id];
+            std::ranges::for_each(state.storage_buffers, replace);
+            for (auto& per_stage : state.texture_buffers) {
+                for (auto& texture_binding : per_stage) {
+                    scalar_replace(texture_binding);
+                }
+            }
         }
     }
     for (auto& texture_binding : channel_state->compute_texture_buffers) {
