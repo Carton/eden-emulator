@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include "common/settings.h"
 #include "common/logging.h"
 #ifdef ARCHITECTURE_x86_64
@@ -352,6 +353,18 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
     case Settings::CpuAccuracy::Accurate:
     default:
         break;
+    }
+    // (local-only) Runtime A/B gates for dispatch-path cost quantification.
+    // Compose with any accuracy mode; each disables one terminal optimization
+    // so bench runs can measure what that path is worth.
+    if (const char* v = std::getenv("EDEN_JIT_NOLINK"); v && v[0] == '1') {
+        config.optimizations &= ~Dynarmic::OptimizationFlag::BlockLinking;
+    }
+    if (const char* v = std::getenv("EDEN_JIT_NORSB"); v && v[0] == '1') {
+        config.optimizations &= ~Dynarmic::OptimizationFlag::ReturnStackBuffer;
+    }
+    if (const char* v = std::getenv("EDEN_JIT_NOFASTDISPATCH"); v && v[0] == '1') {
+        config.optimizations &= ~Dynarmic::OptimizationFlag::FastDispatch;
     }
     if (!Settings::IsFastmemEnabled()) {
         config.fastmem_pointer = std::nullopt;
