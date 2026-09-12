@@ -732,3 +732,79 @@ hits=629k/stores=635k（49.7%）、hash_mismatch=0、translate+optimize 从 ~9.3
   每局 eden_log 可看 raw_swap_interval/speed_scale）。
 - bench_results.csv 新增 grid-default / grid-unlock / grid-boost 三行。
 - qt-config 已还原（speed_limit=100 默认、fast_cpu_time=Off）。
+
+## 14. 视角旋转掉帧攻坚轮（2026-09-12：复现 → ETW 归因 → ASTC 流送根因 → 配置修复）
+
+### 14.1 测试基建（全部沉淀在 F:\prof，可复跑）
+
+- **输入自动化**：qt-config player_0_rstick 改 `analog_from_button` + 键盘 J(=左)/L(=右)。
+  血泪坑：**方向键（Arrow）不行**——Qt 焦点导航吃掉方向键（X 键等普通键可达
+  GRenderWindow::keyPressEvent，方向键被导航消费），必须用字母键；SendInput 用 VK。
+- 脚本链：`rot_hold.ps1`（抢焦点+按住 J/L）→ `rot_test.py`（idle/rotR/rotL 交替窗口，
+  落 rot_windows.json sidecar）→ `rot_trace.py`（编排 wpr 100s 采集+窗口对齐）。
+  坑：脚本内"帧墙钟映射"一直没修好——**一律用 sidecar + 末端锚定离线分析**（CSV 末帧
+  ≈ t_close+2s，误差 <1s）；窗口各留 2s 边距。
+- **掉帧是确定性复现**：两局独立会话的尖刺时间戳逐帧一致（+0.81s:33.4ms、
+  +1.47s:142.7ms）——同视角扫描触发同批工作。
+
+### 14.2 复现画像（async shaders ON，2×[idle20/rotR20/idle20/rotL20]）
+
+- idle：44.7-44.9fps，>30ms 尖刺 0-5 个/20s（PS 抢焦点操作本身的噪声）
+- 旋转：43.6-44.1fps，**尖刺 20-32 个/20s**（几乎全部 33.3/41.7ms = 4/5 个 8.33ms 栅格），
+  偶发 50-91ms；**async shaders OFF 时首见内容有 303ms 大卡顿**（同步管线编译，ON 后消失）
+- ETW 采集开销会把整体压到 35-40fps（采样抓栈税），差分结论不受影响但绝对值不可比。
+
+### 14.3 ETW 归因（totk_rot.etl，9.1GB，100s 旋转序列，0 丢事件）
+
+- **线程差分（每秒采样归一）**：旋转时 GPU 线程 +7%（925 vs 865/s），**三个模拟核反而
+  -10~13%，总 CPU 更少**——瓶颈不在 CPU 烧量，在 GPU 线程每帧耗时变长（帧少了它的
+  总时间反增）；模拟核在等它 → GPU 线程是旋转场景的节拍器。
+- **大尖刺窗口 [1.3,1.9]s**（含 143ms 卡顿）：GPU 线程 563ms/600ms = **94% 满负荷运行
+  eden.exe 自己的代码**（非等待驱动、非调度延迟）；VulkanWorker 7195 次切换（小任务风暴）。
+- **排除项**：采集窗口内 CreateGraphicsPipeline=0（管线缓存全命中）→ 管线编译排除；
+  驱动模块（nvlddmkm/nvoglv64）采样占比 <2% → 排除。
+- **关键异常**：二次旋转（rotR#2 尖刺 204 vs rotR#1 202）**毫不便宜** → 缓存逐出循环。
+- 坑：本会话 eden.exe 的 PDB 符号始终不加载（save_symbol_configuration + close/re-process
+  均无效，FunctionName 全 null；内核符号正常）——函数级精确归因欠账，trace 已存
+  F:\prof\totk_rot.etl 待符号修复后复查。
+
+### 14.4 根因与修复实验（代码级路径 + A/B 闭环）
+
+代码链（vk_texture_cache.cpp Image::Image 构造 + texture_cache.h UploadImageContents）：
+RTX 2060 不支持原生 ASTC → 每张 ASTC 纹理标记 Converted+CostlyLoad；当前配置
+（accelerate_astc=Gpu + astc_recompression=Uncompressed）走 **AcceleratedUpload 分支：
+GPU 线程同步执行 ReadBlock+swizzle+compute dispatch+barrier**；且解码结果以
+**RGBA 未压缩存储（4B/px，ASTC 源约 1B/px）→ 显存膨胀 → 纹理缓存 LRU 快速逐出 →
+旋转重扫时反复重建+上传**——与"二次旋转不便宜"精确吻合。
+（textures/workers.cpp 的 ImageTranscode 线程池在本树是死代码，无人调用。）
+
+A/B（同 async shaders on，2×4 窗口）：
+
+| 配置 | 旋转尖刺>30ms | >50ms | max | 旋转 fps | 二次旋转 |
+|---|---|---|---|---|---|
+| Gpu+Uncompressed | 107 | 8 | 91.6ms | 43.6-44.1 | 不变便宜 |
+| CpuAsynchronous+Bc3 | **53（-50%）** | 7 | **58.3ms** | **44.3-44.7** | **19→11 变便宜** |
+
+机制：CpuAsynchronous 走 QueueAsyncDecode（真异步路径，texture_cache.h:1149）把解码
+挪出 GPU 线程；Bc3 让显存占用 1B/px（驻留量×4）打破逐出循环。
+**结论：旋转掉帧根因=ASTC 纹理流送（GPU 线程同步上传 + 未压缩存储逐出循环）**。
+
+### 14.5 最终推荐配置（已留在 qt-config，日常可用）
+
+- `use_asynchronous_shaders=true`（消 300ms 级管线编译大卡顿）
+- `accelerate_astc=2`（CpuAsynchronous，解码出关键路径）
+- `astc_recompression=2`（Bc3，显存 1/4，打破逐出循环；有损压缩需肉眼验收）
+- 叠加效果：旋转场景尖刺 -50%、最大卡顿 303→58ms、旋转掉幅 -1.2→-0.3fps。
+- Bc3 画质验收（已做，10:30 截图 + 视觉模型检查）：无 4×4 块状伪影、无泥糊纹理、
+  HUD 锐利，天空渐变轻微 banding 属原生级（FSR 贡献为主），45fps/22.10ms——**通过**；
+  若后续察觉不可接受的 banding，
+  可只保留 CpuAsynchronous + Uncompressed（解码仍出关键路径，但逐出循环会回来一半）。
+
+### 14.6 遗留与下一步
+
+- 函数级归因欠账（PDB 符号不加载）：重处理 totk_rot.etl 后确认 GPU 线程尖刺期具体
+  函数（候选：UploadStagingBuffer/FullUploadSwizzles/AccelerateImageUpload 调度）。
+- 每帧 -0.3fps 的持续项=旋转时 GPU 线程命令处理变贵（视野 draw 增多），属 §13 已定的
+  GPU 线程吞吐方向，非本轮新问题。
+- 代码级可做（后续）：ASTC 异步解码路径的 worker 池化质量（现走 Common::ThreadWorker）、
+  纹理缓存 LRU 预算自适应；rot_test.py 脚本内帧映射 bug 仍未修（用 sidecar 离线分析绕过）。

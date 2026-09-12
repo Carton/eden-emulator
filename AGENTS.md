@@ -271,6 +271,23 @@ MSYS_NO_PATHCONV=1 "$NSYS" profile -t wddm,vulkan -d 90 --force-overwrite=true \
 - IR cache 已默认开启（76a192eb28，EDEN_JIT_IRCACHE=0 关，512MiB 上限）：hits 49.7%、
   编译期 CPU -71%、FPS 无回退。HWC 节拍探针常驻（bbcf1eb47a）。
 
+### 视角旋转掉帧攻坚轮（2026-09-12，详见 PROFILE_PROGRESS.md §14）
+- **复现**：静止 44.9fps/尖刺≈0 vs 旋转 43.6fps + 每秒 ~1.5 个 33-42ms 尖刺 + 偶发
+  143ms 大卡顿（**确定性复现**，两局独立会话尖刺时间戳逐帧一致）。基建沉淀
+  F:\prof（rot_hold/rot_test/rot_trace + J/L 键盘右摇杆映射；**方向键被 Qt 焦点导航
+  吞掉，自动化必须用字母键**）。
+- **ETW 归因**（totk_rot.etl 已存档）：旋转时 GPU 线程 +7%、模拟核 -10~13%（在等它）；
+  143ms 尖刺窗口 GPU 线程 94% 满负荷跑 eden 代码（排除驱动/管线编译/等待）；
+  **二次旋转毫不便宜 → LRU 逐出循环**。坑：本会话 eden PDB 符号加载失败（函数级欠账）。
+- **根因 = ASTC 纹理流送**：Gpu 加速上传在 GPU 线程同步执行（dispatch+barrier）+
+  Uncompressed 存储显存 4B/px 膨胀 → 逐出 → 旋转重扫反复重建上传。
+  workers.cpp 的解码线程池在本树是**死代码**。
+- **修复（配置级，已留在 qt-config）**：`accelerate_astc=2`(CpuAsynchronous) +
+  `astc_recompression=2`(Bc3) + `use_asynchronous_shaders=true` → 旋转尖刺 **-50%**、
+  最大卡顿 303→58ms、二次旋转变便宜（逐出循环打破）、Bc3 画质肉眼验收通过。
+- wpr 坑：C 盘 99% 满导致采集会话中途自灭（0xc5583000），**必须 -recordtempto F:**
+  且脚本先 wpr -cancel 自愈（僵尸会话会让下次 0xc5583001）。
+
 ### 本地补丁与工具（v0.2.1 worktree，勿提交上游）
 
 - `fsp_srv.cpp` 两处 `OpenSaveDataFileSystem` 的 `ASSERT(false)`（Temporary/ProperSystem/SafeMode
