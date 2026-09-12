@@ -10,6 +10,7 @@
 
 #include <functional>
 #include <span>
+#include <vector>
 
 #include "input_common/helpers/joycon_protocol/joycon_types.h"
 
