@@ -976,3 +976,39 @@ EDEN_JIT_NOFASTDISPATCH`。解锁 idle 基准（med ms 口径，各 60s）：
   A-tap 实际注入 X 键（scan 0x2D），button_a 必须映射 keyboard code=88 而非 65；
   用户在场时前台锁吃按键（成功率下降，m-nolink×2 作废）；NVIDIA Overlay 每次重启复活，
   preflight 已拦截。
+
+## 18. 第三梯队启动：合并版 GPU 线程新鲜画像（2026-09-13 凌晨）
+
+### 18.1 采集与线程总账（totk_t3.etl，90s 稳态 idle 局内，1kHz 采样）
+
+- 线程占用（样本/90s）：**GPU 线程 10398（≈92% 核，饱和）**、CPUCore_0/1/2 各
+  ~8.3k（~80%）、**VulkanWorker 5264（≈50%，一半余量确认）**、
+  **EmuControlThread 4233（≈37%，新信号，HLE 内核调度线程，待解剖）**、
+  HostTiming 680（600Hz 修复生效）。
+- 采集坑补遗：Bash 工具调用里 `&` 后台的进程随调用结束被回收（hold 会话死掉、
+  采到空桌面）——**一律用 run_in_background**；wpr 日志的 T*_DONE 标记复用前必须
+  先删（陈旧标记秒匹配假成功）；火绒（HipsDaemon/Tray ~1.4k 样本）与 Windows
+  Update（TiWorker 3.1k）后台活动会进 trace，绝对值解读时注意。
+
+### 18.2 GPU 线程函数簇排名（剔除 ETW 抓栈税内核帧）
+
+| 簇 | 代表（样本） | 占 GPU 线程 |
+|---|---|---|
+| 命令流处理 | ProcessCommands 458 / CallMethod 366 / ProcessDirtyRegisters 159 / ConsumeSink 109 / Macro 系 190 | **~13.5%** |
+| 缓冲同步上传 | SynchronizeBuffer 66 + WordManager 脏区 214 + memcmp 175 + memcpy 355 + MarkUsage/FindBuffer/UpdateVB ~280 | **~11%** |
+| 堆分配+锁 churn | LFH alloc 156 / RtlFreeHeap 35 / SRWLock ~400（堆锁联动） | ~5-6% |
+| 描述符/纹理 | PushImageDescriptors 189 / PrepareImageView 77 / RefreshContents 83 | ~3.5% |
+| 管线特化配置 | ConfigureImpl×3 + CurrentGraphicsPipeline 55 + key== 41 | ~3% |
+
+结论：60fps 需 GPU 线程 -25%，**A（缓冲同步）+B（命令流）两簇理论合计 ~25% 正好够**，
+但都是硬骨头；A 簇的 memcmp/memcpy 是 SynchronizeBuffer 逐 draw 比较+搬运客存内存，
+方向=版本化跳过比较/staging 批量/arena 化消灭分配锁 churn；B 簇 CallMethod 是语义
+热路径。VulkanWorker 50% 余量是承接面。块合并（JIT 侧个位数 %）+ 本梯队需并行推进
+才有机会 60。
+
+### 18.3 下轮队列
+
+1. SynchronizeBuffer/memcmp 路径代码级解剖（vk buffer_cache.h SynchronizeBuffer）
+   + EmuControlThread 37% 解剖（可能是可白拿的调度税）
+2. ExitIf 块合并设计验证（dynarmic reg_alloc 逐退出点活跃集）
+3. per-draw 小对象 arena（分配锁簇）
