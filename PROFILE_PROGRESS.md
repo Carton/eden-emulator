@@ -869,3 +869,66 @@ A/B（同 async shaders on，2×4 窗口）：
   **尖刺 -72%、最大卡顿 -80%、fps 掉幅 -75%**。
 - 剩余项=draw 洪峰堆积（第三梯队 GPU 线程每 draw 吞吐）+ 模拟核 JIT 执行质量
   （第二梯队 45→60 主战场）。
+
+## 16. 第二梯队量化 + 旋转回归排查轮（2026-09-12 下午）
+
+### 16.1 第二梯队量化（指令密度 + 钉核证伪）
+
+- **指令构成**（dynarmic 翻译期计数器，临时改动已 stash：`git stash list` 可见）：
+  total=3,839,596 翻译指令中 BL 3.39% / BLR 0.81% / BR 0.09% / RET 1.56% /
+  B.cond 4.25% / CBZ 3.49% / TBZ 1.72% → 折算 ~1 亿次 guest 调用/秒 + 3700 万返回/秒，
+  **BL→host call 影子栈路线（§11.6）靶量充足**。
+- **钉核实验证伪**（bench_run.py 新增 `--affinity`，DEVNULL 防 reader 崩溃）：
+  mask=63（逻辑核 0-5 = 6 物理核，关 SMT 让位）fps 43.19 / 1%low 23.86，**差于**
+  默认 44.83/32.43——eden ~5.2 核 + 配套线程需要 SMT 余量，硬钉 6 核反而挤。
+  路线关闭，勿再试。
+
+### 16.2 用户构建崩溃取证（简记）
+
+- 用户 12:29 构建的 eden.exe（现名 build/bin/eden_held.exe，PE 时间戳吻合）12:52/12:53
+  两次加载崩溃；CrashDumps 有 dmp：**0xC0000409 fastfail=7 = CRT abort，即 UNREACHABLE()**
+  （AssertFatalImpl）。后续按用户指示不再深挖；注意 `%LOCALAPPDATA%\CrashDumps` 有
+  WER LocalDumps 落盘，python `minidump` 包可直接解析异常码/线程栈 RVA。
+- stash 后按 AGENTS.md 标准命令重编的 eden.exe 与用户 12:29 产物**字节大小完全一致**
+  （55,609,344）——代码同源，构建方法无差异。
+
+### 16.3 旋转性能回归排查（本轮主体）
+
+统一口径重测（修正分析器单位 bug 后，见 16.4）：**回归真实**——旋转 fps 38.9-39.2 /
+尖刺 288-302 个（40s 实转），而 10:24/10:33/12:08 三个好会话为 44.2-44.8 / 8-21 个；
+**idle 完全无恙**（44.0-44.9）。
+
+排查采用"逐项证伪常量"，全部排除：
+
+| 嫌疑 | 结论 | 证据 |
+|---|---|---|
+| exe 代码 | 恒定 | 字节大小一致（同 commit c8b0c853f8 重编） |
+| 全局 qt-config | 恒定 | 与官方安装全量 diff，除调优键外一致；FSR/FXAA/GPU Low 官方也是 6/1/0 = 用户基线 |
+| **游戏级配置**（新发现） | 恒定 | `user/config/custom/0100F2C0115B6000.ini` 覆盖全局（resolution=2/vram=1/fence=3/8GB/CPU Unsafe），与官方逐行一致，9/6 后未改 |
+| shader/管线缓存 | 恒定 | user/cache/shader 的 vulkan.bin(318MB)+vulkan_pipelines.bin(127MB) 9/6 冻结，好/坏会话同状态 |
+| 游戏存档/场景 | 恒定 | nand 内存档文件 9/11 后从未写入（优雅关闭不落存档） |
+| NVIDIA Overlay | 排除 | 15:55:42 才启动（DRS 配置库 15:55:52 同步变更），杀掉后重测依旧差 |
+| 驱动版本/功耗 | 排除 | 591.86 未变；活体采样 SM/显存频率全程顶满（1350+/7200MHz），util ~38% = 历史基线，显存 2.4GB 无膨胀 |
+| 内存/系统负载 | 排除 | RAM 15GB 空闲；idle 窗口干净 |
+
+**剩余唯一解释：内核/WDDM/驱动会话状态累积劣化**。机器 10:09 开机，好成绩集中在
+开机后 2 小时内；之后经历 2 次 fastfail 崩溃、官方版跑局（14:28 起 nvcontainer）、
+NVIDIA App 15:55 配置变更、多轮强杀/ETW 采集。**验收流程：重启 →
+`python F:/prof/rot_test.py afterreboot-1`（自带 preflight）→ 旋转回 44+ 即版本合格**；
+仍差则抓旋转窗口 ETW 微 profile 对比 §14.3 热点画像。
+
+### 16.4 工具沉淀与坑
+
+- **`F:\prof\check_config.py`**（启动前检查，已接入 rot_test.py / bench_run.py preflight，
+  rc≠0 拒绝起测）：守护调优键（ASTC CpuAsync/Bc3/async shaders/CPU Unsafe）+
+  **用户基线键（FSR=6/FXAA=1/GPU Low=0，勿"修"回编译默认）** + 默认键白名单 +
+  **禁跑进程（NVIDIA Overlay.exe / LosslessScaling.exe）**。用户问过"qt-config 是不是
+  全局"——是；游戏级 custom/<ID>.ini 会叠加覆盖，排障必须两份都看。
+- **分析器单位 bug**：rot_test.py 内置 frame_wall 把帧毫秒当秒用（`/1000` 缺失），
+  历史脚本输出的绝对尖刺数与新口径不可直接比（§14.2/14.4 的 53/107 等绝对值慎引用，
+  fps 与相对结论仍有效）。已修 rot_test.py；离线版 analyze_rot.py / 历史重算
+  reanalyze_good.py（窗口按时序重建+偏移拟合，边车被覆盖也能算）。
+- **ini 固化陷阱（use_speed_limit 坑的推广）**：把键改成 `\default=true` 期间跑过
+  游戏局，退出时会把"生效值"写回成显式 `key=编译默认+\default=false`——恢复基线必须
+  值和 \default 两行一起改，且改完别让游戏先跑一局。
+- `F:\prof\csv_timeline.py`：全天逐帧 CSV 的尾段统计速查（定位"哪个会话开始变质"）。

@@ -300,6 +300,20 @@ MSYS_NO_PATHCONV=1 "$NSYS" profile -t wddm,vulkan -d 90 --force-overwrite=true \
   **use_speed_limit 被游戏退出写回 true——持久解锁需 GUI 里关一次"限制速度"**，
   脚本排障每局启动前 grep 确认。
 
+### 第二梯队量化 + 旋转回归排查轮（2026-09-12 下午，详见 PROFILE_PROGRESS.md §16）
+- 指令构成：BL 3.39%/BLR 0.81%/RET 1.56%（~1 亿次调用/秒）→ 影子栈路线靶量足；
+  **钉 6 物理核证伪**（43.19/23.86 差于默认 44.83/32.43），路线关闭。计数器改动在
+  v0.2.1 worktree 的 stash@{0}（恢复 tier 2 时 pop）。
+- **旋转回归排查**：统一口径确认回归真实（旋转 -5fps、尖刺 ×14、idle 无恙），
+  逐项证伪：exe 字节同源、全局+**游戏级 custom/0100F2C0115B6000.ini（新发现，与官方
+  逐行一致）**、shader 缓存 9/6 冻结、存档 9/11 未动、FSR/FXAA/GPU Low=用户基线
+  （官方同款 6/1/0，勿改回默认）、Overlay（15:55 才起，杀掉依旧差）、驱动 591.86、
+  GPU 频率/利用率/显存健康 → **指向内核/WDDM 状态劣化，待重启复测验收**。
+- **`F:\prof\check_config.py` 启动前检查**（已接入 rot_test/bench_run，rc≠0 拒测）：
+  守护调优键+用户基线键+禁跑进程（NVIDIA Overlay/LosslessScaling）。
+  坑：rot_test 旧分析有 ms/秒单位 bug（历史绝对尖刺数勿与新口径直比）；ini 改
+  `\default=true` 期间跑局会被固化成显式值，恢复需值+default 两行同改。
+
 ### 本地补丁与工具（v0.2.1 worktree，勿提交上游）
 
 - `fsp_srv.cpp` 两处 `OpenSaveDataFileSystem` 的 `ASSERT(false)`（Temporary/ProperSystem/SafeMode
