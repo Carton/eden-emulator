@@ -89,9 +89,10 @@ public:
         , polyfill_options(GenPolyfillOptions(block_of_code))
     {
         ASSERT(conf.page_table_address_space_bits >= 12 && conf.page_table_address_space_bits <= 64);
+        IRCache::RegisterJit();
     }
 
-    ~Impl() = default;
+    ~Impl() { IRCache::UnregisterJit(); }
 
     HaltReason Run() {
         ASSERT(!is_executing);
@@ -280,6 +281,17 @@ private:
         // LocationDescriptor ctor() does important ops (like tflags) do not skip
         auto const arch_descriptor = A64::LocationDescriptor{descriptor};
         const u64 start_pc = arch_descriptor.PC();
+        const IRCache::Config cache_config{
+            conf.define_unpredictable_behaviour,
+            conf.wall_clock_cntpct,
+            conf.check_halt_on_memory_access,
+            conf.hook_data_cache_operations,
+            conf.HasOptimization(OptimizationFlag::GetSetElimination),
+            conf.HasOptimization(OptimizationFlag::ConstProp),
+            conf.HasOptimization(OptimizationFlag::DisableVerification),
+            conf.dczid_el0,
+            polyfill_options,
+        };
         const auto dur = [](auto a, auto b) {
             return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count();
         };
@@ -287,20 +299,30 @@ private:
         // Content hash accumulates from the exact words fed to the translator,
         // so a stored cache entry always describes the bytes that produced it.
         u64 content_hash = 1469598103934665603ull;
-        const auto get_code_hashed = [this, &content_hash](u64 vaddr) {
+        std::vector<u32> guest_code;
+        bool readable_code = true;
+        const auto get_code_hashed = [this, &content_hash, &guest_code, &readable_code](u64 vaddr) {
             const auto word = conf.callbacks->MemoryReadCode(vaddr);
             content_hash = (content_hash ^ word.value_or(0)) * 1099511628211ull;
+            readable_code &= word.has_value();
+            if (IRCache::Enabled() && word) {
+                guest_code.push_back(*word);
+            }
             return word;
         };
 
         if (IRCache::Enabled()) {
             const IRCache::EntryPtr cached = IRCache::Lookup(descriptor.Value());
-            if (cached && cached->start_pc == start_pc) {
-                u64 h = 1469598103934665603ull;
-                for (u64 a = start_pc; a < cached->end_pc; a += 4) {
-                    h = (h ^ conf.callbacks->MemoryReadCode(a).value_or(0)) * 1099511628211ull;
+            if (cached && cached->start_pc == start_pc && cached->config == cache_config) {
+                bool matches = true;
+                for (std::size_t i = 0; i < cached->code.size(); ++i) {
+                    const auto word = conf.callbacks->MemoryReadCode(start_pc + i * 4);
+                    if (!word || *word != cached->code[i]) {
+                        matches = false;
+                        break;
+                    }
                 }
-                if (h == cached->content_hash) {
+                if (matches) {
                     ir_block.Reset(arch_descriptor);
                     if (IRCache::Load(*cached, ir_block)) {
                         JitStats::block_compiles.fetch_add(1, std::memory_order_relaxed);
@@ -343,9 +365,9 @@ private:
                              (int)ir_block.GetTerminal().which());
             }
         }
-        if (IRCache::Enabled()) {
-            IRCache::Store(descriptor.Value(), ir_block, start_pc, end_pc, content_hash);
-            JitStats::ir_stores.fetch_add(1, std::memory_order_relaxed);
+        if (IRCache::Enabled() && readable_code) {
+            IRCache::Store(descriptor.Value(), ir_block, start_pc, end_pc, content_hash,
+                           cache_config, std::move(guest_code));
         }
         const auto t3 = std::chrono::steady_clock::now();
         const auto entry = emitter.Emit(ir_block).entrypoint;
