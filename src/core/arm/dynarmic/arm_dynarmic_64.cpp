@@ -432,6 +432,17 @@ ArmDynarmic64::~ArmDynarmic64() {
              JitStats::ir_hits.load(), JitStats::ir_stores.load(),
              JitStats::ir_hash_mismatch.load(), JitStats::ir_cache_entries.load(),
              JitStats::ir_cache_bytes.load());
+    const auto inst_mix = [](std::uint64_t n) {
+        return 100.0 * static_cast<double>(n) / static_cast<double>(JitStats::inst_total.load() + 1);
+    };
+    LOG_INFO(Core_ARM,
+             "dynarmic inst mix: total={} BL={:.2f}% BLR={:.2f}% BR={:.2f}% RET={:.2f}% "
+             "B.cond={:.2f}% B={:.2f}% CBZ={:.2f}% TBZ={:.2f}%",
+             JitStats::inst_total.load(), inst_mix(JitStats::inst_bl.load()),
+             inst_mix(JitStats::inst_blr.load()), inst_mix(JitStats::inst_br.load()),
+             inst_mix(JitStats::inst_ret.load()), inst_mix(JitStats::inst_bcond.load()),
+             inst_mix(JitStats::inst_buncond.load()), inst_mix(JitStats::inst_cbz.load()),
+             inst_mix(JitStats::inst_tbz.load()));
 #endif
 }
 

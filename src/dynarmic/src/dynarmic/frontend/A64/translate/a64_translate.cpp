@@ -14,6 +14,8 @@
 #include "dynarmic/ir/basic_block.h"
 #include "dynarmic/ir/terminal.h"
 
+#include "dynarmic/backend/x64/jit_stats.h"
+
 namespace Dynarmic::A64 {
 
 void Translate(IR::Block& block, LocationDescriptor descriptor, MemoryReadCodeFuncType memory_read_code, TranslationOptions options) {
@@ -23,6 +25,7 @@ void Translate(IR::Block& block, LocationDescriptor descriptor, MemoryReadCodeFu
     bool should_continue = true;
     do {
         const u64 pc = visitor.ir.current_location->PC();
+        Dynarmic::Backend::X64::JitStats::Count(Dynarmic::Backend::X64::JitStats::inst_total);
         if (const auto instruction = memory_read_code(pc)) {
             if (auto decoder = Decode<TranslatorVisitor, bool>(visitor, *instruction)) {
                 should_continue = *decoder;
