@@ -461,7 +461,7 @@ std::optional<HostLoc> RegAlloc::ValueLocation(const IR::Inst* value) const noex
         const u8 entry = name_to_hostloc[name];
         const std::optional<HostLoc> result = entry != 0
             ? std::optional{HostLoc(entry - 1)} : std::nullopt;
-#ifdef _DEBUG
+#ifndef NDEBUG
         std::optional<HostLoc> scanned;
         for (size_t i = 0; i < hostloc_info.size(); ++i) {
             if (hostloc_info[i].ContainsValue(value)) {
