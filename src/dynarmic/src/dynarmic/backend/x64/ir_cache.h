@@ -63,7 +63,8 @@ public:
                       std::vector<std::uint32_t> code);
 
     // Rebuilds `block` (already Reset with the matching descriptor) from the
-    // serialized payload. Returns false on malformed data.
+    // trusted, process-local payload produced by Store. Returns false on detected
+    // structural errors; this is not a validator for disk or untrusted input.
     static bool Load(const Entry& entry, IR::Block& block);
 
 private:

@@ -50,7 +50,8 @@ TEST_CASE("IR cache preserves pooled instructions, names and references", "[ir-c
     CacheLifetime lifetime;
     IR::Block original{IR::LocationDescriptor{0}};
     IR::Inst* previous = nullptr;
-    for (unsigned i = 0; i < 40; ++i) {
+    // Cross both the inline storage and multiple pooled storage boundaries.
+    for (unsigned i = 0; i < 96; ++i) {
         const auto input = previous ? IR::Value{previous} : IR::Value{u64{1}};
         auto inst = original.AppendNewInst(IR::Opcode::Add64,
                                           {input, IR::Value{u64{2}}, IR::Value{false}});
