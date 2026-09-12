@@ -67,3 +67,4 @@ vulkansdk*.exe
 
 # Local review dependencies, standalone test builds and validation artifacts
 /.local-review/
+.codegraph/
