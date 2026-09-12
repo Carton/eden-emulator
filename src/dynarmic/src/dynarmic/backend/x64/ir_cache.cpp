@@ -5,9 +5,12 @@
 
 #include "dynarmic/backend/x64/ir_cache.h"
 
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <mutex>
+#include <limits>
 #include <shared_mutex>
 #include <unordered_map>
 
@@ -21,7 +24,7 @@ namespace Dynarmic::Backend::X64 {
 namespace {
 
 constexpr std::uint32_t kMagic = 0x45495243;  // 'EIRC'
-constexpr std::uint32_t kVersion = 1;
+constexpr std::uint32_t kVersion = 2;
 constexpr std::size_t kValueSize = sizeof(IR::Value);
 
 // Bounded byte reader/writer over a flat buffer.
@@ -40,7 +43,7 @@ struct Buffer {
         W(&v, sizeof(T));
     }
     bool R(void* p, std::size_t n) {
-        if (pos + n > in_size) {
+        if (n > in_size - pos) {
             return false;
         }
         std::memcpy(p, in + pos, n);
@@ -118,13 +121,15 @@ std::vector<std::uint8_t> IRCache::Serialize(const IR::Block& block) {
     // Instructions: header (opcode/name) pass, then inst-ref indices pass.
     std::vector<const IR::Inst*> insts;
     insts.reserve(32);
+    std::unordered_map<const IR::Inst*, std::uint32_t> indices;
     for (const auto& inst : block.Instructions()) {
+        indices.emplace(&inst, static_cast<std::uint32_t>(insts.size()));
         insts.push_back(&inst);
     }
     b.Wt<std::uint32_t>(static_cast<std::uint32_t>(insts.size()));
     for (const IR::Inst* inst : insts) {
         b.Wt<std::uint16_t>(static_cast<std::uint16_t>(inst->GetOpcode()));
-        b.Wt<std::uint16_t>(static_cast<std::uint16_t>(inst->GetName()));
+        b.Wt<std::uint32_t>(inst->GetName());
         const std::size_t nargs = inst->NumArgs();
         b.Wt<std::uint8_t>(static_cast<std::uint8_t>(nargs));
         for (std::size_t i = 0; i < nargs; i++) {
@@ -139,14 +144,7 @@ std::vector<std::uint8_t> IRCache::Serialize(const IR::Block& block) {
             const IR::Value& v = inst->GetArg(i);
             if (!v.IsImmediate()) {
                 const IR::Inst* target = v.GetInst();
-                std::uint32_t index = 0xffffffffu;
-                for (std::size_t k = 0; k < insts.size(); k++) {
-                    if (insts[k] == target) {
-                        index = static_cast<std::uint32_t>(k);
-                        break;
-                    }
-                }
-                b.Wt<std::uint32_t>(index);
+                b.Wt<std::uint32_t>(indices.at(target));
             }
         }
     }
@@ -204,7 +202,7 @@ bool IRCache::Load(const Entry& entry, IR::Block& block) {
     insts.reserve(count);
     struct PendingArg {
         std::uint16_t op;
-        std::uint16_t name;
+        std::uint32_t name;
     };
     std::vector<PendingArg> pending;
     pending.reserve(count);
@@ -217,12 +215,16 @@ bool IRCache::Load(const Entry& entry, IR::Block& block) {
     std::vector<std::vector<ArgSlot>> arg_slots(count);
 
     for (std::uint32_t n = 0; n < count; n++) {
-        std::uint16_t op = 0, name = 0;
+        std::uint16_t op = 0;
+        std::uint32_t name = 0;
         std::uint8_t nargs_raw = 0;
         if (!b.Rt(op) || !b.Rt(name) || !b.Rt(nargs_raw)) {
             return false;
         }
         const auto opcode = static_cast<IR::Opcode>(op);
+        if (op >= IR::OpcodeCount) {
+            return false;
+        }
         const std::size_t nargs = IR::GetNumArgsOf(opcode);
         if (nargs != nargs_raw) {
             return false;  // payload disagrees with opcode table
@@ -372,6 +374,7 @@ struct SharedState {
     std::shared_mutex mutex;
     std::unordered_map<std::uint64_t, IRCache::EntryPtr> map;
     std::size_t total_bytes = 0;
+    std::size_t jit_count = 0;
 };
 
 SharedState& GetState() {
@@ -386,14 +389,21 @@ bool EnvEnabled() {
 }
 
 std::size_t MaxCacheBytes() {
-    // Bound resident memory; TOTK measures ~335 MiB for a full session.
+    // Payload allocation budget, excluding map nodes and allocator overhead.
     constexpr std::size_t kDefaultMax = std::size_t(512) << 20;
     const char* env = std::getenv("EDEN_JIT_IRCACHE_MAXBYTES");
     if (env == nullptr || env[0] == '\0') {
         return kDefaultMax;
     }
-    const unsigned long long v = std::strtoull(env, nullptr, 10);
-    return v == 0 ? kDefaultMax : static_cast<std::size_t>(v);
+    if (env[0] < '0' || env[0] > '9') {
+        return kDefaultMax;
+    }
+    char* end = nullptr;
+    errno = 0;
+    const unsigned long long v = std::strtoull(env, &end, 10);
+    return errno == ERANGE || *end != '\0' || v == 0 ||
+                   v > std::numeric_limits<std::size_t>::max()
+        ? kDefaultMax : static_cast<std::size_t>(v);
 }
 
 }  // namespace
@@ -401,6 +411,23 @@ std::size_t MaxCacheBytes() {
 bool IRCache::Enabled() {
     static const bool enabled = EnvEnabled();
     return enabled;
+}
+
+void IRCache::RegisterJit() {
+    SharedState& s = GetState();
+    std::unique_lock lock{s.mutex};
+    ++s.jit_count;
+}
+
+void IRCache::UnregisterJit() {
+    SharedState& s = GetState();
+    std::unique_lock lock{s.mutex};
+    if (--s.jit_count == 0) {
+        decltype(s.map){}.swap(s.map);
+        s.total_bytes = 0;
+        JitStats::ir_cache_entries.store(0, std::memory_order_relaxed);
+        JitStats::ir_cache_bytes.store(0, std::memory_order_relaxed);
+    }
 }
 
 IRCache::EntryPtr IRCache::Lookup(std::uint64_t descriptor_value) {
@@ -415,11 +442,24 @@ IRCache::EntryPtr IRCache::Lookup(std::uint64_t descriptor_value) {
 
 void IRCache::Store(std::uint64_t descriptor_value, const IR::Block& block,
                     std::uint64_t start_pc, std::uint64_t end_pc,
-                    std::uint64_t content_hash) {
-    if (GetState().total_bytes >= MaxCacheBytes()) {
-        return;  // cap reached; lookups still serve what is cached
+                    std::uint64_t content_hash, const Config& config,
+                    std::vector<std::uint32_t> code) {
+    // Avoid serialization once the budget is full, but allow stale entries
+    // to be replaced. The exclusive-lock check below remains authoritative.
+    {
+        SharedState& s = GetState();
+        std::shared_lock lock{s.mutex};
+        const auto it = s.map.find(descriptor_value);
+        if (it == s.map.end() && s.total_bytes >= MaxCacheBytes()) {
+            return;
+        }
+        if (it != s.map.end() && it->second->config == config && it->second->code == code) {
+            return;
+        }
     }
     auto entry = std::make_shared<Entry>();
+    entry->config = config;
+    entry->code = std::move(code);
     entry->bytes = Serialize(block);
     entry->start_pc = start_pc;
     entry->end_pc = end_pc;
@@ -427,13 +467,25 @@ void IRCache::Store(std::uint64_t descriptor_value, const IR::Block& block,
 
     SharedState& s = GetState();
     std::unique_lock lock{s.mutex};
-    const auto [it, inserted] = s.map.emplace(descriptor_value, std::move(entry));
-    if (!inserted) {
-        return;  // another core won the race; keep the existing entry
+    const auto allocation_size = [](const Entry& e) {
+        return sizeof(Entry) + e.bytes.capacity() + e.code.capacity() * sizeof(std::uint32_t);
+    };
+    const auto it = s.map.find(descriptor_value);
+    if (it != s.map.end() && it->second->config == config && it->second->code == entry->code) {
+        return;  // another core already published the same translation
     }
-    s.total_bytes += it->second->bytes.size();
-    JitStats::ir_cache_entries.fetch_add(1, std::memory_order_relaxed);
-    JitStats::ir_cache_bytes.fetch_add(it->second->bytes.size(), std::memory_order_relaxed);
+    const std::size_t old_size = it == s.map.end() ? 0 : allocation_size(*it->second);
+    const std::size_t new_size = allocation_size(*entry);
+    const std::size_t retained_size = s.total_bytes - old_size;
+    const std::size_t budget = MaxCacheBytes();
+    if (retained_size > budget || new_size > budget - retained_size) {
+        return;
+    }
+    s.map.insert_or_assign(descriptor_value, std::move(entry));
+    s.total_bytes = retained_size + new_size;
+    JitStats::ir_stores.fetch_add(1, std::memory_order_relaxed);
+    JitStats::ir_cache_entries.store(s.map.size(), std::memory_order_relaxed);
+    JitStats::ir_cache_bytes.store(s.total_bytes, std::memory_order_relaxed);
 }
 
 }  // namespace Dynarmic::Backend::X64
