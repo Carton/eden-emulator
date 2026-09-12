@@ -2,6 +2,9 @@
 
 仅用于本地实验，不是上游修复验收或性能收益声明。
 
+后续跨平台复审见 [local-review-portability.md](local-review-portability.md)。非 Windows
+现在默认关闭共享 IR 和活动统计；下面复现缓存开启测试时须显式设置环境变量。
+
 ## 本轮变更
 
 - TBO：默认初始化 `TextureBufferBinding::format`，修复首次空绑定比较读取未初始化枚举的问题。测试在非零填充内存上默认构造，并在有效绑定销毁后重建。
@@ -43,12 +46,12 @@ WSL/Linux x86-64，GCC 13.3，Debug + `_DEBUG`。独立工程链接真实 dynarm
 cmake -S .local-review -B .local-review/build-local \
   -DCMAKE_BUILD_TYPE=Debug -DDYNARMIC_ENABLE_CPU_FEATURE_DETECTION=ON
 cmake --build .local-review/build-local -j 4
-.local-review/build-local/review_tests
+EDEN_JIT_IRCACHE=1 EDEN_JIT_STATS=1 .local-review/build-local/review_tests
 EDEN_JIT_IRCACHE=0 .local-review/build-local/review_tests '[ir-cache-execution]'
-EDEN_JIT_STATS=0 .local-review/build-local/review_tests
+EDEN_JIT_IRCACHE=1 EDEN_JIT_STATS=0 .local-review/build-local/review_tests
 .local-review/build-local/a32_review_tests
 .local-review/build-local/buffer_binding_tests
-.local-review/build-local/ir_cache_sanitized
+EDEN_JIT_IRCACHE=1 .local-review/build-local/ir_cache_sanitized
 ```
 
 LeakSanitizer 在限制 ptrace 的沙箱中可能报运行环境错误；本轮是在允许其运行的环境中验证通过。此目录整体不随 Git 分享，重新克隆不会自动获得依赖或临时工程。
