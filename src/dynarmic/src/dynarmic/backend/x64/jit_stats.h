@@ -62,4 +62,16 @@ inline std::atomic<uint64_t> ir_hash_mismatch{0};  // lookups failed content che
 inline std::atomic<uint64_t> ir_cache_entries{0};  // live entries
 inline std::atomic<uint64_t> ir_cache_bytes{0};    // entry and vector allocations (not total RSS)
 
+// Static guest instruction mix (counted at translate time; steady-state compiles
+// are near-zero so these converge to the executed-code distribution).
+inline std::atomic<uint64_t> inst_total{0};
+inline std::atomic<uint64_t> inst_bl{0};       // BL imm
+inline std::atomic<uint64_t> inst_blr{0};      // BLR (indirect call)
+inline std::atomic<uint64_t> inst_br{0};       // BR (indirect jump / tail call)
+inline std::atomic<uint64_t> inst_ret{0};      // RET
+inline std::atomic<uint64_t> inst_bcond{0};    // B.cond
+inline std::atomic<uint64_t> inst_buncond{0};  // B imm
+inline std::atomic<uint64_t> inst_cbz{0};      // CBZ/CBNZ
+inline std::atomic<uint64_t> inst_tbz{0};      // TBZ/TBNZ
+
 }  // namespace Dynarmic::Backend::X64::JitStats

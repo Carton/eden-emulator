@@ -8,9 +8,12 @@
 
 #include "dynarmic/frontend/A64/translate/impl/impl.h"
 
+#include "dynarmic/backend/x64/jit_stats.h"
+
 namespace Dynarmic::A64 {
 
 bool TranslatorVisitor::B_cond(Imm<19> imm19, Cond cond) {
+    Dynarmic::Backend::X64::JitStats::Count(Dynarmic::Backend::X64::JitStats::inst_bcond);
     const s64 offset = concatenate(imm19, Imm<2>{0}).SignExtend<s64>();
     const u64 target = ir.PC() + offset;
 
@@ -21,6 +24,7 @@ bool TranslatorVisitor::B_cond(Imm<19> imm19, Cond cond) {
 }
 
 bool TranslatorVisitor::B_uncond(Imm<26> imm26) {
+    Dynarmic::Backend::X64::JitStats::Count(Dynarmic::Backend::X64::JitStats::inst_buncond);
     const s64 offset = concatenate(imm26, Imm<2>{0}).SignExtend<s64>();
     const u64 target = ir.PC() + offset;
     // Pattern to halt execution (B .)
@@ -33,6 +37,7 @@ bool TranslatorVisitor::B_uncond(Imm<26> imm26) {
 }
 
 bool TranslatorVisitor::BL(Imm<26> imm26) {
+    Dynarmic::Backend::X64::JitStats::Count(Dynarmic::Backend::X64::JitStats::inst_bl);
     const s64 offset = concatenate(imm26, Imm<2>{0}).SignExtend<s64>();
 
     X(64, Reg::R30, ir.Imm64(ir.PC() + 4));
@@ -44,6 +49,7 @@ bool TranslatorVisitor::BL(Imm<26> imm26) {
 }
 
 bool TranslatorVisitor::BLR(Reg Rn) {
+    Dynarmic::Backend::X64::JitStats::Count(Dynarmic::Backend::X64::JitStats::inst_blr);
     const auto target = X(64, Rn);
 
     X(64, Reg::R30, ir.Imm64(ir.PC() + 4));
@@ -55,6 +61,7 @@ bool TranslatorVisitor::BLR(Reg Rn) {
 }
 
 bool TranslatorVisitor::BR(Reg Rn) {
+    Dynarmic::Backend::X64::JitStats::Count(Dynarmic::Backend::X64::JitStats::inst_br);
     const auto target = X(64, Rn);
 
     ir.SetPC(target);
@@ -63,6 +70,7 @@ bool TranslatorVisitor::BR(Reg Rn) {
 }
 
 bool TranslatorVisitor::RET(Reg Rn) {
+    Dynarmic::Backend::X64::JitStats::Count(Dynarmic::Backend::X64::JitStats::inst_ret);
     const auto target = X(64, Rn);
 
     ir.SetPC(target);
@@ -71,6 +79,7 @@ bool TranslatorVisitor::RET(Reg Rn) {
 }
 
 bool TranslatorVisitor::CBZ(bool sf, Imm<19> imm19, Reg Rt) {
+    Dynarmic::Backend::X64::JitStats::Count(Dynarmic::Backend::X64::JitStats::inst_cbz);
     const size_t datasize = sf ? 64 : 32;
     const s64 offset = concatenate(imm19, Imm<2>{0}).SignExtend<s64>();
 
@@ -86,6 +95,7 @@ bool TranslatorVisitor::CBZ(bool sf, Imm<19> imm19, Reg Rt) {
 }
 
 bool TranslatorVisitor::CBNZ(bool sf, Imm<19> imm19, Reg Rt) {
+    Dynarmic::Backend::X64::JitStats::Count(Dynarmic::Backend::X64::JitStats::inst_cbz);
     const size_t datasize = sf ? 64 : 32;
     const s64 offset = concatenate(imm19, Imm<2>{0}).SignExtend<s64>();
 
@@ -101,6 +111,7 @@ bool TranslatorVisitor::CBNZ(bool sf, Imm<19> imm19, Reg Rt) {
 }
 
 bool TranslatorVisitor::TBZ(Imm<1> b5, Imm<5> b40, Imm<14> imm14, Reg Rt) {
+    Dynarmic::Backend::X64::JitStats::Count(Dynarmic::Backend::X64::JitStats::inst_tbz);
     const size_t datasize = b5 == 1 ? 64 : 32;
     const u8 bit_pos = concatenate(b5, b40).ZeroExtend<u8>();
     const s64 offset = concatenate(imm14, Imm<2>{0}).SignExtend<s64>();
@@ -117,6 +128,7 @@ bool TranslatorVisitor::TBZ(Imm<1> b5, Imm<5> b40, Imm<14> imm14, Reg Rt) {
 }
 
 bool TranslatorVisitor::TBNZ(Imm<1> b5, Imm<5> b40, Imm<14> imm14, Reg Rt) {
+    Dynarmic::Backend::X64::JitStats::Count(Dynarmic::Backend::X64::JitStats::inst_tbz);
     const size_t datasize = b5 == 1 ? 64 : 32;
     const u8 bit_pos = concatenate(b5, b40).ZeroExtend<u8>();
     const s64 offset = concatenate(imm14, Imm<2>{0}).SignExtend<s64>();
