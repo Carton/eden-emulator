@@ -383,9 +383,17 @@ SharedState& GetState() {
 }
 
 bool EnvEnabled() {
-    // Default on; EDEN_JIT_IRCACHE=0 disables.
+    // Only the Windows desktop workload has been profiled. Other platforms
+    // must opt in before paying for shared locks and up to 512 MiB of payload.
     const char* env = std::getenv("EDEN_JIT_IRCACHE");
-    return !(env != nullptr && env[0] == '0');
+    if (env != nullptr) {
+        return env[0] != '0';
+    }
+#ifdef _WIN32
+    return true;
+#else
+    return false;
+#endif
 }
 
 std::size_t MaxCacheBytes() {

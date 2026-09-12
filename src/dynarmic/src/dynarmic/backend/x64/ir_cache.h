@@ -8,7 +8,8 @@
 // second and third core skip Translate+Optimize and only run Emit. Entries
 // are keyed by the IR location descriptor. Translation settings and the exact
 // guest words must also match before reuse. Entries live only while at least
-// one x64 A64 Jit exists. Enabled by default; EDEN_JIT_IRCACHE=0 disables it.
+// one x64 A64 Jit exists. Enabled by default on Windows only; other platforms
+// opt in with EDEN_JIT_IRCACHE=1. EDEN_JIT_IRCACHE=0 disables it everywhere.
 
 #pragma once
 
