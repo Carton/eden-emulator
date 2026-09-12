@@ -802,8 +802,16 @@ A/B（同 async shaders on，2×4 窗口）：
 
 ### 14.6 遗留与下一步
 
-- 函数级归因欠账（PDB 符号不加载）：重处理 totk_rot.etl 后确认 GPU 线程尖刺期具体
-  函数（候选：UploadStagingBuffer/FullUploadSwizzles/AccelerateImageUpload 调度）。
+- ~~函数级归因欠账~~（09-12 已补）：**符号失败根因=D 盘 100% 满**（SymCache 写不进
+  eden.pdb 的 263MB 转换；ntoskrnl 能用是因早已缓存）。修复=符号设施整体挪 F:
+  （SymCache+SymServer+symbolPath 加本地 PDB 目录），旧 D 盘缓存 14GB 已清（D 盘
+  100%→73%）。补上的函数级证据：旋转窗口 GPU 线程 eden.exe 采样里纹理流送三件套
+  清晰可见——`Tegra::Texture::SwizzleImpl<0,16>` 249（上传 swizzle）、
+  `RemoveImageViewReferences` 124（逐出清理，ICF 折叠名）、`RefreshContents` 100
+  （内容重传），与 ASTC 根因结论互证；其余 Top 与 §5 基线画像一致
+  （ProcessCommands 450/CallMethod 367/PushImageDescriptors 189/GpuToCpuAddress 147）。
+  **注意**：CpuAsynchronous+Bc3 的 trace 是旧配置采的——新配置下的函数级再采样
+  可确认 SwizzleImpl/RefreshContents 是否如期消失于 GPU 线程（下轮验证项）。
 - 每帧 -0.3fps 的持续项=旋转时 GPU 线程命令处理变贵（视野 draw 增多），属 §13 已定的
   GPU 线程吞吐方向，非本轮新问题。
 - 代码级可做（后续）：ASTC 异步解码路径的 worker 池化质量（现走 Common::ThreadWorker）、
