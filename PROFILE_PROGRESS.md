@@ -1012,3 +1012,15 @@ EDEN_JIT_NOFASTDISPATCH`。解锁 idle 基准（med ms 口径，各 60s）：
    + EmuControlThread 37% 解剖（可能是可白拿的调度税）
 2. ExitIf 块合并设计验证（dynarmic reg_alloc 逐退出点活跃集）
 3. per-draw 小对象 arena（分配锁簇）
+
+### 16.5 补遗（2026-09-13）
+
+- **重启复测已确认**：用户重启后旋转性能恢复历史水平——§16.3 的"内核/WDDM 状态
+  劣化"结论坐实，版本本身无回归。
+- **Limit Speed Percent 被强制勾回的根因与修复（d99a45d638，local-only）**：
+  `MainWindow::OnShutdownBegin()`（main_window.cpp）在每次游戏退出时无条件
+  `use_speed_limit.SetValue(true)`（上游防加速模式泄漏），退出保存把它持久化，
+  覆盖用户取消的勾选。修复=BootGame 开始时记录 pre_boot 值、退出时恢复；
+  加速/减速模式重置保持不变。已实测：退出后 ini 保持 false。
+- 坑：git 推送走 http_proxy=127.0.0.1:7777，代理进程挂掉时用
+  `git -c http.proxy= -c https.proxy= push carton <branch>` 直连即可（GitHub 可达）。
