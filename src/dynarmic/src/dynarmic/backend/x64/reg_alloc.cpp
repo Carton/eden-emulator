@@ -459,10 +459,19 @@ std::optional<HostLoc> RegAlloc::ValueLocation(const IR::Inst* value) const noex
     const unsigned name = value->GetName();
     if (name != 0 && name < kMaxTrackedNames) [[likely]] {
         const u8 entry = name_to_hostloc[name];
-        if (entry != 0) {
-            return HostLoc(entry - 1);
+        const std::optional<HostLoc> result = entry != 0
+            ? std::optional{HostLoc(entry - 1)} : std::nullopt;
+#ifdef _DEBUG
+        std::optional<HostLoc> scanned;
+        for (size_t i = 0; i < hostloc_info.size(); ++i) {
+            if (hostloc_info[i].ContainsValue(value)) {
+                scanned = HostLoc(i);
+                break;
+            }
         }
-        return std::nullopt;
+        ASSERT(result == scanned && "ValueLocation reverse index is stale");
+#endif
+        return result;
     }
     for (size_t i = 0; i < hostloc_info.size(); i++)
         if (hostloc_info[i].ContainsValue(value)) {
