@@ -258,10 +258,7 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
 #if defined(ARCHITECTURE_arm64) || defined(__sun__) || defined(__NetBSD__) || defined(__DragonFly__) || defined(__OpenBSD__)
     config.code_cache_size = std::uint32_t(128_MiB);
 #else
-    // Local profiling: TOTK sustains ~2.4k new blocks/s/core (uniform ~48MB code
-    // working set, see PROFILE_PROGRESS.md); 512 MiB fills in ~25-40 min of play and
-    // triggers a full-clear recompile storm. 2 GiB is reserve-only, committed on demand.
-    config.code_cache_size = std::uint32_t(2048_MiB);
+    config.code_cache_size = std::uint32_t(512_MiB);
 #endif
 
     // Allow memory fault handling to work
