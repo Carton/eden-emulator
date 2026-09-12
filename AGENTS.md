@@ -314,6 +314,17 @@ MSYS_NO_PATHCONV=1 "$NSYS" profile -t wddm,vulkan -d 90 --force-overwrite=true \
   坑：rot_test 旧分析有 ms/秒单位 bug（历史绝对尖刺数勿与新口径直比）；ini 改
   `\default=true` 期间跑局会被固化成显式值，恢复需值+default 两行同改。
 
+### 第二梯队路线裁决轮（2026-09-12 深夜，详见 PROFILE_PROGRESS.md §17）
+- merge 分支整合完成（计数器并入 stats gating，e60925cb89）；合并版基线：旋转尖刺
+  81→31→10→7 递减（首扫热身），idle 干净。**A/B 矩阵裁决：关 RSB/关 FastDispatch
+  med 纹丝不动（22.47-22.49ms）**，分发/边界控制流层对稳态帧时零成本 →
+  **影子栈路线终结**；RSB/快分发仅护尾延迟（1%low 可差 5.6 倍）。
+- 剩余 JIT 理论：边界寄存器流量（块局部 RA spill/reload，平均块 3.7 条）→
+  穿越条件分支的块合并（ExitIf 内联退出算子）是个位数 % 杠杆；60fps 需 JIT 核与
+  gpu_thread 同时 -25%，两梯队合并推进才有戏。
+- 新工具：`EDEN_JIT_NOLINK/NORSB/NOFASTDISPATCH` 环境闸门（local-only，worktree）；
+  解锁模式菜单 150fps 伪装陷阱；A-tap=X 键（code 88）。
+
 ### 本地补丁与工具（v0.2.1 worktree，勿提交上游）
 
 - `fsp_srv.cpp` 两处 `OpenSaveDataFileSystem` 的 `ASSERT(false)`（Temporary/ProperSystem/SafeMode

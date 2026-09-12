@@ -932,3 +932,47 @@ NVIDIA App 15:55 配置变更、多轮强杀/ETW 采集。**验收流程：重�
   游戏局，退出时会把"生效值"写回成显式 `key=编译默认+\default=false`——恢复基线必须
   值和 \default 两行一起改，且改完别让游戏先跑一局。
 - `F:\prof\csv_timeline.py`：全天逐帧 CSV 的尾段统计速查（定位"哪个会话开始变质"）。
+
+## 17. 第二梯队路线裁决轮（2026-09-12 深夜：合并分支基线 + 分发层 A/B 矩阵）
+
+### 17.1 合并分支整合与新基线
+
+- 用户 merge 入 `test/v0.2.1-profiling-fix`（IR cache 加固/跨通道 buffer 失效/fsp_srv 校验/
+  **stats gating（EDEN_JIT_STATS，Windows 默认开）**/libc++ 可移植性，45 文件）。
+  stash（指令计数器）pop 冲突已解决：采用上游累计快照日志结构，inst-mix 并入同一闸门
+  （e60925cb89），实测日志输出正常（total=2.6M，BL 3.54%/BLR 0.81%/RET 1.62%）。
+- **合并版旋转基线（merged-base2，解锁模式）**：idle 43.1-44.9fps 干净；旋转窗口尖刺
+  **81→31→10→7 快速递减**（首转贵=纹理首扫热身，二次旋转变便宜=Bc3 逐出循环保持打破），
+  max 89ms。此为 tier-2 后续 A/B 的对照锚点。
+
+### 17.2 分发层 A/B 矩阵（裁决性数据）
+
+新增环境变量闸门（local-only，与 Unsafe 档正交）：`EDEN_JIT_NOLINK / EDEN_JIT_NORSB /
+EDEN_JIT_NOFASTDISPATCH`。解锁 idle 基准（med ms 口径，各 60s）：
+
+| 配置 | med | 1%low | p99 |
+|---|---|---|---|
+| m-base（全开） | **22.49** | 35.74 | 25.05 |
+| m-norsb（关返回栈缓冲） | **22.48** | 27.98 | 30.25 |
+| m-nofastdispatch（关快速分发） | **22.47** | 6.32 | 39.04 |
+| m-nolink / m-allslow | 未进游戏作废×3（自动按键间歇失败） | | |
+
+**结论：块边界控制流层（RET 预测/分发/链接）med 成本 = 0**。RSB/FastDispatch 只保护
+尾延迟（1%low/p99），对稳态帧时毫无贡献 → **FEX call-ret 影子栈路线对中位帧率的收益
+天花板≈0，路线终结**（§11.6 排序据此作废）。m-nofast 的 1%low=6.3 也说明慢速分发
+路径的尾延迟代价极大——影子栈/RSB 这类优化只值得作为尾延迟手段保留，现状已够。
+
+### 17.3 剩余 JIT 侧理论与下一步
+
+- A/B 改变的只是边界的**控制流**部分；边界真正的剩余成本疑似**寄存器越界流量**
+  （dynarmic RA 是块局部的：每边界把 guest 寄存器 spill 到 JitState 再重载；实测平均
+  块长仅 3.7 条 guest 指令，B.cond/CBZ/TBZ 占 9.5% 指令 = 大量碎块）。
+- 可行杠杆=**穿越条件分支的块合并**：新增内联条件退出 IR 算子（ExitIf(cond, target)，
+  后端 cmp+jcc 到尾桩，fallthrough 继续内联），B.cond/CBZ/TBZ 不再终结块 → 块长 3-5×，
+  边界寄存器流量摊薄。估算收益个位数 %（边界流量 ≈ 0.15-0.3 核秒/秒的量级），
+  **撑不起 25.1%**——且 §13 指出 60fps 需 JIT 核与 gpu_thread **同时**降到 ≤16.67ms，
+  两梯队必须合并推进才可能达 60。
+- 深夜自动化坑：解锁模式菜单 150fps 会伪装成好成绩（bench 的 SUSPICIOUS 行已防）；
+  A-tap 实际注入 X 键（scan 0x2D），button_a 必须映射 keyboard code=88 而非 65；
+  用户在场时前台锁吃按键（成功率下降，m-nolink×2 作废）；NVIDIA Overlay 每次重启复活，
+  preflight 已拦截。
