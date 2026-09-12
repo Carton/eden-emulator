@@ -21,12 +21,13 @@ inline std::atomic<uint64_t> fastmem_faults{0};  // fastmem SEH fault fallbacks
 inline std::atomic<uint64_t> translate_ns{0};  // guest decode -> IR build
 inline std::atomic<uint64_t> optimize_ns{0};   // IR optimization passes
 inline std::atomic<uint64_t> emit_ns{0};       // register allocation + x64 codegen
+inline std::atomic<uint64_t> compile_ns{0};    // full GetBlock miss, including cache overhead
 
 // Shared IR cache (EDEN_JIT_IRCACHE=1), see ir_cache.h.
 inline std::atomic<uint64_t> ir_hits{0};           // entries served from cache
-inline std::atomic<uint64_t> ir_stores{0};         // entries inserted
+inline std::atomic<uint64_t> ir_stores{0};         // entries inserted or replaced
 inline std::atomic<uint64_t> ir_hash_mismatch{0};  // lookups failed content check
 inline std::atomic<uint64_t> ir_cache_entries{0};  // live entries
-inline std::atomic<uint64_t> ir_cache_bytes{0};    // serialized bytes held
+inline std::atomic<uint64_t> ir_cache_bytes{0};    // entry and vector allocations (not total RSS)
 
 }  // namespace Dynarmic::Backend::X64::JitStats
