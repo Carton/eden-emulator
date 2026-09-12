@@ -290,11 +290,11 @@ private:
     }
 
     CodePtr GetBlock(IR::LocationDescriptor descriptor) {
-        JitStats::block_lookups.fetch_add(1, std::memory_order_relaxed);
+        JitStats::Count(JitStats::block_lookups, 1);
         if (auto block = emitter.GetBasicBlock(descriptor))
             return block->entrypoint;
 
-        const auto compile_begin = std::chrono::steady_clock::now();
+        const auto compile_begin = JitStats::Now();
         constexpr size_t MINIMUM_REMAINING_CODESIZE = 1 * 1024 * 1024;
         if (block_of_code.SpaceRemaining() < MINIMUM_REMAINING_CODESIZE) {
             // Immediately evacuate cache
@@ -323,13 +323,13 @@ private:
         };
         const auto emit_block = [&](u64 hash) {
             DumpBlock(ir_block, hash);
-            const auto begin = std::chrono::steady_clock::now();
+            const auto begin = JitStats::Now();
             const auto entry = emitter.Emit(ir_block).entrypoint;
-            const auto end = std::chrono::steady_clock::now();
-            JitStats::block_compiles.fetch_add(1, std::memory_order_relaxed);
-            JitStats::emit_ns.fetch_add(dur(begin, end), std::memory_order_relaxed);
+            const auto end = JitStats::Now();
+            JitStats::Count(JitStats::block_compiles, 1);
+            JitStats::Count(JitStats::emit_ns, dur(begin, end));
             // Includes validation, serialization, cache locks and dump overhead.
-            JitStats::compile_ns.fetch_add(dur(compile_begin, end), std::memory_order_relaxed);
+            JitStats::Count(JitStats::compile_ns, dur(compile_begin, end));
             return entry;
         };
 
@@ -362,29 +362,29 @@ private:
                 if (matches) {
                     ir_block.Reset(arch_descriptor);
                     if (IRCache::Load(*cached, ir_block)) {
-                        JitStats::ir_hits.fetch_add(1, std::memory_order_relaxed);
+                        JitStats::Count(JitStats::ir_hits, 1);
                         return emit_block(cached->content_hash);
                     }
                     // Malformed entry: fall through to a full compile.
                 } else {
-                    JitStats::ir_hash_mismatch.fetch_add(1, std::memory_order_relaxed);
+                    JitStats::Count(JitStats::ir_hash_mismatch, 1);
                 }
             }
         }
 
-        const auto t0 = std::chrono::steady_clock::now();
+        const auto t0 = JitStats::Now();
         ir_block.Reset(arch_descriptor);
         A64::Translate(ir_block, arch_descriptor, get_code_hashed, {conf.define_unpredictable_behaviour, conf.wall_clock_cntpct});
-        const auto t1 = std::chrono::steady_clock::now();
+        const auto t1 = JitStats::Now();
         Optimization::Optimize(ir_block, conf, polyfill_options);
-        const auto t2 = std::chrono::steady_clock::now();
+        const auto t2 = JitStats::Now();
         const u64 end_pc = A64::LocationDescriptor{ir_block.EndLocation()}.PC();
         if (IRCache::Enabled() && readable_code) {
             IRCache::Store(descriptor.Value(), ir_block, start_pc, end_pc, content_hash,
                            cache_config, std::move(guest_code));
         }
-        JitStats::translate_ns.fetch_add(dur(t0, t1), std::memory_order_relaxed);
-        JitStats::optimize_ns.fetch_add(dur(t1, t2), std::memory_order_relaxed);
+        JitStats::Count(JitStats::translate_ns, dur(t0, t1));
+        JitStats::Count(JitStats::optimize_ns, dur(t1, t2));
         return emit_block(content_hash);
     }
 
@@ -400,11 +400,11 @@ private:
 
             jit_state.ResetRSB();
             if (invalidate_entire_cache) {
-                JitStats::full_clears.fetch_add(1, std::memory_order_relaxed);
+                JitStats::Count(JitStats::full_clears, 1);
                 block_of_code.ClearCache();
                 emitter.ClearCache();
             } else {
-                JitStats::range_invalidations.fetch_add(1, std::memory_order_relaxed);
+                JitStats::Count(JitStats::range_invalidations, 1);
                 emitter.InvalidateCacheRanges(invalid_cache_ranges);
             }
             invalid_cache_ranges.clear();
