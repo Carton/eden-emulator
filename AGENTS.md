@@ -325,6 +325,22 @@ MSYS_NO_PATHCONV=1 "$NSYS" profile -t wddm,vulkan -d 90 --force-overwrite=true \
 - 新工具：`EDEN_JIT_NOLINK/NORSB/NOFASTDISPATCH` 环境闸门（local-only，worktree）；
   解锁模式菜单 150fps 伪装陷阱；A-tap=X 键（code 88）。
 
+### 第三梯队第一刀：GPU 线程 memcmp 归因 + 管线键 memoization（2026-09-13，详见 PROFILE_PROGRESS.md §18/§19）
+- GPU 线程新鲜画像（totk_t3.etl）：92% 饱和；簇排名=命令流 ~13.5% / 缓冲同步 ~11% /
+  分配锁 ~5-6% / 描述符纹理 ~3.5% / 管线配置 ~3%。VulkanWorker 50% 余量确认。
+- memcmp 175 样本归因：管线键 operator== 75 / VisitImageView ~56 / TSC 描述符重读 38。
+- EmuControlThread 37% = 拆除税（TOTK 内存重映射→堆释放/区间树销毁），非稳态路径。
+- **管线键 memoization（8cb6300f26，local-only）**：Maxwell3D change_generation +
+  PipelineCache key_build_gen，逐 draw 寄存器没变直接复用现管线（跳过 RefreshStages/
+  state.Refresh/整键 memcmp）。旋转首扫尖刺 81→17（-79%）、合计 129→39、旋转 fps
+  44.01，稳态 med 22.48 中性，渲染验收通过。
+- 参考项目：azahar 是 3DS（作废）、citron 404、eden master 是唯一参考（master 演化
+  无现成逐 draw memcmp 修复）。
+- 下轮队列：TSC 描述符表同思路 memoize → SynchronizeBuffer 脏区簇解剖 → ExitIf 块合并
+  → per-draw arena → IR cache 拆除税。
+- 坑：NVIDIA Overlay 由 nvcontainer 服务复活杀不净（采数据前须 App 内真关/停服务；
+  纯视觉验证用 `F:\prof\visual_run.py` 跳预检）。
+
 ### 本地补丁与工具（v0.2.1 worktree，勿提交上游）
 
 - `fsp_srv.cpp` 两处 `OpenSaveDataFileSystem` 的 `ASSERT(false)`（Temporary/ProperSystem/SafeMode

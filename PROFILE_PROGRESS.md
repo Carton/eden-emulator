@@ -1024,3 +1024,84 @@ EDEN_JIT_NOFASTDISPATCH`。解锁 idle 基准（med ms 口径，各 60s）：
   加速/减速模式重置保持不变。已实测：退出后 ini 保持 false。
 - 坑：git 推送走 http_proxy=127.0.0.1:7777，代理进程挂掉时用
   `git -c http.proxy= -c https.proxy= push carton <branch>` 直连即可（GitHub 可达）。
+
+## 19. 第三梯队第一刀：GPU 线程 memcmp 归因 + 管线键 memoization（2026-09-13）
+
+### 19.1 memcmp 175 样本调用方归因（totk_t3.etl CallStack 分组）
+
+§18.2 缓冲同步簇里"memcmp 175"是三类完全不同的调用方，按调用栈分组拆开：
+
+| 调用方 | 样本 | 性质 |
+|---|---|---|
+| `GraphicsPipelineCacheKey::operator==` | 75 | 逐 draw 的管线键整键 memcmp（Next() 命中路径 + map 查找），键含整份 FixedPipelineState |
+| `TextureCache::VisitImageView` 系 | ~56 | 纹理视图遍历中的比较 |
+| `DescriptorTable<TSCEntry>::Read` | 38 | 逐 draw 重读 32B 客存 TSC 描述符 + 与缓存副本比较 |
+
+→ operator== 是纯"没变也要比"的浪费（游戏稳态下寄存器值逐 draw 大多不变），
+先打它。
+
+### 19.2 EmuControlThread 37% 破案：拆除税，非稳态
+
+按函数分组解剖：`RtlpInsertFreeBlock` 2478 + `RtlFreeHeap` 472 + IR cache
+区间树 erase 88（逐区间销毁 unordered_dense 表）+ FFmpeg::Frame frees 114 +
+dynarmic PatchInformation 析构 26 + 内核 decommit 650。Driver = TOTK 常态
+内存重映射（range_invalidations=15007/会话）→ 释放路径在模拟控制线程上串行执行。
+**它是拆除/重映射税，不在逐帧关键路径上**（稳态 GPU 线程/JIT 核不受它影响），
+优化价值=降背景 CPU 占用与内存行为，不直接挣帧率。排在队列后面。
+
+### 19.3 参考项目排查结论（勿重复调研）
+
+- **azahar 是 3DS 模拟器**（Lime3DS 血统，包名 io.github.lime3ds.android），
+  不是 Switch GPU 工作的参考对象——此前"借鉴 azahar"的方向作废。
+- citron-emu/citron GitHub 404（仓库没了）。
+- **eden master（本地克隆）是唯一正确参考**。其 v0.2.1 后演化：PSO Optimizations
+  #4294（仅会话热身期收益）、boost::unordered_flat #4326、Bindless Descriptors
+  #4251、Multithreading refactor #4254——**均未解决逐 draw memcmp 问题**。
+
+### 19.4 管线键 memoization（8cb6300f26，local-only，本轮主角）
+
+**设计**：Maxwell3D 暴露 `change_generation` 计数器，`ProcessDirtyRegisters`
+里只有写值真正变化才自增（第一轮的相同写过滤顺带提供）；PipelineCache 用
+`key_build_gen` 记住 current_pipeline（或上次失败构建）对应的代数——
+**逐 draw 代数不变 ⇒ 键不变 ⇒ 直接返回现管线**，跳过 RefreshStages +
+FixedPipelineState::Refresh + Next()/map 的整键比较。
+
+**安全性论证**（已逐点核实）：`regs.reg_array` 只在 ProcessDirtyRegisters 一处
+写入（ConsumeSinkImpl 也路由到它、宏走 CallMethod）；`graphics_key` 只在
+vk_pipeline_cache.cpp 读取；运行期图形管线从不失效。FixedPipelineState::Refresh
+读的 regs + draw_state.topology（寄存器派生）+ 静态 DynamicFeatures 全部被代数覆盖。
+
+**验证**（TOTK 合并基线 8c14d24403 vs 打补丁，旋转测试同口径）：
+
+| 指标 | 基线 | memoization | 变化 |
+|---|---|---|---|
+| 旋转首扫尖刺（>33ms 计数） | 81 | **17** | **-79%** |
+| 旋转窗口尖刺合计 | 129 | **39** | **-70%** |
+| 旋转段 fps | 41.45 | **44.01** | +6.2% |
+| 稳态 med 帧时（两轮） | 22.49ms | 22.48ms | 中性（噪声内） |
+| 1%low | 35.74 | 34.15/33.95 | 轻降（噪声边缘） |
+
+渲染正确性：进游戏截图验收（峡谷营地场景、帐篷/林克/HUD/心心齐全，无黑块花屏，
+45 FPS 正常）。
+
+**定性**：这是§18 命令流簇里"每 draw 管线查找税"的直接消灭——旋转起手 draw
+洪峰不再重复付整键比较；稳态 med 不动符合预期（稳态下 Next() 本来就靠第一轮的
+transition 哈希预比较快速命中，此补丁主要收割"哈希算完还得整键 memcmp"的尾巴
++ 洪峰场景）。1%low 轻降待下轮复测（两轮 34.15/33.95 接近基线 35.74 的方差带）。
+
+### 19.5 下轮队列（更新）
+
+1. `DescriptorTable<TSCEntry>::Read` 逐 draw 重读（38 样本）：同代数 memoize 思路
+   可平移——寄存器不变则描述符表内容不变，缓存上次读取结果。
+2. SynchronizeBuffer/WordManager 脏区簇（§18.2 A 簇主体）代码级解剖。
+3. ExitIf 块合并设计验证（JIT 侧）。
+4. per-draw 小对象 arena（分配锁簇 ~5-6%）。
+5. IR cache 区间树拆除税（EmuControlThread，背景收益）。
+
+### 19.6 本轮坑
+
+- NVIDIA Overlay 杀不死（nvcontainer.exe 系统服务父进程，杀了就复活）——
+  bench_run 预检会拒绝启动。纯视觉验证不采数据时用 `F:\prof\visual_run.py`
+  （跳过预检的 bench_run --hold 等价物流）；采数据前须从 NVIDIA App 里真关
+  覆盖层或停服务。
+- azahar/citron 参考方向作废（§19.3），勿再花时间。
