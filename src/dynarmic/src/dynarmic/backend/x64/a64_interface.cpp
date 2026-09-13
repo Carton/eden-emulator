@@ -74,7 +74,7 @@ void DumpBlock(const IR::Block& block, u64 content_hash) {
                  (unsigned long long)A64::LocationDescriptor{block.Location()}.PC(),
                  (unsigned long long)A64::LocationDescriptor{block.EndLocation()}.PC(),
                  (unsigned long long)content_hash, (long long)now_ms,
-                 (int)block.GetTerminal().which());
+                 (int)block.GetTerminal().index());
 }
 }  // namespace
 

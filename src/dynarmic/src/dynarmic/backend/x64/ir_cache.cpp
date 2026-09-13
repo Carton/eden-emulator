@@ -67,36 +67,29 @@ void WriteValue(Buffer& b, const IR::Value& value) {
     // that all instructions can be allocated before arguments are linked.
 }
 
-void WriteTerminal(Buffer& b, const IR::Terminal& term) {
-    b.Wt<std::uint8_t>(static_cast<std::uint8_t>(term.which()));
-    switch (term.which()) {
-    case 2: {  // LinkBlock
-        b.Wt<std::uint64_t>(boost::get<IR::Term::LinkBlock>(term).next.Value());
-        break;
+void WriteLeaf(Buffer& b, const IR::Term::LeafTerminal& leaf) {
+    b.Wt<std::uint8_t>(static_cast<std::uint8_t>(leaf.index()));
+    if (const auto* lb = std::get_if<IR::Term::LinkBlock>(&leaf)) {
+        b.Wt<std::uint64_t>(lb->next.Value());
+    } else if (const auto* lbf = std::get_if<IR::Term::LinkBlockFast>(&leaf)) {
+        b.Wt<std::uint64_t>(lbf->next.Value());
     }
-    case 3: {  // LinkBlockFast
-        b.Wt<std::uint64_t>(boost::get<IR::Term::LinkBlockFast>(term).next.Value());
-        break;
-    }
-    case 6: {  // If
-        const auto& t = boost::get<IR::Term::If>(term);
-        b.Wt<std::uint8_t>(static_cast<std::uint8_t>(t.if_));
-        WriteTerminal(b, t.then_);
-        WriteTerminal(b, t.else_);
-        break;
-    }
-    case 7: {  // CheckBit
-        const auto& t = boost::get<IR::Term::CheckBit>(term);
-        WriteTerminal(b, t.then_);
-        WriteTerminal(b, t.else_);
-        break;
-    }
-    case 8: {  // CheckHalt
-        WriteTerminal(b, boost::get<IR::Term::CheckHalt>(term).else_);
-        break;
-    }
-    default:
-        break;  // Invalid/ReturnToDispatch/PopRSBHint/FastDispatchHint: no payload
+    // monostate/ReturnToDispatch/PopRSBHint/FastDispatchHint: no payload
+}
+
+void WriteTerminal(Buffer& b, const IR::Term::Terminal& term) {
+    b.Wt<std::uint8_t>(static_cast<std::uint8_t>(term.index()));
+    if (const auto* leaf = std::get_if<IR::Term::LeafTerminal>(&term)) {
+        WriteLeaf(b, *leaf);
+    } else if (const auto* t = std::get_if<IR::Term::If>(&term)) {
+        b.Wt<std::uint8_t>(static_cast<std::uint8_t>(t->if_));
+        WriteLeaf(b, t->then_);
+        WriteLeaf(b, t->else_);
+    } else if (const auto* t = std::get_if<IR::Term::CheckBit>(&term)) {
+        WriteLeaf(b, t->then_);
+        WriteLeaf(b, t->else_);
+    } else if (const auto* t = std::get_if<IR::Term::CheckHalt>(&term)) {
+        WriteLeaf(b, t->else_);
     }
 }
 
@@ -288,12 +281,12 @@ bool IRCache::Load(const Entry& entry, IR::Block& block) {
         }
     }
 
-    // Terminal (recursive).
-    std::function<IR::Terminal(bool&)> read_term = [&](bool& ok) -> IR::Terminal {
+    // Terminal (flattened: Terminal = monostate | LeafTerminal | If | CheckBit | CheckHalt).
+    std::function<IR::Term::LeafTerminal(bool&)> read_leaf = [&](bool& ok) -> IR::Term::LeafTerminal {
         std::uint8_t which = 0;
         if (!b.Rt(which)) {
             ok = false;
-            return IR::Term::Invalid{};
+            return std::monostate{};
         }
         auto read_loc = [&](IR::LocationDescriptor& d) -> bool {
             std::uint64_t v = 0;
@@ -304,13 +297,15 @@ bool IRCache::Load(const Entry& entry, IR::Block& block) {
             return true;
         };
         switch (which) {
+        case 0:
+            return std::monostate{};
         case 1:
             return IR::Term::ReturnToDispatch{};
         case 2: {
             IR::LocationDescriptor d{0};
             if (!read_loc(d)) {
                 ok = false;
-                return IR::Term::Invalid{};
+                return std::monostate{};
             }
             return IR::Term::LinkBlock{d};
         }
@@ -318,7 +313,7 @@ bool IRCache::Load(const Entry& entry, IR::Block& block) {
             IR::LocationDescriptor d{0};
             if (!read_loc(d)) {
                 ok = false;
-                return IR::Term::Invalid{};
+                return std::monostate{};
             }
             return IR::Term::LinkBlockFast{d};
         }
@@ -326,41 +321,57 @@ bool IRCache::Load(const Entry& entry, IR::Block& block) {
             return IR::Term::PopRSBHint{};
         case 5:
             return IR::Term::FastDispatchHint{};
-        case 6: {
+        default:
+            ok = false;
+            return std::monostate{};
+        }
+    };
+    std::function<IR::Term::Terminal(bool&)> read_term = [&](bool& ok) -> IR::Term::Terminal {
+        std::uint8_t which = 0;
+        if (!b.Rt(which)) {
+            ok = false;
+            return std::monostate{};
+        }
+        switch (which) {
+        case 0:
+            return std::monostate{};
+        case 1:
+            return read_leaf(ok);
+        case 2: {
             std::uint8_t cond = 0;
             if (!b.Rt(cond)) {
                 ok = false;
-                return IR::Term::Invalid{};
+                return std::monostate{};
             }
-            IR::Terminal t = read_term(ok);
-            IR::Terminal e = read_term(ok);
+            IR::Term::LeafTerminal t = read_leaf(ok);
+            IR::Term::LeafTerminal e = read_leaf(ok);
             if (!ok) {
-                return IR::Term::Invalid{};
+                return std::monostate{};
             }
             return IR::Term::If{static_cast<IR::Cond>(cond), t, e};
         }
-        case 7: {
-            IR::Terminal t = read_term(ok);
-            IR::Terminal e = read_term(ok);
+        case 3: {
+            IR::Term::LeafTerminal t = read_leaf(ok);
+            IR::Term::LeafTerminal e = read_leaf(ok);
             if (!ok) {
-                return IR::Term::Invalid{};
+                return std::monostate{};
             }
             return IR::Term::CheckBit{t, e};
         }
-        case 8: {
-            IR::Terminal e = read_term(ok);
+        case 4: {
+            IR::Term::LeafTerminal e = read_leaf(ok);
             if (!ok) {
-                return IR::Term::Invalid{};
+                return std::monostate{};
             }
             return IR::Term::CheckHalt{e};
         }
         default:
             ok = false;
-            return IR::Term::Invalid{};
+            return std::monostate{};
         }
     };
     bool ok = true;
-    IR::Terminal term = read_term(ok);
+    IR::Term::Terminal term = read_term(ok);
     if (!ok) {
         return false;
     }
