@@ -995,8 +995,8 @@ EDEN_JIT_NOFASTDISPATCH`。解锁 idle 基准（med ms 口径，各 60s）：
 | 簇 | 代表（样本） | 占 GPU 线程 |
 |---|---|---|
 | 命令流处理 | ProcessCommands 458 / CallMethod 366 / ProcessDirtyRegisters 159 / ConsumeSink 109 / Macro 系 190 | **~13.5%** |
-| 缓冲同步上传 | SynchronizeBuffer 66 + WordManager 脏区 214 + memcmp 175 + memcpy 355 + MarkUsage/FindBuffer/UpdateVB ~280 | **~11%** |
-| 堆分配+锁 churn | LFH alloc 156 / RtlFreeHeap 35 / SRWLock ~400（堆锁联动） | ~5-6% |
+| 缓冲同步上传 | SynchronizeBuffer 66 + WordManager 脏区 ~233 + memcmp 175 + 拷贝系 ~390 + MarkUsage/FindBuffer/UpdateVB ~367 | **~11%** |
+| 堆分配+锁 churn | LFH alloc ~210 / RtlFreeHeap 35 / SRWLock ~400（堆锁联动） | ~5-6% |
 | 描述符/纹理 | PushImageDescriptors 189 / PrepareImageView 77 / RefreshContents 83 | ~3.5% |
 | 管线特化配置 | ConfigureImpl×3 + CurrentGraphicsPipeline 55 + key== 41 | ~3% |
 
@@ -1005,6 +1005,19 @@ EDEN_JIT_NOFASTDISPATCH`。解锁 idle 基准（med ms 口径，各 60s）：
 方向=版本化跳过比较/staging 批量/arena 化消灭分配锁 churn；B 簇 CallMethod 是语义
 热路径。VulkanWorker 50% 余量是承接面。块合并（JIT 侧个位数 %）+ 本梯队需并行推进
 才有机会 60。
+
+**§19.7 归因勘误（2026-09-13 深夜复查）**：上表"拷贝系 ~390"里 355 样本的函数名是
+**MoveSmall4**（ucrt memcpy 的分派 helper 符号，不是"memcpy"——真 memcpy 符本仅 27）。
+按调用栈细分 MoveSmall4 355：
+- **uniform 流式拷贝 ~213（60%）**：`BindHostGraphicsUniformBuffer → DeviceMemoryManager::
+  ReadBlockUnsafe`——Vulkan fast 路径逐 draw 无条件整段重拷 uniform（设计如此：游戏 CPU
+  直写客存不可见，只能重读）。这是 A 簇真正的 memcpy 主战场（~2% GPU 线程）。
+- TIC/TSC 描述符重读 ~60（17%）：VisitImageView 51 + GetGraphicsSamplerId 9（注意走
+  Tegra::MemoryManager 而非 DeviceMemoryManager）。
+- 计算管线上传 ~14、CBData 写回 ~11、宏参数 vector ~18（5%，ProcessMacro 的
+  macro_params.insert——仅 0.17% GPU 线程，勿当目标）、顶点绑定结构 ~8。
+- 教训：**ucrt 拷贝类热点按符号名聚合会被分派 helper 拆散（MoveSmall4/SetSmall8/
+  Mov0YmmBlocks/memcpy_repmovs_amd…），必须并起来按调用栈归因**。
 
 ### 18.3 下轮队列
 
@@ -1089,14 +1102,18 @@ vk_pipeline_cache.cpp 读取；运行期图形管线从不失效。FixedPipeline
 transition 哈希预比较快速命中，此补丁主要收割"哈希算完还得整键 memcmp"的尾巴
 + 洪峰场景）。1%low 轻降待下轮复测（两轮 34.15/33.95 接近基线 35.74 的方差带）。
 
-### 19.5 下轮队列（更新）
+### 19.5 下轮队列（更新，按 §19.7 勘误后的归因）
 
-1. `DescriptorTable<TSCEntry>::Read` 逐 draw 重读（38 样本）：同代数 memoize 思路
-   可平移——寄存器不变则描述符表内容不变，缓存上次读取结果。
-2. SynchronizeBuffer/WordManager 脏区簇（§18.2 A 簇主体）代码级解剖。
-3. ExitIf 块合并设计验证（JIT 侧）。
-4. per-draw 小对象 arena（分配锁簇 ~5-6%）。
-5. IR cache 区间树拆除税（EmuControlThread，背景收益）。
+1. **uniform 流式拷贝**（A 簇 memcpy 主战场 ~2% GPU 线程）：先测"内容逐 draw 是否
+   真变"（EDEN_UNIFORM_STATS=1 已埋计数器，拷贝后 memcmp 影子副本，退出时打印
+   identical 比例）→ 高比例才做 stream 区域复用去重；低比例则死心。
+2. TIC/TSC 描述符重读（~0.6% + memcmp 175 里的大头）：同上需先测变更率；寄存器代数
+   **不覆盖客存内容变化**，§19.4 的 memoize 思路不能平移（此处勘误，原队列第 1 项作废）。
+3. SynchronizeBuffer/WordManager 脏区簇（~2.2%）代码级解剖。
+4. ExitIf 块合并设计验证（JIT 侧）。
+5. per-draw 小对象 arena（分配锁簇 ~5-6%）。
+6. IR cache 区间树拆除税（EmuControlThread，背景收益）。
+7. 宏参数 vector（0.17%）——**已证伪不值得做**，勿再排队。
 
 ### 19.6 本轮坑
 
