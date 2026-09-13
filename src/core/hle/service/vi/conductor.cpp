@@ -108,8 +108,11 @@ s64 Conductor::GetNextTicks() const {
             // SpeedLimiter::DoSpeedLimiting.
             speed_scale = 100.f / Settings::SpeedLimit();
         } else {
-            // Run at unlocked framerate.
-            speed_scale = 0.01f;
+            // Run at unlocked framerate. Floor the tick divisor at 0.1 (~600 Hz
+            // event rate): 0.01 schedules ~6 kHz events and burns a full core in
+            // HostTiming/VSync wakeups while presenting at most ~120 Hz.
+            // (local-only, ported from v0.2.1 c8b0c853f8)
+            speed_scale = 0.1f;
         }
     }
 
