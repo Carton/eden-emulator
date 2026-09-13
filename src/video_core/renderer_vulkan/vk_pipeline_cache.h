@@ -156,6 +156,10 @@ private:
 
     GraphicsPipelineCacheKey graphics_key{};
     GraphicsPipeline* current_pipeline{};
+    // (local-only) Maxwell3D register generation that current_pipeline (or the
+    // last failed build) was keyed at; identical across draws lets us skip
+    // stage refresh, fixed-state refresh and the transition/map key compares.
+    u64 key_build_gen{0};
 
     ankerl::unordered_dense::map<ComputePipelineCacheKey, std::unique_ptr<ComputePipeline>> compute_cache;
     ankerl::unordered_dense::map<GraphicsPipelineCacheKey, std::unique_ptr<GraphicsPipeline>> graphics_cache;
