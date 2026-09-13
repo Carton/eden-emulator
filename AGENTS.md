@@ -15,7 +15,10 @@ C++20 + CMake（≥3.31）构建，支持 Windows / Linux / macOS / Android 等�
 - **TOTK 可玩基线 = `F:\devel\opensource\eden-v0.2.1`**（tag v0.2.1 = 58c1e20 的 git worktree），
   用 VS2022 编译的 RelWithDebInfo，`build/bin/` 下 eden.exe(+pdb) 实测王国之泪正常游玩，性能与官方版相当。
   该目录已配置好（build/ 与 build/bin/user/ 均就绪），改代码后直接 `cmake --build build` 增量编译即可。
-- master（F:\devel\opensource\eden-emulator）目前**不能**用于 TOTK，见"已知问题"。
+- **master（F:\devel\opensource\eden-emulator，test/master-profiling 分支）自 2026-09-14 起可用**：
+  v0.2.1 优化已移植（§21），`build-vs22/` 已配置（VS2022 + crtvec shim），build-vs22/bin/user
+  已拷好数据，实测 TOTK 进游戏渲染正常、基准/旋转与 v0.2.1 持平（med 22.50ms、旋转 max 64ms）。
+  改代码后 `cmake --build build-vs22` 增量编译。旧"master 不能玩 TOTK"结论作废（VS2026 构建特有）。
 
 ## 本机构建环境（2026-09-06 验证通过）
 
@@ -43,9 +46,16 @@ export PATH="/g/Tools/glslang/bin:$(dirname "$(command -v cl.exe)"):/d/Program F
 
 cmake.exe --build build          # RelWithDebInfo，产物在 build/bin/
 
+# —— master（test/master-profiling，build-vs22 已配置好，含 v0.2.1 移植优化）——
+cd /f/devel/opensource/eden-emulator
+source tools/windows/load-msvc-env.sh
+export PATH="/g/Tools/glslang/bin:$(dirname "$(command -v cl.exe)"):/d/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin:/d/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja:$PATH"
+cmake.exe --build build-vs22     # 产物在 build-vs22/bin/（链接靠 crtvec_shim.obj，已挂参）
+
 # —— 如需重新配置（仅首次/改 CMake 选项时）——
 cmake.exe -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DYUZU_TESTS=OFF \
   "-DCMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO=/DEBUG /INCREMENTAL:NO /OPT:REF /OPT:ICF"
+# master 重建 build 目录时须先把 crtvec_shim.obj 挂回链接参数（见已知问题 2），否则 LNK2019
 ```
 
 注意：
@@ -60,7 +70,8 @@ cmake.exe -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DYUZU_TESTS=
 | `eden-v0.2.1/build/bin/eden.exe` (+`.pdb`) | **当前主力**：Qt GUI 主程序（静态 Qt），TOTK 实测可玩 |
 | `eden-v0.2.1/build/bin/eden-cli.exe` (+`.pdb`) | 命令行版（本机跑 TOTK 会在 shader 编译段崩溃，勿用于 TOTK） |
 | `eden-v0.2.1/build/bin/eden-room.exe` | 独立联机房间工具（LDN 多人），单机 profile 用不到 |
-| `eden-emulator/build/bin/*` | master 构建（VS2026 产物），TOTK 卡 launching，暂不可用 |
+| `eden-emulator/build-vs22/bin/eden.exe`(+`.pdb`) | master 构建（VS2022+crtvec shim，**可用**：TOTK 已验收，含全部移植优化；user 数据已配） |
+| `eden-emulator/build/bin/*` | 旧 master 构建（VS2026 产物），TOTK 卡 launching，**已废弃勿用** |
 
 ## 运行说明
 
@@ -74,19 +85,27 @@ cmake.exe -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DYUZU_TESTS=
 
 ## 已知问题（本地排查记录，勿外传/勿提上游）
 
-1. **master（VS2026/MSVC 14.51 构建）**：TOTK 卡在 launching。sm_controller 的
-   IpcController 服务明明注册了命令 3（QueryPointerBufferSize），运行期却查不到 → 游戏拿到
-   未实现响应后 svc Break 自杀。官方同期版本 GUI 无此问题 → 疑似 MSVC 14.51 误编译或代码回归，未定论。
-2. **master + VS2022**：链接失败，LNK2019 `__std_rotate`/`__std_replace_copy_1` 等——CPM 下载的
-   静态 Qt 6.11.1 是上游 CI 用更新 STL 编译的，VS2022 的 14.44 STL 没有这些向量化符号。
-   要用 VS2022 编 master 需自编 Qt 或等上游换包。
-3. **eden-cli + TOTK**（任何版本，官方同期版也一样）：shader 编译阶段
+1. ~~master 卡 launching~~（**2026-09-14 结案**：VS2026/MSVC 14.51 构建特有，VS2022+
+   shim 构建（build-vs22）实测 TOTK 正常进游戏。sm_controller/QueryPointerBufferSize
+   问题不再复现，未深究根因；如复现再查）。
+2. ~~master + VS2022 LNK2019~~（**2026-09-14 已解决**：缺的 `__std_rotate`/
+   `__std_replace_copy_1`/`__std_unique_4/8`/`__std_minmax_element_2u` 是 MSVC STL
+   开源仓库里的向量化算法 helper，用标量实现编 obj 挂 CMAKE_EXE_LINKER_FLAGS 即可——
+   见已入库的 `tools/windows/crtvec_shim.cpp`（签名照抄 microsoft/STL
+   vector_algorithms.cpp；只有 Qt GUI 路径调用，性能无关）。build-vs22 的 CMakeCache
+   已带该参数，日常增量编译无需再管；若重建 build 目录要重新挂）。
+3. **master 优雅关闭偶发超时**（2026-09-14，3 局 1 次）：bench_run 的 WM_CLOSE +
+   confirmStop=2 路径偶尔 60s 关不掉被强杀（帧时 CSV 丢失）。不阻塞游玩/测试，
+   关停路径待查（候选：#4294 序列化线程 / 新 conductor 关停 / IR cache 析构）。
+4. **eden-cli + TOTK**（任何版本，官方同期版也一样）：shader 编译阶段
    `CollectStorageBuffers`（global_memory_to_storage_buffer_pass.cpp）segfault → 时代性代码 bug。
    **profile 一律用 GUI 的 eden.exe**。
-4. 曾在工作区的 3 个 clang-cl 兼容补丁（vk/gl_graphics_pipeline.cpp 的 `!defined(__clang__)`
+5. 曾在工作区的 3 个 clang-cl 兼容补丁（vk/gl_graphics_pipeline.cpp 的 `!defined(__clang__)`
    守卫、image_base.cpp 的 find_if 改写）已于 09-07 丢弃——MSVC/VS2022 编译不需要它们。
    若将来复活 clang-cl 路线需重打：守卫加在 `LAMBDA_FORCEINLINE` 定义处，find_if 改写避开
    MSVC 14.5x STL 的 `_Find_vectorized` static_assert。
+6. WSL 交叉构建产物（docs/wsl-windows-build.md 所述 .local-review 工具链/Qt/OpenSSL，
+   v0.2.1 分支 09-12 生成）**已不存在**——文档仅存档，勿按图索骥；master 一律走 VS2022+shim。
 
 ## Profile 工作流（TOTK 性能热点）
 

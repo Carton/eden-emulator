@@ -1235,3 +1235,59 @@ Bc1/Bc3），窗口期采样读到黑色而非垃圾。模板层实现 = GL/VK �
   立即起跑可与历史基准同条件。
 - **用户日常 exe = 我们的构建拷贝**这个事实要记住：凡我们改渲染相关代码，
   用户日常游玩即成真实世界回归测试场；出视觉问题先查我们的 worktree 变更。
+
+## 21. v0.2.1 优化移植 master 轮（2026-09-14 凌晨）
+
+### 21.1 任务与盘点
+把 v0.2.1 worktree 的本地优化移植到主仓库 test/master-profiling（master + 本地
+profiling 文档），剔除 master 原生已有项。v0.2.1 分支本地提交 42 个，处置：
+- **剔除（master 原生已有）**：fsp_srv Temporary 存档修复 ×2（master 2026-07-14
+  起原生有同构映射，非我方回流；上游独立修复）；HWC 探针 ×2（vi/conductor 被
+  #4254/#4238 整体重写，目标代码不存在）；docs/chore ×4。
+- **剔除（无意义）**：caps padding/`std::exchange` 丢弃等纯 libc++ 移植修饰 ×2
+  （冲突大、MSVC 路线零价值；caps 那个整文件取 theirs 会回退 master 演化，教训）。
+- **适配移植**：解锁自旋税 c8b0c853f8 → master 新 conductor 的
+  `GetNextTicks` 里 `speed_scale=0.01f→0.1f` 一行（新代码仍是 6kHz 事件率）。
+- **按时序 cherry-pick 29 个**（dynarmic IR cache/RegAlloc/计数器系列 + GPU 线程
+  微优化 + memoization + uniform stats + ASTC 零初始化 + 速度限制恢复 + 构建修复）。
+- **适配提交**：ir_cache.cpp 终端序列化重写（master #4218 把递归 boost::variant
+  终端树扁平化为 std::variant<monostate|LeafTerminal|If|CheckBit|CheckHalt>，
+  叶子单列；线格式进程内自洽即可）；block dump 的 `.which()→.index()`。
+
+### 21.2 构建突破：crtvec shim（否决 WSL 路线）
+- WSL 交叉构建产物（wsl-windows-build.md 所述 .local-review 工具链/Qt/OpenSSL）
+  **已不存在**（F: 与 WSL home 均无），重造要数小时 → 用户拍板走 VS2022 原生。
+- 已知问题 #2（LNK2019 `__std_rotate/__std_replace_copy_1` 等 6 符号）的正解：
+  这些是 MSVC STL 向量化算法 helper（microsoft/STL `stl/src/vector_algorithms.cpp`
+  开源实现），Qt 6.11.1 静态库引用而 VS2022 14.44 CRT 无。**写标量实现编成
+  obj 挂链接参数即可**（签名照抄 STL 源码；__stdcall x64 下空操作；只有 Qt GUI
+  路径调用，性能无关）。已入库 `tools/windows/crtvec_shim.cpp`，用法在提交信息里：
+  cl /c /O2 /MD /std:c++20 编出 obj，加进 CMAKE_EXE_LINKER_FLAGS。
+  无需新运行库 DLL、无需管理员、无需 app-local 部署。系统 msvcp140.dll（2025-05）
+  无这些导出，redist 提取（Burn 容器 7z/layout 均失败）全部作废。
+- CMakeLists 的 YUZU_USE_BUNDLED_QT 下的 AddQt(Eden-CI/Qt 6.11.1) 缓存包为
+  **纯静态**（bin 只有工具无 DLL），无共享变体可换。
+
+### 21.3 验收结果（build-vs22，RelWithDebInfo）
+- **编译全过**（适配后无警告级问题）；eden.exe 52.9MB。
+- **冒烟（fixverify 流程）**：进游戏正常、卡卡利科村渲染干净无花屏、加载画面
+  正常——**旧已知问题 #1（master 卡 launching，sm_controller）在 VS2022+shim
+  构建不复现**，该问题应记为 VS2026/MSVC 14.51 构建特有。
+- **基准**：warm fps=44.89 / med=22.50ms / p99=26.68 / 1%low=31.89，与 v0.2.1
+  （44.85/22.48/25.15/33.08）持平；首轮曾 49.06fps（med 同为 22.49）——master
+  的呈现路径（#4238/#4254 重构后）有时不吃 120Hz 栅格量化，帧次波动属节奏非负载。
+- **旋转**：idle 44.96fps 零尖刺；旋转段 41.7-43.4fps、>40ms 每窗 2-15 个、
+  max 64ms、零 >66ms——与 v0.2.1 修后状态（max 58ms）同档，可接受。
+- **遗留**：①优雅关闭偶发超时（3 局里 1 次强杀，CSV 丢失；关停路径待查，不阻塞）；
+  ②旋转 >40ms 计数略多于 v0.2.1 调优态（shader 缓存刚重建 / master 流送差异，
+  未定性）；③bench_run/rot_test 的 commit 标签仍读 v0.2.1 仓库（REPO 硬编码，
+  纯标签问题）。build-vs22/bin/user 已从 v0.2.1 拷贝并改好路径（3.3GB）。
+- 分支：port 工作 ff 进 test/master-profiling（06063fc9db..bb59b29f1d）已推送。
+
+### 21.4 坑
+- 后台构建命令自带 `| tail` 会吃掉退出码和错误行（§11.8 重演）——日志必须落盘
+  全量再 grep；`grep -ac FAILED` 需二进制安全模式。
+- cherry-pick "干净落地"≠语义正确，构建前做了地标审计（change_generation/
+  寄存器过滤/IR cache）；caps 冲突整文件取 theirs 回退了 master 演化
+  （ResolveCallerProgramId/Capture::ScreenShotAttribute 丢失），发现后 reset
+  丢弃该提交——**冲突解一律逐 hunk，禁整文件取边**。
