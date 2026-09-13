@@ -1194,3 +1194,44 @@ memoize（代数不覆盖客存内容）；宏参数 vector（实测 0.17%）；
 
 体验维度结论：**尖刺/卡顿类问题已基本解决**（旋转场景稳定 ~44fps、无大卡顿）；
 稳态 45→60 仍是长仗，剩余单项全在 0.5-2% 量级，无捷径。
+
+## 20. ASTC 异步解码窗口花屏：诊断与修复（2026-09-13 深夜）
+
+### 20.1 症状与定性
+用户日常游玩（**注意：F:\Switch\Yuzu\eden.exe 是 09-12 拷贝的我们的构建
+06c7a2a6b2，非官方版**）在加载画面出现"贴图错误"——截图形态为**瓦片内容有效
+（加载壁画）但位置错乱/重复**，非噪点非黑块非涂抹。截图时间为 09-12 22:55，
+恰在 §14 ASTC 配置修复（accelerate_astc=2）应用当天。
+
+### 20.2 根因（代码级实锤）
+`AstcDecodeMode::CpuAsynchronous` 的解码窗口：`Image` 构造只分配 VkImage 不初始化；
+`RefreshContents→QueueAsyncDecode` 设 `IsDecoding` 后入队即返回，解码数据要等后续
+某帧 `TickAsyncDecode` 才上传；而 `IsDecoding` 全库仅两处消费（逐出保护 +
+unswizzle 重入），**采样路径零检查** → 窗口内的 draw 采样**从未写入的显存**
+（复用堆里的陈旧纹理数据 = "内容有效但排布错乱"）。加载画面 = 大 ASTC 集中流送
+= 解码窗口最长 = 必中。该路径是 eden v0.2.1 原生半成品（代码自带
+`UNIMPLEMENTED_IF` 和 `// TODO: Do we need this lock?`），我们 09-12 改配置才激活。
+用户日志 2637 条 `Queuing async texture decode` 佐证路径活跃。
+零成本验证法：grep 日志该字符串即可确认路径在跑。
+
+### 20.3 修复（514a095406，local-only）
+入队即零初始化：`QueueAsyncDecode` 设完标志立即经正常 staging 管线上传全零
+（新 helper `ZeroUploadCopies` 镜像 `ConvertImage` 的三分支缓冲几何：Uncompressed/
+Bc1/Bc3），窗口期采样读到黑色而非垃圾。模板层实现 = GL/VK 双后端同享
+（GL 纹理规范上零初始化，代价为零无害）。同构隐患 `QueueAsyncUnswizzle`
+（BCn 3D 大纹理，跨帧延迟上传）**未动**——TOTK 未触发，留观。
+验收：两次过加载画面连拍干净（`F:\prof\fixverify_run.py` + `astcfix_shots/`）、
+解锁基准 med 22.48ms 与基线逐位一致（44.85fps，零回归）、解码路径仍活跃。
+**用户侧生效需把新 eden.exe 拷到 F:\Switch\Yuzu**（含 09-13 memoization，
+若画面有异样先回报——此前已单独验收过）。
+
+### 20.4 坑与方法论
+- 排查组合矩阵（GPU/异步 × BC3/不压缩）已不需要——根因单点实锤；但备用：
+  若修后仍残留**对齐类**错位（mip 链尾非 4 倍尺寸），下一嫌疑是
+  `ConvertImage` 里 `buffer_row_length=mip_size.width` 未按 BC 块宽对齐（#2 悬案）。
+- PowerShell `-Command` 模式 `$args` 不填充，路径必须内插进脚本串（截图静默
+  失败教训）；Read 工具在本环境只上传图片不渲染，看图走 analyze_image。
+- NVIDIA Overlay taskkill 后 ≥60s 才复活且本 shell 无服务停止权限——杀完
+  立即起跑可与历史基准同条件。
+- **用户日常 exe = 我们的构建拷贝**这个事实要记住：凡我们改渲染相关代码，
+  用户日常游玩即成真实世界回归测试场；出视觉问题先查我们的 worktree 变更。

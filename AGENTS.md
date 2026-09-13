@@ -351,6 +351,21 @@ MSYS_NO_PATHCONV=1 "$NSYS" profile -t wddm,vulkan -d 90 --force-overwrite=true \
   **还原手柄配置会静默杀死 X 键自动化**（focus_ok=True 不代表游戏收到按键），
   测量前先 grep player_0_button_a 是否 keyboard,code:88。
 
+### ASTC 异步解码窗口花屏修复轮（2026-09-13 深夜，详见 PROFILE_PROGRESS.md §20）
+- 用户日常游玩 = **F:\Switch\Yuzu\eden.exe（09-12 拷贝的我们的 06c7a2a6b2 构建，
+  非官方版）**。加载画面"贴图错误"（有效壁画内容错乱重复排布）根因 =
+  `AstcDecodeMode::CpuAsynchronous` 解码窗口：QueueAsyncDecode 入队到
+  TickAsyncDecode 上传之间，采样路径对 IsDecoding 零检查，draw 采样到从未写入
+  的显存。eden v0.2.1 原生半成品路径，§14 改 accelerate_astc=2 才激活。
+  日志零成本验证：grep "Queuing async texture decode"。
+- **修复 514a095406（local-only）**：入队即经 staging 上传全零（`ZeroUploadCopies`
+  镜像 ConvertImage 几何），窗口期采样读黑不读垃圾。验收：两次加载画面连拍干净
+  （`F:\prof\fixverify_run.py`）、解锁基准 med 22.48ms 逐位持平（44.85fps）。
+  同构隐患 QueueAsyncUnswizzle 未动（TOTK 未触发）。用户侧生效需手动拷新 exe。
+- 坑：PowerShell `-Command` 下 `$args` 不填充（截图路径必须内插）；本环境 Read
+  图片只上传不渲染，看图用 analyze_image；Overlay taskkill 后 ≥60s 才复活，
+  杀完立即起跑即与历史基准同条件。
+
 ### 本地补丁与工具（v0.2.1 worktree，勿提交上游）
 
 - `fsp_srv.cpp` 两处 `OpenSaveDataFileSystem` 的 `ASSERT(false)`（Temporary/ProperSystem/SafeMode
