@@ -1122,3 +1122,36 @@ transition 哈希预比较快速命中，此补丁主要收割"哈希算完还�
   （跳过预检的 bench_run --hold 等价物流）；采数据前须从 NVIDIA App 里真关
   覆盖层或停服务。
 - azahar/citron 参考方向作废（§19.3），勿再花时间。
+- `MSYS2_ARG_CONV_EXCL="*"` 与 `taskkill //IM` 组合会翻车（`//IM` 不再被转换成
+  `/IM`，taskkill 报无效参数）——二选一：要么不设 EXCL 用 `//IM`，要么设 EXCL
+  用单斜杠 `/IM`。
+- subprocess 抓 powershell 输出必须 `encoding="utf-8", errors="replace"`——
+  powershell 偶发输出 GBK 中文（0xd5），text=True 默认 utf-8 会让 reader 线程
+  崩掉、r.stdout 变 None（bench_run.py 的 tap_a 同样隐患，2026-09-13 已在
+  visual_run.py 修复）。
+- 自动按键偶发三连失败（focus_ok=False，窗口起太慢或前台锁）属环境瞬时问题，
+  重跑即恢复；手动单发 focus_test.ps1 始终可用作兜底。
+
+### 19.8 uniform 流式拷贝测量（EDEN_UNIFORM_STATS=1，2026-09-13 深夜）
+
+埋点方式（local-only）：Vulkan fast/stream 路径在 ReadBlockUnsafe 拷贝后 memcmp
+影子副本（按 stage×index 90 槽，addr+size 匹配才比较），退出时 ~BufferCache 打
+一行汇总。开销仅测量局存在（默认关）。
+
+三份独立样本（F:\prof\uniform_stats_results.txt 存档）：
+
+| 会话 | copies | identical | 比例 | 流量 |
+|---|---|---|---|---|
+| 手动引导（296s，含菜单/局内） | 6,370,351 | 2,766,085 | **434‰** | 3435 MiB |
+| 自动局 1（199s） | 3,838,911 | 1,665,160 | **433‰** | 2063 MiB |
+| 自动局 2（199s，预检+X 键自动化全程干净） | 4,038,941 | 2,123,993 | **525‰** | 1430 MiB |
+
+- **43-53% 的 uniform 流式拷贝内容与上一次完全相同**（近半是白拷，拷贝速率
+  ~20k 次/秒，平均单拷 370-570B）。
+- 语义：Vulkan fast 路径因"游戏 CPU 直写客存不可见"而无条件重拷——重拷内容近半
+  没变，去重空间实测存在。
+- 口径注意：比例是全会话累计（含菜单/标题静态 uniform），纯局内比例未拆分。
+- 若实现"相同即复用旧 stream 区"（memcmp 换 memcpy + 记住上次区域偏移 + 旧区域
+  有效性判定），按 ~50% 相同率可省 uniform 拷贝簇约一半写流量与对应 staging 消耗，
+  估 **~0.5-1% GPU 线程**——A 簇切片之一，够不上 60fps 主杠杆；实现复杂点在
+  stream 环形复用后旧偏移的有效性判定。已提交测量基建（env 默认关），下轮可决策。
