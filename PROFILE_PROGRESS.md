@@ -1117,10 +1117,11 @@ transition 哈希预比较快速命中，此补丁主要收割"哈希算完还�
 
 ### 19.6 本轮坑
 
-- NVIDIA Overlay 杀不死（nvcontainer.exe 系统服务父进程，杀了就复活）——
-  bench_run 预检会拒绝启动。纯视觉验证不采数据时用 `F:\prof\visual_run.py`
-  （跳过预检的 bench_run --hold 等价物流）；采数据前须从 NVIDIA App 里真关
-  覆盖层或停服务。
+- NVIDIA Overlay 杀不死（nvcontainer.exe 系统服务父进程，杀了就复活）。
+  `check_config.py --tolerate-overlay`（2026-09-13 加）把它降级为 WARN，其余被禁
+  进程（LosslessScaling 等用户可关的）仍硬拦截；`visual_run.py` 已接入该模式做
+  预检（此前完全跳过预检，导致用户忘关的叠加层混进测量局——已修复）。
+  **计时类采集（bench/wpr）前仍须从 NVIDIA App 真关或停服务**（overlay 有 hook 税）。
 - azahar/citron 参考方向作废（§19.3），勿再花时间。
 - `MSYS2_ARG_CONV_EXCL="*"` 与 `taskkill //IM` 组合会翻车（`//IM` 不再被转换成
   `/IM`，taskkill 报无效参数）——二选一：要么不设 EXCL 用 `//IM`，要么设 EXCL
@@ -1129,8 +1130,13 @@ transition 哈希预比较快速命中，此补丁主要收割"哈希算完还�
   powershell 偶发输出 GBK 中文（0xd5），text=True 默认 utf-8 会让 reader 线程
   崩掉、r.stdout 变 None（bench_run.py 的 tap_a 同样隐患，2026-09-13 已在
   visual_run.py 修复）。
-- 自动按键偶发三连失败（focus_ok=False，窗口起太慢或前台锁）属环境瞬时问题，
-  重跑即恢复；手动单发 focus_test.ps1 始终可用作兜底。
+- **自动按键"失灵"的头号嫌疑是配置而不是环境**（2026-09-13 实录，勘误掉早先
+  "环境瞬时问题"的猜测）：还原手柄配置（bak-controller → qt-config.ini）会静默
+  杀死 X 键自动化（keyboard_enabled=false + button_a 回 SDL 手柄），而
+  focus_ok=True 只证明窗口抢到了焦点、**不证明游戏收到了按键**——harness 对
+  这种失效完全无感，游戏卡标题屏还能"跑完全程"。排障顺序：先 grep
+  player_0_button_a 是否还是 `engine:keyboard,code:88`，再怀疑前台锁/电脑。
+  跑完测量要还原手柄配置时，记住下次测量前得重打 patch_input.py。
 
 ### 19.8 uniform 流式拷贝测量（EDEN_UNIFORM_STATS=1，2026-09-13 深夜）
 
@@ -1154,4 +1160,37 @@ transition 哈希预比较快速命中，此补丁主要收割"哈希算完还�
 - 若实现"相同即复用旧 stream 区"（memcmp 换 memcpy + 记住上次区域偏移 + 旧区域
   有效性判定），按 ~50% 相同率可省 uniform 拷贝簇约一半写流量与对应 staging 消耗，
   估 **~0.5-1% GPU 线程**——A 簇切片之一，够不上 60fps 主杠杆；实现复杂点在
-  stream 环形复用后旧偏移的有效性判定。已提交测量基建（env 默认关），下轮可决策。
+  stream 环形复用后旧偏移的有效性判定。测量基建已提交（94fc50545a，env 默认关），
+  下轮可决策。
+
+### 19.9 GPU 线程攻坚阶段总账（09-07～09-13，跨 §6/§14/§18/§19）
+
+**确定有收益（按含金量排序）**：
+
+| 项 | 收益 | 状态 |
+|---|---|---|
+| ASTC 流送配置修复（CpuAsync+Bc3+异步 shader，§14） | 旋转尖刺 -50%、最大卡顿 303→58ms、二次旋转逐出循环打破 | 配置级，已在用户日常配置 |
+| 管线键 memoization（§19.4，8cb6300f26） | 旋转首扫尖刺 81→17（-79%）、合计 129→39、旋转 fps 41.45→44.01、med 中性、渲染验收过 | 已提交 |
+| 第一轮五项微优化（§6，7f1f534cd0） | GPU 线程 CPU -3.3%；相同写过滤是 memoization 的地基 | 已提交 |
+| 解锁自旋 600Hz（§15，c8b0c853f8） | 旋转尖刺再 -43% | 已提交 |
+
+**明确负结果（勿重查）**：影子栈/分发层 A/B（med 免疫）；TSC/TIC 用寄存器代数
+memoize（代数不覆盖客存内容）；宏参数 vector（实测 0.17%）；azahar（3DS）/citron
+（404）参考；LTO/PGO（中性）；四线程流水线下单线程 -3.3% 不动 FPS（帧率整栅格
+跳变，45→60 需 GPU 线程与 JIT 核同时 ≤16.67ms）。
+
+**当前 GPU 线程剩余地图**（§18.2+§19.7 修正后，占 92% 饱和线程）：命令流 ~13.5%
+（语义热路径，最难）、缓冲同步 ~11%（uniform 拷贝 ~2% 已测、WordManager ~2.2%、
+簿记 ~3.5% 未解剖）、堆分配锁 ~5-6%、描述符纹理 ~3.5%、管线配置 ~3%（memoization
+已吃掉大块）。**VulkanWorker 50% 空闲是唯一结构性承接面**。
+
+**建议方向（按杠杆排序）**：
+1. 逐 draw 工作并行化到 VulkanWorker（描述符推送/uniform 流送）——唯一可能一次
+   拿两位数百分比的路线，参考 eden master #4254 Multithreading refactor，单开一轮。
+2. uniform stream 去重（数据在手：~50% 冗余，估 0.5-1%）。
+3. WordManager 脏区 + 缓冲簿记簇代码级解剖（合计 ~5.7% 未开垦）。
+4. per-draw 小对象 arena（~5-6% 分配锁簇）。
+5. 命令流簇（13.5%）最后碰。
+
+体验维度结论：**尖刺/卡顿类问题已基本解决**（旋转场景稳定 ~44fps、无大卡顿）；
+稳态 45→60 仍是长仗，剩余单项全在 0.5-2% 量级，无捷径。

@@ -336,10 +336,20 @@ MSYS_NO_PATHCONV=1 "$NSYS" profile -t wddm,vulkan -d 90 --force-overwrite=true \
   44.01，稳态 med 22.48 中性，渲染验收通过。
 - 参考项目：azahar 是 3DS（作废）、citron 404、eden master 是唯一参考（master 演化
   无现成逐 draw memcmp 修复）。
-- 下轮队列：TSC 描述符表同思路 memoize → SynchronizeBuffer 脏区簇解剖 → ExitIf 块合并
-  → per-draw arena → IR cache 拆除税。
-- 坑：NVIDIA Overlay 由 nvcontainer 服务复活杀不净（采数据前须 App 内真关/停服务；
-  纯视觉验证用 `F:\prof\visual_run.py` 跳预检）。
+- **memcpy 355 勘误（§19.7）**：真身是 ucrt 分派 helper MoveSmall4；调用方分布=
+  uniform 流式拷贝 60%（GPU 线程 memcpy 主战场 ~2%）/ TIC/TSC 重读 17% / 宏参数
+  vector 仅 0.17%（证伪勿做）。ucrt 拷贝热点必须按调用栈归因，符号名聚合会被
+  分派 helper 拆散。
+- **uniform 流式拷贝测量（§19.8，基建 94fc50545a，EDEN_UNIFORM_STATS=1 默认关）**：
+  三会话 identical 比例 433/434/525‰——约一半拷贝是白拷；去重估 0.5-1%，复杂点在
+  旧 stream 区域有效性判定。
+- 下轮队列（§19.5/§19.9 修订）：VulkanWorker 并行化（结构性，参考 master #4254）→
+  uniform 去重 → WordManager+簿记簇解剖 → per-draw arena → 命令流簇最后。
+  TSC/TIC 寄存器代数 memoize 已证伪（代数不覆盖客存内容）。
+- 坑：NVIDIA Overlay 由 nvcontainer 复活杀不净——visual_run 已接 `check_config
+  --tolerate-overlay` 预检（overlay 警告、其余进程硬拦）；计时采集前仍须真关。
+  **还原手柄配置会静默杀死 X 键自动化**（focus_ok=True 不代表游戏收到按键），
+  测量前先 grep player_0_button_a 是否 keyboard,code:88。
 
 ### 本地补丁与工具（v0.2.1 worktree，勿提交上游）
 
