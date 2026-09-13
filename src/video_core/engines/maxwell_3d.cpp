@@ -306,6 +306,7 @@ void Maxwell3D::ProcessDirtyRegisters(u32 method, u32 argument) {
         return;
     }
     regs.reg_array[method] = argument;
+    ++change_generation;
     for (auto const& table : dirty.tables)
         dirty.flags[table[method]] = true;
 }
