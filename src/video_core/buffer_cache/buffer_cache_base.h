@@ -521,6 +521,18 @@ private:
     bool immediately_free = false;
 #endif
 
+    // (local-only) EDEN_UNIFORM_STATS=1: shadow copies of the last stream-path
+    // uniform upload, to measure how many re-copies carry identical content.
+    struct UniformShadow {
+        DAddr addr{};
+        u32 size{};
+        std::vector<u8> data;
+    };
+    std::array<UniformShadow, NUM_STAGES * NUM_GRAPHICS_UNIFORM_BUFFERS> uniform_shadows{};
+    u64 uniform_stream_copies = 0;
+    u64 uniform_stream_identical = 0;
+    u64 uniform_stream_bytes = 0;
+
     std::array<BufferId, ((1ULL << 34) >> CACHING_PAGEBITS)> page_table;
     Common::ScratchBuffer<u8> tmp_buffer;
 };

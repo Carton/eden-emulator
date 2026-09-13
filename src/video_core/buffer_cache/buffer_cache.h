@@ -7,6 +7,8 @@
 #pragma once
 
 #include <algorithm>
+#include <cstring>
+#include <cstdlib>
 #include <memory>
 #include <numeric>
 
@@ -19,6 +21,15 @@
 namespace VideoCommon {
 
 using Core::DEVICE_PAGESIZE;
+
+// (local-only) gate for the uniform stream-path measurement counters
+static bool UniformStreamStatsEnabled() {
+    static const bool enabled = [] {
+        const char* const value = std::getenv("EDEN_UNIFORM_STATS");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
 
 template <class P>
 BufferCache<P>::BufferCache(Tegra::MaxwellDeviceMemoryManager& device_memory_, Runtime& runtime_)
@@ -52,7 +63,18 @@ BufferCache<P>::BufferCache(Tegra::MaxwellDeviceMemoryManager& device_memory_, R
 }
 
 template <class P>
-BufferCache<P>::~BufferCache() = default;
+BufferCache<P>::~BufferCache() {
+    // (local-only) EDEN_UNIFORM_STATS=1 measurement dump
+    if (uniform_stream_copies > 0) {
+        LOG_INFO(HW_GPU,
+                 "uniform stream stats: copies={} identical={} ({} permille) bytes={} MiB",
+                 uniform_stream_copies, uniform_stream_identical,
+                 uniform_stream_copies > 0
+                     ? (uniform_stream_identical * 1000) / uniform_stream_copies
+                     : 0,
+                 uniform_stream_bytes / (1024 * 1024));
+    }
+}
 
 template <class P>
 void BufferCache<P>::RunGarbageCollector() {
@@ -975,6 +997,20 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
         // Stream buffer path to avoid stalling on non-Nvidia drivers or Vulkan
         const std::span<u8> span = runtime.BindMappedUniformBuffer(stage, binding_index, size);
         device_memory.ReadBlockUnsafe(device_addr, span.data(), size);
+        // (local-only) EDEN_UNIFORM_STATS=1: measure identical-content re-copies
+        if (UniformStreamStatsEnabled()) {
+            UniformShadow& shadow =
+                uniform_shadows[stage * NUM_GRAPHICS_UNIFORM_BUFFERS + index];
+            ++uniform_stream_copies;
+            uniform_stream_bytes += size;
+            if (shadow.addr == device_addr && shadow.size == size &&
+                std::memcmp(span.data(), shadow.data.data(), size) == 0) {
+                ++uniform_stream_identical;
+            }
+            shadow.addr = device_addr;
+            shadow.size = size;
+            shadow.data.assign(span.begin(), span.end());
+        }
         return;
     }
     // Classic cached path
