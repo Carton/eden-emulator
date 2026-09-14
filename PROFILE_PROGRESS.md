@@ -1291,3 +1291,28 @@ profiling 文档），剔除 master 原生已有项。v0.2.1 分支本地提交 
   寄存器过滤/IR cache）；caps 冲突整文件取 theirs 回退了 master 演化
   （ResolveCallerProgramId/Capture::ScreenShotAttribute 丢失），发现后 reset
   丢弃该提交——**冲突解一律逐 hunk，禁整文件取边**。
+
+## 22. 解锁模式菜单节奏修复 + 工作重心转移 master（2026-09-14 夜）
+
+### 22.1 问题与方案
+用户反馈：解锁（不勾 Limit Speed Percent）后 TOTK 暂停菜单本应 30fps（省 CPU、
+输入节奏正常）却跑到 100+fps，LT/RT 导航过敏易误操作；勾 100% 又失去解锁收益。
+机制：菜单以 swap interval=2 请求节奏，但解锁分支一刀切 0.1 → 合成事件 600Hz →
+hardware_composer 的"每 interval 次合成取一帧"门控在 600Hz 基准上失效。
+**两全方案（568605ebf7）**：yuzu 扩展里 interval≤0 语义是"速度倍率"
+（NormalizeSwapInterval 置 compose_speed_scale>1），即动态 FPS 游戏内自报身份；
+解锁分支只对 `compose_speed_scale > 1` 放开 0.1，显式节奏请求（interval 1..4）
+回归硬件精确 60Hz 合成基准；最终 tick 再 clamp ≥600Hz（防倍率除法把事件率推回
+多 kHz 自旋）。**已知代价（本地策略）**：从不使用 interval 0 的固定 30fps 游戏
+解锁后也不会超过 30fps。
+验收：文件选择界面实测锁定 60fps（med 16.67ms）；游戏内解锁不变
+（44.92fps / med 21.67ms，较修复前 22.50 略好）；渲染干净（fixverify 连拍）。
+注：菜单变 paced 后自动化过标题的按键时序偶发不进游戏（一局 bench SUSPICIOUS
+menu=60fps 即此），重跑即过——测试脚本未来可加"确认进游戏"探针。
+
+### 22.2 工作流变更（用户拍板）
+- **此后只在 test/master-profiling（主仓库）上工作；v0.2.1 worktree 冻结**，
+  停在 514a095406（ASTC 零初始化修复），不再修改。
+- 主仓库 build/（废弃 VS2026 产物，5.3GB）已删除；build-clang（3.7GB）按用户
+  要求保留待后续 clang 尝试；现役 = build-vs22。
+- 用户日常 exe（F:\Switch\Yuzu，v0.2.1 血统）如需本修复，需换拷新 master 构建。
