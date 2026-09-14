@@ -12,9 +12,11 @@ C++20 + CMake（≥3.31）构建，支持 Windows / Linux / macOS / Android 等�
 
 ## 当前工作基线（2026-09-06 实测）
 
-- **TOTK 可玩基线 = `F:\devel\opensource\eden-v0.2.1`**（tag v0.2.1 = 58c1e20 的 git worktree），
-  用 VS2022 编译的 RelWithDebInfo，`build/bin/` 下 eden.exe(+pdb) 实测王国之泪正常游玩，性能与官方版相当。
-  该目录已配置好（build/ 与 build/bin/user/ 均就绪），改代码后直接 `cmake --build build` 增量编译即可。
+- **工作重心（2026-09-14 起）= master：test/master-profiling**，此后一切修改只落在
+  主仓库，构建走 build-vs22。**v0.2.1 worktree 已冻结**（停在 514a095406，勿改），
+  仅作历史基线参照；用户日常 exe（F:\Switch\Yuzu 拷贝）如需新修复，换拷新 master 构建。
+- 历史：TOTK 可玩基线原为 `F:\devel\opensource\eden-v0.2.1`（tag v0.2.1 = 58c1e20 的
+  git worktree，VS2022 RelWithDebInfo，`build/bin/` 就绪可随时增量编译对照）。
 - **master（F:\devel\opensource\eden-emulator，test/master-profiling 分支）自 2026-09-14 起可用**：
   v0.2.1 优化已移植（§21），`build-vs22/` 已配置（VS2022 + crtvec shim），build-vs22/bin/user
   已拷好数据，实测 TOTK 进游戏渲染正常、基准/旋转与 v0.2.1 持平（med 22.50ms、旋转 max 64ms）。
