@@ -108,11 +108,14 @@ s64 Conductor::GetNextTicks() const {
             // SpeedLimiter::DoSpeedLimiting.
             speed_scale = 100.f / Settings::SpeedLimit();
         } else {
-            // Run at unlocked framerate. Floor the tick divisor at 0.1 (~600 Hz
-            // event rate): 0.01 schedules ~6 kHz events and burns a full core in
-            // HostTiming/VSync wakeups while presenting at most ~120 Hz.
-            // (local-only, ported from v0.2.1 c8b0c853f8)
-            speed_scale = 0.1f;
+            // Run at unlocked framerate, but only for game-paced submissions:
+            // the yuzu extension maps nonpositive swap intervals to a speed
+            // multiplier (m_compose_speed_scale > 1, e.g. TOTK's dynamic-FPS
+            // gameplay). Explicit pacing requests (interval 1..4, e.g. 30 fps
+            // pause menus) keep hardware-accurate 60 Hz composition so paced
+            // UIs stay at their intended rate and input repeat does not
+            // hyperscale. (local-only)
+            speed_scale = m_compose_speed_scale > 1.f ? 0.1f : 1.f;
         }
     }
 
@@ -125,7 +128,12 @@ s64 Conductor::GetNextTicks() const {
     }
 
     const f32 effective_fps = 60.f / static_cast<f32>(m_swap_interval);
-    return static_cast<s64>(speed_scale * (1000000000.f / effective_fps));
+    const s64 ticks = static_cast<s64>(speed_scale * (1000000000.f / effective_fps));
+    // Never schedule guest vsync events faster than ~600 Hz: multi-kHz
+    // conductor wakeups were measured burning a full core in HostTiming/VSync
+    // spin (v0.2.1 profiling, 2026-09-12). (local-only)
+    constexpr s64 kMinVsyncTickNs = 1000000000LL / 600;
+    return std::max<s64>(ticks, kMinVsyncTickNs);
 }
 
 s64 Conductor::GetFramePeriodNs() const {
