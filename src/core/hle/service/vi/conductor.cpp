@@ -129,10 +129,13 @@ s64 Conductor::GetNextTicks() const {
 
     const f32 effective_fps = 60.f / static_cast<f32>(m_swap_interval);
     const s64 ticks = static_cast<s64>(speed_scale * (1000000000.f / effective_fps));
-    // Never schedule guest vsync events faster than ~600 Hz: multi-kHz
+    // Never schedule guest vsync events faster than ~1200 Hz: multi-kHz
     // conductor wakeups were measured burning a full core in HostTiming/VSync
-    // spin (v0.2.1 profiling, 2026-09-12). (local-only)
-    constexpr s64 kMinVsyncTickNs = 1000000000LL / 600;
+    // spin (v0.2.1 profiling, 2026-09-12). 1200 Hz (0.833 ms granularity) keeps
+    // present-time quantization loss below one ms when a frame's work lands
+    // just above a tick boundary (observed med flipping 21.67/23.33 ms =
+    // 13/14 x 1.667 ms at the former 600 Hz floor). (local-only)
+    constexpr s64 kMinVsyncTickNs = 1000000000LL / 1200;
     return std::max<s64>(ticks, kMinVsyncTickNs);
 }
 

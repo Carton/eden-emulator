@@ -7,6 +7,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstring>
 #include <vector>
 
 #include "common/alignment.h"
@@ -37,7 +38,21 @@ public:
         DEBUG_ASSERT(index <= current_limit);
         const GPUVAddr gpu_addr = current_gpu_addr + index * sizeof(T);
         std::pair<T, bool> result;
-        gpu_memory.ReadBlockUnsafe(gpu_addr, std::addressof(result.first), sizeof(T));
+        // (local-only) Fast path: descriptors are tiny (32 B) and this runs on
+        // every texture/sampler bind of every draw. ReadBlockUnsafe pays the
+        // WalkBlock ceremony per call; two direct pointer translations plus a
+        // contiguity check are far cheaper for the overwhelmingly common case
+        // of the entry living in one host-contiguous mapped page. Straddling
+        // or unmapped entries fall back to the block read.
+        if (const u8* host = gpu_memory.GetPointer(gpu_addr)) [[likely]] {
+            if (gpu_memory.GetPointer(gpu_addr + sizeof(T) - 1) == host + sizeof(T) - 1) {
+                std::memcpy(std::addressof(result.first), host, sizeof(T));
+            } else {
+                gpu_memory.ReadBlockUnsafe(gpu_addr, std::addressof(result.first), sizeof(T));
+            }
+        } else {
+            gpu_memory.ReadBlockUnsafe(gpu_addr, std::addressof(result.first), sizeof(T));
+        }
         if ((read_descriptors[index / 64] & (1ULL << (index % 64))) != 0) {
             result.second = result.first != descriptors[index];
         } else {
