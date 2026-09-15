@@ -348,6 +348,15 @@ bench_run 已有 `fps>52 → SUSPICIOUS` 提示；看到它或 taps 的 focus_ok
 > bench_run 的 commit 标签读 eden-emulator 仓库）。历史一次性分析脚本
 > （analyze_* / rot_probe* / cap_* / ninja_windows / config_diff / reanalyze_good）
 > 保留 v0.2.1 时代路径不动——它们记录的是当年的分析对象。
+>
+> **trace/存档归档（2026-09-15 建立）**：`F:\prof\archive\<日期>_<主题>_<commit>\`
+> 收纳关键 trace + 配对存档/配置/二进制，各目录带 README（commit 配对、恢复方法、
+> 注意事项）。现存：`2026-09-15_pond-round_18aaa38cef`（pond.etl + 水塘存档 + exe/pdb）、
+> `2026-09-13_idle-t3_v021_06c7a2a6b2`（t3.etl，存档未留存已注明）、
+> `2026-09-12_rotation_v021_pre-fix`（rot.etl）。**已删除**（结论均已文档化）：
+> rot_v1_gpuuncompressed / cpugpu_0907_baseline / cpugpu_0908 / cpu25 / boot_emit 共 20.6G。
+> 规矩：新里程碑按"commit → 编译 → 采集 → 归档"走，**PDB 必须随 trace 归档**
+> （pond.etl 的时代 PDB 已丢失，教训）。
 
 | 文件 | 说明 |
 |---|---|
