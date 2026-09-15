@@ -9,20 +9,21 @@ description: Eden 模拟器（TOTK）性能基准与 profiling 工作流——�
 
 ## 关键路径
 
-- 工作基线（改代码、跑测试都在这）：`F:\devel\opensource\eden-v0.2.1`，分支 `local-profiling`
+- 工作基线（改代码、跑测试都在这）：`F:\devel\opensource\eden-emulator`，分支 `test/master-profiling`，构建目录 `build-vs22`（v0.2.1 worktree 已冻结，勿改）
 - 游戏硬链接：`F:\prof\TOTK.nsp`；数据目录：`build\bin\user\`（portable）
 - **一切 AI 生成内容仅限本地，严禁 push 上游 / 提 issue / PR**
 
 ## 构建（Git Bash，增量 ~1-5 分钟）
 
 ```bash
-cd /f/devel/opensource/eden-v0.2.1
+cd /f/devel/opensource/eden-emulator
 source /f/devel/opensource/eden-emulator/tools/windows/load-msvc-env.sh
 export PATH="/g/Tools/glslang/bin:$(dirname "$(command -v cl.exe)"):/d/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin:/d/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja:$PATH"
-cmake.exe --build build 2>&1 | tail -15
+cmake.exe --build build-vs22 2>&1 | tee /f/prof/build_last.log | tail -15
+# 注意：退出码看 tee 的日志或直接看产物时间戳，别只信管道尾（AGENTS 规则）
 ```
 
-产物 `build/bin/eden.exe`。**勿用 eden-cli 跑 TOTK（shader 段必崩）**。
+产物 `build-vs22/bin/eden.exe`。**勿用 eden-cli 跑 TOTK（shader 段必崩）**。
 
 ## FPS 基准（一条命令，~4 分钟）
 
