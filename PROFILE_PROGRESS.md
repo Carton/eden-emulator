@@ -342,6 +342,13 @@ bench_run 已有 `fps>52 → SUSPICIOUS` 提示；看到它或 taps 的 focus_ok
 
 ## 7. F:\prof 文件与脚本清单
 
+> **2026-09-14 起**：活跃脚本（check_config / bench_run / fixverify_run / visual_run /
+> rot_test / rot_trace / patch_input）的 EDEN_DIR 默认值已改为 master 构建目录
+> `F:\devel\opensource\eden-emulator\build-vs22\bin`（EDEN_DIR 环境变量仍可覆盖；
+> bench_run 的 commit 标签读 eden-emulator 仓库）。历史一次性分析脚本
+> （analyze_* / rot_probe* / cap_* / ninja_windows / config_diff / reanalyze_good）
+> 保留 v0.2.1 时代路径不动——它们记录的是当年的分析对象。
+
 | 文件 | 说明 |
 |---|---|
 | `TOTK.nsp` | 游戏文件的 ASCII 路径硬链接（指向 F:\Switch\Games\...），给工具链用 |
