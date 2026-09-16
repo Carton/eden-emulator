@@ -1373,3 +1373,55 @@ menu=60fps 即此），重跑即过——测试脚本未来可加"确认进游�
 （21.67/23.33/22.50 全是 tick 倍数，一眼假）；②场景负载时变（水流动画相位），
 单跑结论必翻车，A/B 各 n≥2；③wpr 两轮采样率不一致（10398 vs 118333/类似时长），
 跨 trace 只能比占比。
+
+## 24. 随机卡顿攻坚：哨兵自动抓 trace 基建（2026-09-16）
+
+### 24.1 问题与方案选型
+用户报告：稳定 45FPS + 小黄鸭插帧后日常基本 OK，但优化版经常出现**突然掉帧，
+持续 <1s 但明显可感知**——随机、亚秒级，固定窗口采集（以前旋转/首扫的打法）
+抓不到。对应 Android systrace+simpleperf 的 Windows 等价物其实更强：ETW 单条
+trace 同时含调度时间轴+采样栈+GPU 行，天然时间对齐。基建三层：
+1. **PresentMon v2.5.1 CLI**（`G:\Tools\PresentMon\PresentMon-2.5.1-x64.exe`，
+   GitHub GameTechDev 独立 exe 即够用，MSI 不必要）：逐帧 CSV 哨兵，QPC 时间戳，
+   列含 MsBetweenPresents/MsBetweenDisplayChange/MsInPresentAPI/MsGPULatency/
+   MsCPUBusy/MsCPUWait——app/GPU/显示三级"迟到"第一道分类不开 ETL 就能做。
+2. **wpr 内存环形缓冲**（无 -filemode）：常驻零磁盘写，检测到卡顿立即 -stop
+   冻结最近 ~50s 现场。CPU-only profile（CPU+GPU 事件量 200MB/s 环形只盖 5s，
+   CPU-only 24MB/s、默认池 ~1GiB ≈ 42-50s 覆盖）。
+3. **`F:\prof\stutter_watch.py`**（提权哨兵，入口 `stutter_watch_start.bat`
+   自提权）：检测规则 = 帧间隔 ≥ severe_ms(默认50) 且 ≥ ratio(1.6)×滚动中位
+   (120帧) 且过冷却期(5s) → 后台线程 wpr -stop 落盘 `stutter_<时间>.etl` +
+   侧车 JSON（detected_epoch / wpr_start_epoch / frame_ms / med / 最近30帧 /
+   行内 QPC+disp+api）→ 自动重启环形继续盯（--max-captures 默认 4 份配额，
+   每份 ~0.5-1GB）。抓取 flush 期间（F 盘 ~25MB/s，1GB 约 30-60s）暂停触发、
+   继续记录帧——连发卡顿只抓第一发。退出（Ctrl+C/--duration）时环形还在则
+   补落 manual etl 兜底漏检。
+
+### 24.2 本机三坑（复现/换机必读，已固化在脚本头部注释）
+1. **C: 100% 满（剩 1.6G）→ wpr 内存模式 start/stop 都在 C: 临时区 staging
+   挂死或报 0x80070070**（表象：start 无限阻塞、stop 挂 1 分钟后报磁盘满、
+   连锁出现 0xc5580601 duplicate instance）。修复 = 所有 wpr 子进程 env 里
+   TMP/TEMP 重定向到 F:。与 filemode 时代 -recordtempto F: 同族问题，
+   DiagTrack 重启不是解药（试过，没用）。诊断现场 exp1-7 已清理。
+2. **PresentMon 独占持有 --output_file 句柄**，外部 tail 该文件会
+   PermissionError（共享冲突被 Python 映射为 EACCES）。修复 = --output_stdout
+   管道 + 读线程，CSV 由哨兵转存 pm_live.csv（顺带解决文件轮转检测）。
+3. PresentMon 自带 ETW 会话与 wpr 会话共存无冲突（TMP 修复后实测）。
+
+### 24.3 端到端验证（2026-09-16 实测通过）
+哨兵提权运行 + eden 冷启动 TOTK：开机期 **201ms / 81ms 两次卡顿自动捕获**，
+ETL 1074MB / 414MB 落盘 rc=0，环形重启后 15s 再武装，配额、到时收尾、
+Ctrl+C 收尾全路径正常。侧车 JSON 锚点齐全；201ms 那帧 disp=200ms——
+"app 迟到且显示迟到"的分类信息在侧车里就有。环形覆盖实测 50.4s。
+
+### 24.4 分析流程（拿到首批样本后）
+ETW MCP `process_trace`（先 CPU Scheduling Data + Sampled CPU Usage）→
+侧车锚点切卡顿窗 → **同 trace 等长正常窗做差分**（天然控制变量）→ 三分支归因：
+关键线程 running 且热点变（代码热点）/ ready 未跑（被谁抢核，按进程聚合）/
+waiting（do_critical_path_analysis_by_thread_and_time 拉阻塞链）。
+已知模式 checklist：管线/shader 编译、纹理流送 LRU 重上传、JIT 编译风暴
+（IR cache miss）、EmuControlThread 拆除/重映射税、分配锁、后台进程抢核；
+**新嫌疑：栅格节拍滑档**（45↔48↔40 混合，帧时长 16.7/25/33.3 跳变本身就是
+可感知卡顿，代码热点查不到，用 PM display 序列看节拍模式）。第二轮再考虑
+eden 埋 TraceLogging 帧事件（atrace 等价物，~20 行 local-only）。
+若 50s 基线窗不够差分：自定义 .wprp 调大内存池。
