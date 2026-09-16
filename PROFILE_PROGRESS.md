@@ -1450,8 +1450,10 @@ eden 埋 TraceLogging 帧事件（atrace 等价物，~20 行 local-only）。
   cpu_accuracy=2（Accurate）下事件粒度更细 / 窗口化 vsync 路径 / 场景本身。待专项查。
 - **窗口化游玩（fullscreen=false）→ "Composed: Copy with GPU GDI" 呈现**：显示更新
   量化到 16.7/33.3/50ms（DWM 拾取节奏），加呈现路径开销。
-- 用户日常配置 cpu_accuracy=2（Accurate）——§6.3 的 A/B：Unsafe(0) +2fps 且
-  p99 33.4→25.4ms（33ms 尖刺全消）。**已建议用户日常改 cpu_accuracy=0 + 试试全屏**。
+- 用户日常配置 cpu_accuracy=2 —— **勘误（2026-09-17）：master 枚举为 Auto=0/Accurate=1/
+  Unsafe=2，=2 即 Unsafe，用户本来就在最优档**；此前误记为 Accurate 并建议改 0 是错的
+  （0=Auto=编译默认，改后被规范回 default=true 属正常行为）。基准配置同为 =2，两边同档，
+  本节其余结论不受影响。窗口化→全屏已由用户实测有收益，后续基准一律全屏。
 - 干扰注记：分析 agent（ZCode.exe ~1.7 核）在用户游玩期间也在跑——未来采集时
   agent 应静默（本次非成因，34% 空闲）。
 
