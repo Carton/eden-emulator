@@ -1525,3 +1525,33 @@ vk 命令录成 lambda 进 32KB CommandChunk；**单个 VulkanWorker 线程**回
   我们的 memo 改动（DescriptorTable 槽位 memo、管线键 memo）都在此区域，改动时一并梳理。
 - 每 draw fork-join 若 draw 间隔本就 <50µs，开销反噬——P0 必须先量。
 - 本地纪律照旧：local-only commit，不提上游。
+
+### 25.5 P0 定量裁决 + 环境劣化事故（2026-09-17）
+
+**P0 数字（stutter ETL 基线窗 10s，GPU 线程 9617 样本 = 96.2%）**：
+BufferCache 簇 949（9.9%）+ TextureCache 簇 620（6.4%）+ 客存翻译/拷贝 helper ~7%
+≈ **可并行池 ~23%**。每帧 GPU 线程 ~30ms、TOTK 动态玩法 ~2500 draw/帧 → 每 draw ~12µs、
+可并行部分 ~2.8µs < 任何 fork-join 交接成本（condvar 4-10µs / spin 1.5-3µs）。
+**P1 intra-draw fork-join 判死刑——算术上不可能正收益。**
+
+**P2 设计（读码测绘，vk_rasterizer PrepareDraw/GraphicsPipeline::Configure）**：
+解析线程在 draw N 快照（FixedPipelineState+绑定表地址+draw 参数）→ worker 池并行跑
+Configure（缓存查找+描述符构建+uniform staging 预留）→ 按 draw 序 ticket 有序提交到
+scheduler chunk。GPFIFO entry 完整性保证 entry 内 guest 数据已写完 → entry 内乱序读安全。
+**阻塞点清单**：①Configure 活读 maxwell3d/gpu_memory（~40 处调用点需快照化）
+②Scheduler chunk 仅 GPU 线程追加（需序号票据+交接）③UpdateDescriptorQueue 每线程
+ring + scheduler State.descriptor_buffer_chunk 顺序性 ④纹理/缓冲缓存内部结构
+（LRU/slot map）单线程假设 ⑤缓冲同步的跨 draw 顺序语义（可保留在解析线程）。
+收益上限：7ms/帧并行池 → 3 worker 实际省 ~5ms（+18% fps 量级）。多日级工程，
+按此清单分批落地，env 门控（EDEN_PARALLEL_DRAW）默认关。
+
+**全屏 A/B 事故与基线劣化发现（本轮 block）**：
+为量化"GDI 窗口呈现税"切全屏跑 A/B，结果全形态（borderless×2 / exclusive / 小窗对照）
+全部 35.8-37.7fps / med 25.8-26.7，比 §23 基线（44.0/22.50）**整体慢 ~7fps**——像素假说、
+存档漂移（存档 09-15 后未动）、配置漂移（check 全过）、二进制（哈希同）、补丁（最近 09-09）、
+电源（高性能）、shader 缓存（09-14 冻结）、GPU P 态全部排除。
+**主嫌疑 = 本次启动（09-15 21:38 起）内积累的内核/WDDM 状态劣化**——时间线与 §24.2 的
+wpr 挂死强杀/DiagTrack 重启/C 盘满事故重合，且与 §16 历史模式（同症状、重启待验）一致。
+**处置**：A/B 作废；§25.4"今后基准一律全屏"决议撤销（窗口仍是快路径）；**下次重启后
+先跑窗口小窗复测基线，恢复 ~44 才允许继续任何 A/B**；以后每轮 A/B 前加基线哨兵局。
+（用户日常"全屏更顺"的体感不受影响——那是动态场景 DWM 拾取平滑度，与本次稳态回退正交。）
