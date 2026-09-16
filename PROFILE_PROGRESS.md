@@ -1459,3 +1459,28 @@ eden 埋 TraceLogging 帧事件（atrace 等价物，~20 行 local-only）。
 （采样数据会长 ~2×，弃用尾部）；卡顿在 etl 内的位置 = 尾部前 ~1s（PM 延迟）。
 侧车 ring_session_s 与调度截止时刻互相印证。无时间窗的 Contains 全表扫描查询会
 30s 超时——**务必带时间窗**。
+
+### 24.6 HostTiming"满核"专项：结案（2026-09-16 深夜）
+
+**现象**：用户日常会话 HostTiming run% 98%，基准配置历史值 ~36%。
+
+**归因链（全部实证）**：
+1. 采样热点 = `Common::Event::WaitFor`（扣 ETW 抓栈噪声后占实际大头），线程 98%"运行中"。
+2. 读码：master 的 `Event::WaitFor`（src/common/thread.cpp:647，上游重写）三分支：
+   AMD MWAITX（monitorx）/ Intel WAITPKG（umwait）/ 后备 `while(...) NtDelayExecution(-1)`
+   ——最后一个等于睡 100ns = 纯忙等。
+3. 本机 = Ryzen 5600（Zen 3）→ CPUID 8000_0001h EDX[29]=1 → **走 MWAITX 分支**：
+   `_mm_mwaitx(定时器提示, C1)` 硬件等待。调度器视角永不切换=98% run%，实际 C1 停机。
+4. 历史账：v0.2.1 同名函数是 `condition_variable::wait_for`（真睡→36%）；master 换
+   MWAITX 后变"假忙"。§23 上 1200Hz 时只测了端到端、没看线程级——当时的 caveat 落地。
+
+**定性（本机）**：**非吞吐小偷**——MWAITX C1 释放执行资源给 SMT 兄弟线程，卡顿窗仍有
+27% 空闲、无抢占。代价：(a) 该核进不了深 C-state（轻微功耗/boost 影响）；
+(b) 一切基于 run% 的 profile 会把它读满（今天第一遍差分就被它误导过）。
+**移植地雷**：老 Intel（无 WAITPKG，约 Alder Lake 之前）走后备分支=真·100% 硬自旋。
+
+**修复裁决**：暂不改。hybrid wait（睡到 deadline-100µs 再 MWAITX 收尾）可降 run% 到
+~15% 并救老 Intel，但动的是全程序共用的等待原语、有伤 vsync pacing 精度的风险，
+优先级低于 VulkanWorker 并行化。若将来改：先量 pacing 精度基线再动。
+分析注意：今后所有 trace 里 HostTiming 的 run% 直接当"~100% 常态"扣除，
+不作为异常信号（除非换 Intel 无 WAITPKG 机器）。
