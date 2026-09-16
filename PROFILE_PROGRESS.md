@@ -1486,3 +1486,42 @@ eden 埋 TraceLogging 帧事件（atrace 等价物，~20 行 local-only）。
 优先级低于 VulkanWorker 并行化。若将来改：先量 pacing 精度基线再动。
 分析注意：今后所有 trace 里 HostTiming 的 run% 直接当"~100% 常态"扣除，
 不作为异常信号（除非换 Intel 无 WAITPKG 机器）。
+
+## 25. VulkanWorker 并行化开题：侦察结论与分阶段方案（2026-09-17）
+
+### 25.1 现状架构（读码确认，vk_scheduler.h/.cpp + #4254）
+yuzu 血统的调度器分工：**GPU 线程**做 DmaPusher→Maxwell3D 状态机→Rasterizer::Draw
+的全套状态解析（纹理/缓冲/管线缓存查找、描述符构建、uniform 拷贝），把已解析的
+vk 命令录成 lambda 进 32KB CommandChunk；**单个 VulkanWorker 线程**回放 chunk
+（真正调 vkCmd*）+ vkQueueSubmit。实测 worker 仅 41-48% → **瓶颈在解析侧，回放/提交
+侧有余量但不是瓶颈**——"分给 VulkanWorker"的真实含义是给解析侧加并行，不是加回放线程。
+#4254（multithreading refactor）主要是优先级/ADPF/时钟，未动 draw 路径并行。
+
+### 25.2 参考项目侦察
+- citron-neo（F:\devel\opensource\citron-neo-emulator，同族）：调度器 262 行 vs eden
+  335 行（eden 更进化），draw 路径无任何并行化——无现成参考。
+- azahar（3DS）架构不同构，无参考价值；FEX 与此题无关。
+- eden 自身近期：#4251 bindless descriptor 是描述符路径演化，非并行。
+- **结论：绿地，自行设计。**
+
+### 25.3 分阶段方案（P0→P2，另附两个夹带项）
+- **P0 热点再验证**：用现有 ETL 把 GPU 线程解析侧拆成"有寄存器状态依赖"（DmaPusher/
+  Maxwell3D 状态机、FixedPipelineState::Refresh——串行本质）vs"无状态依赖的缓存查找簇"
+  （VisitImageView/PrepareImageView/PushImageDescriptors/DescriptorTable::Read/
+  UpdateGraphicsBuffers——按 §18/§23/§24.5 合计 ~15-25% GPU 线程）。这是可并行化的子集。
+- **P1 intra-draw 并行**（最小结构改动，先做）：每 draw 的纹理/采样器/缓冲绑定解析
+  fork-join 并行（worker 池）。pond 场景绑定量翻倍形态收益最大。join 开销 ~10µs 级，
+  需要每 draw 可并行工作量 ≥50µs 才正收益——P0 的量化决定 P1 值不值得。
+- **P2 跨 draw 流水**（大改，后做）：命令解析与状态解析两级流水（解析线程产 draw 描述、
+  多 worker 并行消费）——真正吃满 worker 余量的方向，但要动 Maxwell3D 状态机语义，
+  同步/fence 设计风险高，P1 落地并证明收益后再启动。
+- 夹带项：uniform 去重（§19.9 已量化 0.5-1%）；描述符 memo 的进一步覆盖。
+- **验收管线**：全屏模式基准（用户已实测全屏有收益，2026-09-17 起基准一律全屏——
+  注意自动化 focus 路径在 borderless 下兼容）+ stutter_watch 真实会话对比 GPU 线程 run%
+  与日常 fps（用户日常 GPU 线程 30fps 即饱和，是最直接的真实验收场）。
+
+### 25.4 风险与纪律
+- 解析侧查找有缓存写路径（slot memo 写入）——并行化需分清只读/读写边界或加细粒度锁；
+  我们的 memo 改动（DescriptorTable 槽位 memo、管线键 memo）都在此区域，改动时一并梳理。
+- 每 draw fork-join 若 draw 间隔本就 <50µs，开销反噬——P0 必须先量。
+- 本地纪律照旧：local-only commit，不提上游。
