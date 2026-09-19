@@ -77,7 +77,8 @@ cmake.exe --build build-vs22     # RelWithDebInfo，产物在 build-vs22/bin/
    提交信息用 `(local-only)` 标记；推送到自己的 fork（`carton` remote）是允许的。
 4. **F:\Switch\Yuzu 只读**（用户日常安装目录，读可以，写不行）。
 5. **profile 一律用 GUI 的 eden.exe**（CLI + TOTK 会崩）；分析阶段不开 PGO；计时采集前关后台干扰
-   （NVIDIA Overlay/LosslessScaling 等，check_config.py 会拦截；overlay 对 med 实测无扰，可 `--tolerate-overlay`）。
+   （LosslessScaling 等，check_config.py 会拦截；**NVIDIA Overlay 一律不杀、不拦、不用管**——
+   2026-09-19 用户定规，med 实测无扰，check_config 对它只 WARN）。
 6. **测试按键自动化**：`python F:\prof\patch_input.py`（自动备份到 `.bak-autotest`，测完
    `--restore` 还原用户手柄配置）；focus_ok=True 不代表游戏收到按键，测前 grep
    `player_0_button_a` 确认是 keyboard,code:88。
