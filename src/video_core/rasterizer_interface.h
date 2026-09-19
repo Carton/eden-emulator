@@ -113,6 +113,14 @@ public:
 
     virtual bool OnCPUWrite(PAddr addr, u64 size) = 0;
 
+    /// (local-only) P2: given a GPU-thread inline write to guest memory,
+    /// returns true when the write was deferred because a parallel draw
+    /// resolve is reading guest memory; it is applied once the resolver goes
+    /// idle. Default: never defer.
+    virtual bool TryDeferInlineWrite(GPUVAddr addr, std::span<const u8> data) {
+        return false;
+    }
+
     /// Sync memory between guest and host.
     virtual void InvalidateGPUCache() = 0;
 

@@ -349,13 +349,13 @@ void TextureCache<P>::SynchronizeDescriptors(bool compute) {
             ++texture_bindings_serial;
         }
     } else {
-        const bool linked_tsc = maxwell3d->regs.sampler_binding == Tegra::Engines::Maxwell3D::Regs::SamplerBinding::ViaHeaderBinding;
-        const u32 tic_limit = maxwell3d->regs.tex_header.limit;
-        const u32 tsc_limit = linked_tsc ? tic_limit : maxwell3d->regs.tex_sampler.limit;
+        const bool linked_tsc = Engine3D()->regs.sampler_binding == Tegra::Engines::Maxwell3D::Regs::SamplerBinding::ViaHeaderBinding;
+        const u32 tic_limit = Engine3D()->regs.tex_header.limit;
+        const u32 tsc_limit = linked_tsc ? tic_limit : Engine3D()->regs.tex_sampler.limit;
         bool bindings_changed = false;
-        if (channel_state->graphics_sampler_table.Synchronize(maxwell3d->regs.tex_sampler.Address(), tsc_limit))
+        if (channel_state->graphics_sampler_table.Synchronize(Engine3D()->regs.tex_sampler.Address(), tsc_limit))
             bindings_changed = true;
-        if (channel_state->graphics_image_table.Synchronize(maxwell3d->regs.tex_header.Address(), tic_limit))
+        if (channel_state->graphics_image_table.Synchronize(Engine3D()->regs.tex_header.Address(), tic_limit))
             bindings_changed = true;
         if (bindings_changed) {
             ++texture_bindings_serial;
@@ -365,7 +365,7 @@ void TextureCache<P>::SynchronizeDescriptors(bool compute) {
 
 template <class P>
 bool TextureCache<P>::RescaleRenderTargets() {
-    auto& flags = maxwell3d->dirty.flags;
+    auto& flags = Engine3D()->dirty.flags;
     u32 scale_rating = 0;
     bool rescaled = false;
     std::array<ImageId, NUM_RT> tmp_color_images{};
@@ -462,7 +462,7 @@ bool TextureCache<P>::RescaleRenderTargets() {
 template <class P>
 void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
     using namespace VideoCommon::Dirty;
-    auto& flags = maxwell3d->dirty.flags;
+    auto& flags = Engine3D()->dirty.flags;
     if (!flags[Dirty::RenderTargets]) {
         for (size_t index = 0; index < NUM_RT; ++index) {
             ImageViewId& color_buffer_id = render_targets.color_buffer_ids[index];
@@ -505,7 +505,7 @@ void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
     }
 
     for (size_t index = 0; index < NUM_RT; ++index) {
-        render_targets.draw_buffers[index] = static_cast<u8>(maxwell3d->regs.rt_control.Map(index));
+        render_targets.draw_buffers[index] = static_cast<u8>(Engine3D()->regs.rt_control.Map(index));
     }
     u32 up_scale = 1;
     u32 down_shift = 0;
@@ -514,8 +514,8 @@ void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
         down_shift = Settings::values.resolution_info.down_shift;
     }
     render_targets.size = Extent2D{
-        (maxwell3d->regs.surface_clip.width * up_scale) >> down_shift,
-        (maxwell3d->regs.surface_clip.height * up_scale) >> down_shift,
+        (Engine3D()->regs.surface_clip.width * up_scale) >> down_shift,
+        (Engine3D()->regs.surface_clip.height * up_scale) >> down_shift,
     };
     render_targets.is_rescaled = is_rescaling;
 
@@ -1297,7 +1297,7 @@ void TextureCache<P>::InvalidateScale(Image& image) {
         image.scale_tick = frame_tick + 1;
     }
     const std::span<const ImageViewId> image_view_ids = image.image_view_ids;
-    auto& dirty = maxwell3d->dirty.flags;
+    auto& dirty = Engine3D()->dirty.flags;
     dirty[Dirty::RenderTargets] = true;
     dirty[Dirty::ZetaBuffer] = true;
     for (size_t rt = 0; rt < NUM_RT; ++rt) {
@@ -1916,7 +1916,7 @@ SamplerId TextureCache<P>::FindSampler(const TSCEntry& config, bool compute) {
 
 template <class P>
 ImageViewId TextureCache<P>::FindColorBuffer(size_t index) {
-    const auto& regs = maxwell3d->regs;
+    const auto& regs = Engine3D()->regs;
     if (index >= regs.rt_control.count) {
         return ImageViewId{};
     }
@@ -1934,7 +1934,7 @@ ImageViewId TextureCache<P>::FindColorBuffer(size_t index) {
 
 template <class P>
 ImageViewId TextureCache<P>::FindDepthBuffer() {
-    const auto& regs = maxwell3d->regs;
+    const auto& regs = Engine3D()->regs;
     if (!regs.zeta_enable) {
         return ImageViewId{};
     }
@@ -2358,7 +2358,7 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered), "Image was not unregistered");
 
     // Mark render targets as dirty
-    auto& dirty = maxwell3d->dirty.flags;
+    auto& dirty = Engine3D()->dirty.flags;
     dirty[Dirty::RenderTargets] = true;
     dirty[Dirty::ZetaBuffer] = true;
     for (size_t rt = 0; rt < NUM_RT; ++rt) {
@@ -2689,7 +2689,7 @@ bool TextureCache<P>::IsFullClear(ImageViewId id) {
     const ImageViewBase& image_view = slot_image_views[id];
     const ImageBase& image = slot_images[image_view.image_id];
     const Extent3D size = image_view.size;
-    const auto& regs = maxwell3d->regs;
+    const auto& regs = Engine3D()->regs;
     const auto& scissor = regs.scissor_test[0];
     if (image.info.resources.levels > 1 || image.info.resources.layers > 1) {
         // Images with multiple resources can't be cleared in a single call

@@ -7,6 +7,9 @@
 #pragma once
 
 #include <array>
+#include <atomic>
+#include <thread>
+#include <vector>
 
 #include <boost/container/static_vector.hpp>
 
@@ -51,6 +54,7 @@ namespace Vulkan {
 struct FramebufferTextureInfo;
 
 class StateTracker;
+class DrawResolver;
 
 class AccelerateDMA : public Tegra::Engines::AccelerateDMAInterface {
 public:
@@ -160,9 +164,19 @@ private:
 
     void FlushWork();
 
-    void UpdateDynamicStates();
+    // (local-only) P2 depth-1 draw resolver plumbing
+    void EnsureResolver();
+    void CommitPendingDraw();
+    void FlushPendingDraw();
+    void ApplyDeferredInlineWrites();
+    void FinishDrawLocked(Tegra::Engines::Maxwell3D& engine, GraphicsPipeline& pipeline,
+                          DrawContext& ctx, bool is_indexed, u32 instance_count);
+    void RecordDraw(Tegra::Engines::Maxwell3D& engine, bool is_indexed, u32 instance_count);
+    bool TryDeferInlineWrite(GPUVAddr addr, std::span<const u8> data) override;
 
-    void HandleTransformFeedback();
+    void UpdateDynamicStates(Tegra::Engines::Maxwell3D& engine);
+
+    void HandleTransformFeedback(Tegra::Engines::Maxwell3D& engine);
 
     void UpdateViewportsState(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateScissorsState(Tegra::Engines::Maxwell3D::Regs& regs);
@@ -233,6 +247,16 @@ private:
     DrawContext draw_ctx{};
 
     u32 draw_counter = 0;
+
+    // (local-only) P2 depth-1 draw resolver state (GPU thread owned unless noted)
+    bool parallel_draw_enabled{false};
+    std::unique_ptr<DrawResolver> resolver;
+    std::atomic<bool> pending_commit{false};
+    std::thread::id gpu_thread_id{};
+    std::vector<std::pair<GPUVAddr, std::vector<u8>>> deferred_inline_writes;
+    Tegra::Engines::Maxwell3D* draw_engine{}; // engine of the draw being committed
+    u64 pipelined_draws{};
+    u64 fallback_draws{};
 };
 
 } // namespace Vulkan

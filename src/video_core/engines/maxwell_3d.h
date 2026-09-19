@@ -3154,7 +3154,14 @@ public:
 
         Flags flags;
         Tables tables{};
+        // (local-only) P2 draw resolver: flags set by the parser since the
+        // last draw snapshot, used to merge consumed flags back correctly.
+        Flags flags_since_snapshot;
     } dirty;
+
+    // (local-only) P2: true while a draw snapshot is in flight; gates
+    // flags_since_snapshot accumulation in ProcessDirtyRegisters.
+    bool tracking_since_snapshot{false};
 
     DrawManager draw_manager;
 

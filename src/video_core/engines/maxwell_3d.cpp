@@ -307,8 +307,13 @@ void Maxwell3D::ProcessDirtyRegisters(u32 method, u32 argument) {
     }
     regs.reg_array[method] = argument;
     ++change_generation;
-    for (auto const& table : dirty.tables)
-        dirty.flags[table[method]] = true;
+    for (auto const& table : dirty.tables) {
+        const u8 flag = table[method];
+        dirty.flags[flag] = true;
+        if (tracking_since_snapshot) [[unlikely]] {
+            dirty.flags_since_snapshot[flag] = true;
+        }
+    }
 }
 
 void Maxwell3D::ProcessMethodCall(u32 method, u32 argument, u32 nonshadow_argument, bool is_last_call) {
@@ -627,7 +632,13 @@ void Maxwell3D::ProcessCBMultiData(const u32* start_base, u32 amount) {
 
     const GPUVAddr address{buffer_address + regs.const_buffer.offset};
     const size_t copy_size = amount * sizeof(u32);
-    memory_manager.WriteBlockCached(address, start_base, copy_size);
+    // (local-only) P2: while a parallel draw resolve is in flight, defer
+    // inline const-buffer writes so they cannot interleave with the
+    // resolver's guest memory reads; they are applied once it goes idle.
+    if (!rasterizer->TryDeferInlineWrite(
+            address, std::span{reinterpret_cast<const u8*>(start_base), copy_size})) {
+        memory_manager.WriteBlockCached(address, start_base, copy_size);
+    }
 
     // Increment the current buffer position.
     regs.const_buffer.offset += static_cast<u32>(copy_size);

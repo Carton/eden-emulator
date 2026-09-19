@@ -30,6 +30,7 @@
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
+#include "video_core/renderer_vulkan/vk_draw_resolver.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_query_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -225,15 +226,27 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
       fence_manager(*this, gpu, texture_cache, buffer_cache, query_cache, device, scheduler),
       wfi_event(device.GetLogical().CreateEvent()) {
     scheduler.SetQueryCache(query_cache);
+    // (local-only) P2: opt-in parallel draw resolver
+    const char* parallel{std::getenv("EDEN_PARALLEL_DRAW")};
+    parallel_draw_enabled = parallel != nullptr && *parallel != '\0' && *parallel != '0';
 }
 
 RasterizerVulkan::~RasterizerVulkan() {
+    if (resolver) {
+        resolver->WaitResolved();
+    }
+    if (pipelined_draws || fallback_draws) {
+        LOG_INFO(Render_Vulkan, "Parallel draws: {} pipelined, {} synchronous fallback",
+                 pipelined_draws, fallback_draws);
+    }
     scheduler.WaitWorker();
     scheduler.Finish();
 }
 
 template <typename Func>
 void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
+
+    FlushPendingDraw();
 
     SCOPE_EXIT {
         gpu.TickWork();
@@ -250,54 +263,172 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
     pipeline->SetEngine(maxwell3d, gpu_memory);
     draw_ctx.Reset(maxwell3d, gpu_memory);
     // (local-only) P2 phase split: resolve (binding lookups) then tail
-    // (uploads + scheduler records), synchronously for now.
+    // (uploads + scheduler records), synchronously.
     pipeline->ConfigureResolve(draw_ctx, is_indexed);
     if (!pipeline->ConfigureTail(draw_ctx, is_indexed)) {
         return;
     }
 
-    UpdateDynamicStates();
+    draw_engine = maxwell3d;
+    UpdateDynamicStates(*maxwell3d);
 
     query_cache.NotifySegment(true);
-    HandleTransformFeedback();
-    query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64, maxwell3d->regs.zpass_pixel_count_enable);
+    HandleTransformFeedback(*maxwell3d);
+    query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64,
+                              maxwell3d->regs.zpass_pixel_count_enable);
     draw_func();
 }
 
-void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
-    PrepareDraw(is_indexed, [this, is_indexed, instance_count] {
-        const auto& draw_state = maxwell3d->draw_manager.draw_state;
-        const u32 num_instances{instance_count};
-        const DrawParams draw_params{MakeDrawParams(draw_state, num_instances, is_indexed)};
+void RasterizerVulkan::EnsureResolver() {
+    if (resolver) {
+        return;
+    }
+    resolver = std::make_unique<DrawResolver>(*gpu_memory, buffer_cache, texture_cache);
+}
 
-        scheduler.Record([draw_params](vk::CommandBuffer cmdbuf) {
-            if (draw_params.is_indexed) {
-                cmdbuf.DrawIndexed(draw_params.num_vertices, draw_params.num_instances,
-                                   draw_params.first_index, draw_params.base_vertex,
-                                   draw_params.base_instance);
-            } else {
-                cmdbuf.Draw(draw_params.num_vertices, draw_params.num_instances,
-                            draw_params.base_vertex, draw_params.base_instance);
-            }
-        });
+void RasterizerVulkan::CommitPendingDraw() {
+    if (!pending_commit.exchange(false, std::memory_order_acq_rel)) {
+        return;
+    }
+    resolver->WaitResolved();
+    DrawResolver::Job& job{resolver->TakeJob()};
+    Tegra::Engines::Maxwell3D& shadow{resolver->SnapshotEngine()};
+    {
+        // Cache code inside the commit reads the snapshot engine.
+        VideoCommon::tls_engine_snapshot = &shadow;
+        std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
+        FinishDrawLocked(shadow, *job.pipeline, job.ctx, job.is_indexed, job.instance_count);
+        VideoCommon::tls_engine_snapshot = nullptr;
+    }
+    // Deferred inline writes follow the committed draw in stream order; they
+    // must land before the next snapshot observes them.
+    ApplyDeferredInlineWrites();
+    resolver->FinishJob(*maxwell3d);
+    gpu.TickWork();
+}
 
-        // Log draw call
-        if (GPU::Logging::IsActive() &&
-            Settings::values.gpu_log_vulkan_calls.GetValue()) {
-            const std::string params = is_indexed ?
-                fmt::format("vertices={}, instances={}, firstIndex={}, baseVertex={}, baseInstance={}",
-                    draw_params.num_vertices, draw_params.num_instances,
-                    draw_params.first_index, draw_params.base_vertex, draw_params.base_instance) :
-                fmt::format("vertices={}, instances={}, firstVertex={}, firstInstance={}",
-                    draw_params.num_vertices, draw_params.num_instances,
-                    draw_params.base_vertex, draw_params.base_instance);
-            GPU::Logging::GPULogger::GetInstance().LogVulkanCall(
-                is_indexed ? "vkCmdDrawIndexed" : "vkCmdDraw", params, VK_SUCCESS);
+void RasterizerVulkan::FlushPendingDraw() {
+    if (!pending_commit.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (std::this_thread::get_id() == gpu_thread_id) {
+        CommitPendingDraw();
+    } else {
+        // Foreign thread (CPU-side invalidation): fence the resolver's cache
+        // writes only; the commit itself stays on the GPU thread. Bounded by
+        // one binding-resolution pass.
+        resolver->WaitResolved();
+    }
+}
+
+void RasterizerVulkan::ApplyDeferredInlineWrites() {
+    if (deferred_inline_writes.empty()) {
+        return;
+    }
+    for (auto& [addr, bytes] : deferred_inline_writes) {
+        gpu_memory->WriteBlockCached(addr, bytes.data(), bytes.size());
+    }
+    deferred_inline_writes.clear();
+}
+
+bool RasterizerVulkan::TryDeferInlineWrite(GPUVAddr addr, std::span<const u8> data) {
+    if (!resolver || !resolver->ResolveInFlight()) {
+        return false;
+    }
+    deferred_inline_writes.emplace_back(addr, std::vector<u8>(data.begin(), data.end()));
+    return true;
+}
+
+void RasterizerVulkan::FinishDrawLocked(Tegra::Engines::Maxwell3D& engine,
+                                        GraphicsPipeline& pipeline, DrawContext& ctx,
+                                        bool is_indexed, u32 instance_count) {
+    // Caller holds buffer_cache.mutex + texture_cache.mutex.
+    draw_engine = &engine;
+    if (!pipeline.ConfigureTail(ctx, is_indexed)) {
+        return;
+    }
+
+    UpdateDynamicStates(engine);
+
+    query_cache.NotifySegment(true);
+    HandleTransformFeedback(engine);
+    query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64,
+                              engine.regs.zpass_pixel_count_enable);
+    RecordDraw(engine, is_indexed, instance_count);
+}
+
+void RasterizerVulkan::RecordDraw(Tegra::Engines::Maxwell3D& engine, bool is_indexed,
+                                  u32 instance_count) {
+    const auto& draw_state = engine.draw_manager.draw_state;
+    const u32 num_instances{instance_count};
+    const DrawParams draw_params{MakeDrawParams(draw_state, num_instances, is_indexed)};
+
+    scheduler.Record([draw_params](vk::CommandBuffer cmdbuf) {
+        if (draw_params.is_indexed) {
+            cmdbuf.DrawIndexed(draw_params.num_vertices, draw_params.num_instances,
+                               draw_params.first_index, draw_params.base_vertex,
+                               draw_params.base_instance);
+        } else {
+            cmdbuf.Draw(draw_params.num_vertices, draw_params.num_instances,
+                        draw_params.base_vertex, draw_params.base_instance);
         }
     });
+
+    // Log draw call
+    if (GPU::Logging::IsActive() && Settings::values.gpu_log_vulkan_calls.GetValue()) {
+        const std::string params = is_indexed ?
+            fmt::format("vertices={}, instances={}, firstIndex={}, baseVertex={}, baseInstance={}",
+                draw_params.num_vertices, draw_params.num_instances,
+                draw_params.first_index, draw_params.base_vertex, draw_params.base_instance) :
+            fmt::format("vertices={}, instances={}, firstVertex={}, firstInstance={}",
+                draw_params.num_vertices, draw_params.num_instances,
+                draw_params.base_vertex, draw_params.base_instance);
+        GPU::Logging::GPULogger::GetInstance().LogVulkanCall(
+            is_indexed ? "vkCmdDrawIndexed" : "vkCmdDraw", params, VK_SUCCESS);
+    }
+}
+
+void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
+    if (!parallel_draw_enabled) {
+        PrepareDraw(is_indexed, [this, is_indexed, instance_count] {
+            RecordDraw(*maxwell3d, is_indexed, instance_count);
+        });
+        return;
+    }
+    if (gpu_thread_id == std::thread::id{}) {
+        gpu_thread_id = std::this_thread::get_id();
+    }
+    EnsureResolver();
+
+    // Commit the previous pipelined draw, keeping draw order.
+    CommitPendingDraw();
+
+    FlushWork();
+    // The resolver is idle here (CommitPendingDraw drained it), so the
+    // deferred-unmap execution inside FlushCaching is safe.
+    gpu_memory->FlushCaching();
+
+    GraphicsPipeline* const pipeline{pipeline_cache.CurrentGraphicsPipeline()};
+    if (!pipeline) {
+        return;
+    }
+    if (resolver->SnapshotAndKick(*maxwell3d, pipeline, is_indexed, instance_count)) {
+        pending_commit.store(true, std::memory_order_release);
+        ++pipelined_draws;
+        return;
+    }
+    ++fallback_draws;
+    // Synchronous draw (e.g. inline index buffer); engine state is live.
+    std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
+    pipeline->SetEngine(maxwell3d, gpu_memory);
+    draw_ctx.Reset(maxwell3d, gpu_memory);
+    pipeline->ConfigureResolve(draw_ctx, is_indexed);
+    FinishDrawLocked(*maxwell3d, *pipeline, draw_ctx, is_indexed, instance_count);
+    gpu.TickWork();
 }
 
 void RasterizerVulkan::DrawIndirect() {
+    FlushPendingDraw();
     const auto& params = maxwell3d->draw_manager.indirect_state;
     buffer_cache.SetDrawIndirect(&params);
     PrepareDraw(params.is_indexed, [this, &params] {
@@ -356,6 +487,7 @@ void RasterizerVulkan::DrawIndirect() {
 }
 
 void RasterizerVulkan::DrawTexture() {
+    FlushPendingDraw();
 
     SCOPE_EXIT {
         gpu.TickWork();
@@ -366,7 +498,8 @@ void RasterizerVulkan::DrawTexture() {
     texture_cache.SynchronizeDescriptors(false);
     texture_cache.UpdateRenderTargets(false);
 
-    UpdateDynamicStates();
+    draw_engine = maxwell3d;
+    UpdateDynamicStates(*maxwell3d);
 
     query_cache.NotifySegment(true);
     query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64, maxwell3d->regs.zpass_pixel_count_enable);
@@ -403,6 +536,7 @@ void RasterizerVulkan::DrawTexture() {
 }
 
 void RasterizerVulkan::Clear(u32 layer_count) {
+    FlushPendingDraw();
     FlushWork();
     gpu_memory->FlushCaching();
 
@@ -588,6 +722,7 @@ void RasterizerVulkan::Clear(u32 layer_count) {
 }
 
 void RasterizerVulkan::DispatchCompute() {
+    FlushPendingDraw();
     FlushWork();
     gpu_memory->FlushCaching();
 
@@ -651,6 +786,7 @@ void RasterizerVulkan::DispatchCompute() {
 }
 
 void RasterizerVulkan::ResetCounter(VideoCommon::QueryType type) {
+    FlushPendingDraw();
     switch (type) {
     case VideoCommon::QueryType::ZPassPixelCount64:
     case VideoCommon::QueryType::StreamingByteCount:
@@ -666,21 +802,26 @@ void RasterizerVulkan::ResetCounter(VideoCommon::QueryType type) {
 
 void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
                              VideoCommon::QueryPropertiesFlags flags, u32 payload, u32 subreport) {
+    FlushPendingDraw();
     query_cache.CounterReport(gpu_addr, type, flags, payload, subreport);
 }
 
 void RasterizerVulkan::BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr gpu_addr,
                                                  u32 size) {
+    FlushPendingDraw();
     buffer_cache.BindGraphicsUniformBuffer(stage, index, gpu_addr, size);
 }
 
 void Vulkan::RasterizerVulkan::DisableGraphicsUniformBuffer(size_t stage, u32 index) {
+    FlushPendingDraw();
     buffer_cache.DisableGraphicsUniformBuffer(stage, index);
 }
 
 void RasterizerVulkan::FlushAll() {}
 
 void RasterizerVulkan::FlushRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
+    FlushPendingDraw();
+    FlushPendingDraw();
     if (addr == 0 || size == 0) {
         return;
     }
@@ -698,6 +839,7 @@ void RasterizerVulkan::FlushRegion(DAddr addr, u64 size, VideoCommon::CacheType 
 }
 
 bool RasterizerVulkan::MustFlushRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
+    FlushPendingDraw();
     if ((True(which & VideoCommon::CacheType::BufferCache))) {
         std::scoped_lock lock{buffer_cache.mutex};
         if (buffer_cache.IsRegionGpuModified(addr, size)) {
@@ -715,6 +857,7 @@ bool RasterizerVulkan::MustFlushRegion(DAddr addr, u64 size, VideoCommon::CacheT
 }
 
 VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64 size) {
+    FlushPendingDraw();
     {
         std::scoped_lock lock{texture_cache.mutex};
         auto area = texture_cache.GetFlushArea(addr, size);
@@ -731,6 +874,7 @@ VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64
 }
 
 void RasterizerVulkan::InvalidateRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
+    FlushPendingDraw();
     if (addr == 0 || size == 0) {
         return;
     }
@@ -751,6 +895,7 @@ void RasterizerVulkan::InvalidateRegion(DAddr addr, u64 size, VideoCommon::Cache
 }
 
 void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::size_t>> sequences) {
+    FlushPendingDraw();
     {
         std::scoped_lock lock{texture_cache.mutex};
         for (const auto& [addr, size] : sequences) {
@@ -772,6 +917,7 @@ void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::s
 }
 
 bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {
+    FlushPendingDraw();
     DEBUG_ASSERT(addr != 0 || size != 0);
     {
         std::scoped_lock lock{buffer_cache.mutex};
@@ -788,6 +934,7 @@ bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {
 }
 
 void RasterizerVulkan::OnCacheInvalidation(DAddr addr, u64 size) {
+    FlushPendingDraw();
     if (addr == 0 || size == 0) {
         return;
     }
@@ -804,10 +951,12 @@ void RasterizerVulkan::OnCacheInvalidation(DAddr addr, u64 size) {
 }
 
 void RasterizerVulkan::InvalidateGPUCache() {
+    FlushPendingDraw();
     gpu.InvalidateGPUCache();
 }
 
 void RasterizerVulkan::UnmapMemory(DAddr addr, u64 size) {
+    FlushPendingDraw();
     {
         std::scoped_lock lock{texture_cache.mutex};
         texture_cache.UnmapMemory(addr, size);
@@ -820,6 +969,7 @@ void RasterizerVulkan::UnmapMemory(DAddr addr, u64 size) {
 }
 
 void RasterizerVulkan::ModifyGPUMemory(size_t as_id, GPUVAddr addr, u64 size) {
+    FlushPendingDraw();
     {
         std::scoped_lock lock{texture_cache.mutex};
         texture_cache.UnmapGPUMemory(as_id, addr, size);
@@ -827,27 +977,33 @@ void RasterizerVulkan::ModifyGPUMemory(size_t as_id, GPUVAddr addr, u64 size) {
 }
 
 void RasterizerVulkan::SignalFence(std::function<void()>&& func) {
+    FlushPendingDraw();
     fence_manager.SignalFence(std::move(func));
 }
 
 void RasterizerVulkan::SyncOperation(std::function<void()>&& func) {
+    FlushPendingDraw();
     fence_manager.SyncOperation(std::move(func));
 }
 
 void RasterizerVulkan::SignalSyncPoint(u32 value) {
+    FlushPendingDraw();
     fence_manager.SignalSyncPoint(value);
 }
 
 void RasterizerVulkan::SignalReference() {
+    FlushPendingDraw();
     fence_manager.SignalReference();
 }
 
 void RasterizerVulkan::ReleaseFences(bool force) {
+    FlushPendingDraw();
     fence_manager.WaitPendingFences(force);
 }
 
 void RasterizerVulkan::FlushAndInvalidateRegion(DAddr addr, u64 size,
                                                 VideoCommon::CacheType which) {
+    FlushPendingDraw();
     if (Settings::IsGPULevelHigh()) {
         FlushRegion(addr, size, which);
     }
@@ -855,6 +1011,7 @@ void RasterizerVulkan::FlushAndInvalidateRegion(DAddr addr, u64 size,
 }
 
 void RasterizerVulkan::WaitForIdle() {
+    FlushPendingDraw();
     // Everything but wait pixel operations. This intentionally includes FRAGMENT_SHADER_BIT because
     // fragment shaders can still write storage buffers.
     VkPipelineStageFlags flags =
@@ -878,15 +1035,18 @@ void RasterizerVulkan::WaitForIdle() {
 }
 
 void RasterizerVulkan::FragmentBarrier() {
+    FlushPendingDraw();
     // We already put barriers when a render pass finishes
     scheduler.RequestOutsideRenderPassOperationContext();
 }
 
 void RasterizerVulkan::TiledCacheBarrier() {
+    FlushPendingDraw();
     // TODO: Implementing tiled barriers requires rewriting a good chunk of the Vulkan backend
 }
 
 void RasterizerVulkan::FlushCommands() {
+    FlushPendingDraw();
     if (draw_counter == 0) {
         return;
     }
@@ -895,6 +1055,7 @@ void RasterizerVulkan::FlushCommands() {
 }
 
 void RasterizerVulkan::TickFrame() {
+    FlushPendingDraw();
     draw_counter = 0;
     guest_descriptor_queue.TickFrame();
     compute_pass_descriptor_queue.TickFrame();
@@ -912,27 +1073,32 @@ void RasterizerVulkan::TickFrame() {
 }
 
 bool RasterizerVulkan::AccelerateConditionalRendering() {
+    FlushPendingDraw();
     gpu_memory->FlushCaching();
     return query_cache.AccelerateHostConditionalRendering();
 }
 
 bool RasterizerVulkan::HasDrawTransformFeedback() {
+    FlushPendingDraw();
     return device.IsTransformFeedbackDrawSupported();
 }
 
 bool RasterizerVulkan::AccelerateSurfaceCopy(const Tegra::Engines::Fermi2D::Surface& src,
                                              const Tegra::Engines::Fermi2D::Surface& dst,
                                              const Tegra::Engines::Fermi2D::Config& copy_config) {
+    FlushPendingDraw();
     std::scoped_lock lock{texture_cache.mutex};
     return texture_cache.BlitImage(dst, src, copy_config);
 }
 
 Tegra::Engines::AccelerateDMAInterface& RasterizerVulkan::AccessAccelerateDMA() {
+    FlushPendingDraw();
     return accelerate_dma;
 }
 
 void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_size,
                                                 std::span<const u8> memory) {
+    FlushPendingDraw();
     auto cpu_addr = gpu_memory->GpuToCpuAddress(address);
     if (!cpu_addr) [[unlikely]] {
         gpu_memory->WriteBlock(address, memory.data(), copy_size);
@@ -955,6 +1121,7 @@ void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_si
 
 std::optional<FramebufferTextureInfo> RasterizerVulkan::AccelerateDisplay(
     const Tegra::FramebufferConfig& config, DAddr framebuffer_addr, u32 pixel_stride) {
+    FlushPendingDraw();
     if (!framebuffer_addr) {
         return {};
     }
@@ -981,6 +1148,7 @@ std::optional<FramebufferTextureInfo> RasterizerVulkan::AccelerateDisplay(
 
 void RasterizerVulkan::LoadDiskResources(u64 title_id, std::stop_token stop_loading,
                                          const VideoCore::DiskResourceLoadCallback& callback) {
+    FlushPendingDraw();
     pipeline_cache.LoadDiskResources(title_id, stop_loading, callback);
 }
 
@@ -1064,10 +1232,10 @@ bool AccelerateDMA::BufferToImage(const Tegra::DMA::ImageCopy& copy_info,
     return DmaBufferImageCopy<true>(copy_info, buffer_operand, image_operand);
 }
 
-void RasterizerVulkan::UpdateDynamicStates() {
-    auto& regs = maxwell3d->regs;
-    auto& flags = maxwell3d->dirty.flags;
-    const auto topology = maxwell3d->draw_manager.draw_state.topology;
+void RasterizerVulkan::UpdateDynamicStates(Tegra::Engines::Maxwell3D& engine) {
+    auto& regs = engine.regs;
+    auto& flags = engine.dirty.flags;
+    const auto topology = engine.draw_manager.draw_state.topology;
     const bool topology_changed = state_tracker.ChangePrimitiveTopology(topology);
     if (topology_changed) {
         flags[Dirty::DepthBiasEnable] = true;
@@ -1148,10 +1316,10 @@ void RasterizerVulkan::UpdateDynamicStates() {
     }
 }
 
-void RasterizerVulkan::HandleTransformFeedback() {
+void RasterizerVulkan::HandleTransformFeedback(Tegra::Engines::Maxwell3D& engine) {
     static std::once_flag warn_unsupported;
 
-    const auto& regs = maxwell3d->regs;
+    const auto& regs = engine.regs;
     if (!device.IsExtTransformFeedbackSupported()) {
         if (regs.transform_feedback_enabled != 0) {
             std::call_once(warn_unsupported, [&] {
@@ -1182,7 +1350,7 @@ void RasterizerVulkan::UpdateViewportsState(Tegra::Engines::Maxwell3D::Regs& reg
         return;
     }
 
-    maxwell3d->dirty.flags[Dirty::Scissors] = true;
+    draw_engine->dirty.flags[Dirty::Scissors] = true;
 
     if (!regs.viewport_scale_offset_enabled) {
         float x = static_cast<float>(regs.surface_clip.x);
@@ -1884,7 +2052,7 @@ void RasterizerVulkan::UpdateStencilTestEnable(Tegra::Engines::Maxwell3D::Regs& 
 }
 
 void RasterizerVulkan::UpdateVertexInput(Tegra::Engines::Maxwell3D::Regs& regs) {
-    auto& dirty{maxwell3d->dirty.flags};
+    auto& dirty{draw_engine->dirty.flags};
     const bool vertex_input_dirty = dirty[Dirty::VertexInput];
     const bool vertex_buffers_dirty = dirty[VideoCommon::Dirty::VertexBuffers];
     if (!vertex_input_dirty && !vertex_buffers_dirty) {
@@ -1945,6 +2113,7 @@ void RasterizerVulkan::UpdateVertexInput(Tegra::Engines::Maxwell3D::Regs& regs) 
 }
 
 void RasterizerVulkan::InitializeChannel(Tegra::Control::ChannelState& channel) {
+    FlushPendingDraw();
     CreateChannel(channel);
     {
         std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
@@ -1957,6 +2126,7 @@ void RasterizerVulkan::InitializeChannel(Tegra::Control::ChannelState& channel) 
 }
 
 void RasterizerVulkan::BindChannel(Tegra::Control::ChannelState& channel) {
+    FlushPendingDraw();
     const s32 channel_id = channel.bind_id;
     BindToChannel(channel_id);
     {
@@ -1971,6 +2141,7 @@ void RasterizerVulkan::BindChannel(Tegra::Control::ChannelState& channel) {
 }
 
 void RasterizerVulkan::ReleaseChannel(s32 channel_id) {
+    FlushPendingDraw();
     EraseChannel(channel_id);
     {
         std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};

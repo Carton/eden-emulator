@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "common/common_types.h"
+#include "video_core/control/engine_override.h"
 
 namespace Tegra {
 
@@ -77,6 +78,13 @@ public:
 
 protected:
     static constexpr size_t UNSET_CHANNEL{(std::numeric_limits<size_t>::max)()};
+
+    // (local-only) P2: engine access for cache code. Redirects to the draw
+    // snapshot on the resolver thread (and on the GPU thread while it
+    // commits a resolved draw); otherwise the live engine.
+    Tegra::Engines::Maxwell3D* Engine3D() const {
+        return VideoCommon::tls_engine_snapshot ? VideoCommon::tls_engine_snapshot : maxwell3d;
+    }
 
     P* channel_state;
     size_t current_channel_id{UNSET_CHANNEL};
