@@ -82,8 +82,11 @@ cmake.exe --build build-vs22     # RelWithDebInfo，产物在 build-vs22/bin/
 6. **测试按键自动化**：`python F:\prof\patch_input.py`（自动备份到 `.bak-autotest`，测完
    `--restore` 还原用户手柄配置）；focus_ok=True 不代表游戏收到按键，测前 grep
    `player_0_button_a` 确认是 keyboard,code:88。
-7. **A/B 纪律**：场景负载时变（如水流动画相位），结论必须各 n≥2；med 落在 tick 整数倍时要
-   警惕是量化栅格不是真实负载（详见 PROFILE §23.4）。
+7. **A/B 纪律**：宏观结论只认 `F:\prof\bench_ab.py` 交错对（AB/BA 背靠背，报逐对比值
+   中位数；单局绝对 fps 只在机器静置时有效，干净带内残余 ±2-4%）；med 落在 tick
+   整数倍时要警惕是量化栅格不是真实负载（详见 PROFILE §23.4）。bench_run 有 VOID 检测
+   （陈旧 CSV / 60fps 菜单签名）+ luma 协变量列，VOID 局不得进结论；**测试时段机器上
+   有人 = 数据作废**（2026-09-19 golden6 截图铁证，归因详见 PROFILE §28.10）。
 
 ## 已知问题（仅列活跃项；结案过程与历史见 PROFILE_PROGRESS.md 对应章节）
 

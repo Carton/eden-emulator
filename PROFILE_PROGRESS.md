@@ -1756,6 +1756,10 @@ CommitPendingDraw 结构与全部 45 个 FlushPendingDraw barrier）。depth-1 �
 - **采集**：`F:\prof\shot_capture.py` ——PrintWindow(PW_RENDERFULLCONTENT)+CreateDIBSection
   抓 "Form" 渲染窗口，**遮挡免疫**。（教训：先前 ImageGrab 屏幕抓取被 IDE 遮挡污染，
   一整批结论作废重验；MCP 图像识别当场拆穿了假截图。）
+  **【28.11 修正】**PrintWindow 路径其实当晚从未成功（GDI 句柄截断+CreateDIBSection
+  传参错误两层 ctypes bug），28.3/28.4 全部截图实际出自 ImageGrab 兜底；真正的
+  遮挡免疫采集从 28.11（bug 修复）起才生效。游戏窗可见时兜底内容与真图一致，
+  已有结论可引用但属性是屏幕抓取。
 - **集成**：bench_run.py 测量窗内每 15s 截 6 张到 `F:\prof\shots\<label>\`（--no-shots 关）。
 - **对比**：`shot_compare.py`（降分辨率容忍动画相位）+ 分辨率网格 bad% 热图定位；
   **规程（血泪教训）**：① golden 参照局必须与测试局**背靠背**（游戏内昼夜/云导致整体
@@ -1789,6 +1793,7 @@ flags_since_snapshot）→Dirty::Shaders 丢→管线缓存陈旧。修：SetDir
 （该修复真实必要，但不是右缘 bug 的根因——右缘在修复后依旧。）
 
 ### 28.6 性能：token 各模式 -12~17%（未解，阻塞里程碑 b 前必须查）
+**【28.11 撤回】本表数字为跨档混合（golden 快档 vs token 慢档），同档交错对实测 -0.7%。**
 | 局 | fps | med |
 |---|---|---|
 | golden4/5/6（token 关） | 43.87/42.23/40.99 | 22.50/22.50/23.34 |
@@ -1842,9 +1847,83 @@ ETW 复用要点：MCP 大 trace（1GB）下会丢已处理状态，查询尽量
 - **40s 窗方差闭环**：p2_off(14:43)=60,186 / v1-OFF=16,661 / v2-OFF≈33k——同场景同协议
   3.6 倍散布（昼夜/天气/动画相位，今天已证环境循环真实存在）。规则固化：跨窗绝对量
   对比一律无效；只认背靠背配对+逐 draw 归一。
+  **【28.10 修正】本条归因当时下错了主次**：16.6k/33k/21,987 三次全落在用户占机时段
+  （19:21–21:10，golden6 截图铁证），安静时段的 60,186 才是干净参照——主因是用户
+  占机改变线程占空比，天气只是干净带内残余 ±2-4%。规则本身（只认背靠背配对）不变。
 - **每 draw 自插桩已落**（commit）：prepare/tail 计时 + 既有 resolve 603ns，5000/2000
   draw 均值打日志，场景带免疫。验证局待机器静置时跑（21:03-21:10 三局全 void：
   用户操作机器→前景锁→tap 全失效→停菜单→CSV 陈旧；bit-identical RESULT 是 void 签名）。
 - **AMD uProf 5.3.521 @ `D:\Program Files\AMD\AMDuProf\`**（CPU=Ryzen 5 5600 ✓ 适用）。
   定位：IBS 按函数归因 L2/L3 miss 与访存延迟——验证"每 draw +14% 摊匀=缓存冷"假设的
   对味工具，ETW 做不到。下轮：自插桩先行定量，uProf 随后定位具体函数。
+
+### 28.10 变差归因修正 + 宏观验证协议（2026-09-19 深夜；回答"优化完怎么稳定看宏观收益"）
+
+**归因修正（推翻 28.9 的"天气"闭环，主次要换位）**：
+- 铁证：golden6（40.99fps，此前 golden 带的下界）QA 截图回查 = **用户的 CAD 工具和
+  notebook 界面**——19:30 那局测试时机器上有人，游戏窗被最小化/PrintWindow 失败，
+  ImageGrab 全屏兜底把桌面截了进来。19:21–21:10 的局全部受扰（19:21 token-nodefer
+  60fps 菜单行、21:03–21:10 三局 tap 全失效→陈旧 CSV 解析）。
+- 干净运行的 luma 回填（96×54 灰度均值）：golden4/5 与全部 token 局 60.0–61.0，
+  **窗内 std 仅 0.2–0.3**——90s 窗内、以及干净运行彼此之间，场景亮度极其稳定
+  （存档加载钉住了测量时刻的游戏内钟点+云况）。
+- 结论：同模式 ETW 总量 2–3.6x 散布（16.6k/33k/21,987 vs 安静时段 60,186）主因是
+  **测试时段用户占机**（线程占空比被抢，GPU 线程忙等比例变化直接改写采样总量），
+  昼夜/天气降级为干净带内残余 ±2–4% 的次要因素。
+- **"多测一会儿平均掉"的答案：不成立**。窗内本来就稳（luma std 0.2），要防的不是
+  窗内波动而是**污染**；有效手段=更多交错对（n 大）+ 污染检测，不是更长单窗。
+
+**宏观验证协议（最终验收口径，已固化进脚本）**——三层：
+1. **局部归因**：自插桩逐 draw 均值（prepare/resolve/tail ns，28.9 落地），
+   场景带免疫，回答"贵在哪"。
+2. **宏观速率**：`F:\prof\bench_ab.py`——N 对 AB/BA 交错背靠背（消慢漂移），报告
+   **逐对比值 B/A 的中位数+范围**；单局绝对 fps 只在机器静置时有效，只报带内范围。
+   判读阈值：|中位比值-1| 须大于干净 golden-vs-golden 比值带宽（~±2%）才算真差异。
+3. **宏观 ETW**：只做同脚本背靠背对 + **窗内 draw 数归一**（diag 计数器差分），
+   跨窗绝对量一律不比。
+
+**bench 管线硬化（本轮落地）**：
+- `bench_run.py`：①CSV mtime ≤ 启动时刻 → `RESULT VOID`（陈旧解析，21:03–21:10 三行
+  已从 bench_results.csv 清除）；②fps>52 → VOID（60fps 菜单签名，游戏内上限 ~50）；
+  ③luma 协变量列入 CSV 新列（老表头自动迁移、旧行补空）；④每局 diag 行留存
+  `F:\prof\diag\<label>.txt`（eden_log 每次启动被覆盖的问题解决）。
+- `shot_capture.py`：**删除 ImageGrab 兜底**+IsIconic 跳过——截图要么是游戏窗内容、
+  要么没有，绝不抓桌面（golden6 教训）。
+- `bench_results.csv` 顺带清了 6 行 bit-identical 重复行。
+
+### 28.11 验证轮：交错对 -0.7% + 截图系统真根因 + 每 draw 计时（2026-09-19 深夜）
+
+**交错 A/B（bench_ab.py 首战：3 对 ABBA，token-tailimm vs golden，全部有效）**：
+| 对 | golden | token | B/A |
+|---|---|---|---|
+| 1 | 39.56 (med 25.00) | 38.99 (25.01) | 0.9856 |
+| 2 | 37.04 (26.67) | 38.74 (25.83) | 1.0459 |
+| 3 | 39.58 (25.00) | 39.30 (25.00) | 0.9929 |
+
+中位 **0.9929（-0.7%）**，带内 0.986–1.046 → **token-tailimm 同档成本≈噪声级**。
+
+**§28.6 的 -12~17% 撤回**：那是跨档混合——golden 局全落快档（med 22.50=27×0.83ms 栅格）、
+token 局全落慢档（med 25.83+，相邻档位差恰好 ~11%），交错时间轴上按臂交替"巧合"曾误导
+归因。同档成对下 -0.7%。§28.9"总忙度持平+fps-12%⇒每draw+14%"推理的输入作废。
+**待办=快档确认对**：场景回快档（med 22.5）时再跑 1-2 对——若也持平 → token 机械成本全面
+达标，里程碑 (b) 异步化大门开；若 -10% → 档位=瓶颈耦合（token 只在 CPU-bound 档收费），
+后续 ETW/uProf 一律在 CPU-bound 档采。今晚为何全体落在慢档未定（luma 列下次自动入 CSV）。
+
+**每 draw 计时（自插桩闭环）**：golden prepare_avg 3221/3420/3222 ns（窗口≈累计）；token
+resolve 564-661ns + tail 1693ns + snapshot/journal（未单独计时）；TAIL_IMM 计时补丁
+520fce0940（immediate 分支镜像 CommitPendingDraw 的 chrono + 共享 LogTokenDiag）。
+hold 局验证：`pipelined=... resolve_avg_ns=661 tail_avg_ns=1693`（deferred_writes=0 与
+TAIL_IMM 即时提交语义一致：无 pending draw 就无需延迟）。
+
+**截图系统真根因（三层洋葱，shot_capture.py 全面重写）**：
+1. GDI 句柄是**符号扩展的 64 位值**，ctypes 无 restype 时截断成 c_int 负数 → 后续全链失效；
+2. CreateDIBSection 第二参必须 `byref(BITMAPINFO)`——传裸 string-buffer 返回 NULL 且
+   lasterr=0（教科书 Structure+byref 一次通过）；
+3. 两 bug 叠加 → PrintWindow 路径**自始至终没成功过**，全部历史截图（含 §28.3/28.4 的
+   QA 结论与右缘二分）其实来自 ImageGrab 兜底：游戏窗可见时内容恰好正确（结论仍可引用，
+   但属性=屏幕抓取），遮挡/最小化时抓桌面（golden6 污染）。
+修复（argtypes 全集+Structure+byref+IsIconic 跳过，仍无任何屏幕抓取兜底）后 PrintWindow
+对真实游戏 Form 窗端到端验证通过（tkinter 对照 std 74；游戏标题菜单 60fps+RTSS 层）。
+**§28.3"遮挡免疫采集已生效"的说法从今晚起才为真。**
+
+28.12 起为后续（快档确认对 / uProf / epoch 槽）。
