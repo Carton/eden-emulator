@@ -996,7 +996,14 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
         channel_state->uniform_buffer_binding_sizes[stage][binding_index] = size;
         // Stream buffer path to avoid stalling on non-Nvidia drivers or Vulkan
         const std::span<u8> span = runtime.BindMappedUniformBuffer(stage, binding_index, size);
-        device_memory.ReadBlockUnsafe(device_addr, span.data(), size);
+        // (local-only) uniforms are small and single-page in practice; the
+        // generic ReadBlockUnsafe page walk costs more than the copy itself
+        u8* const src_pointer = device_memory.GetPointer<u8>(device_addr);
+        if (src_pointer + size == device_memory.GetPointer<u8>(device_addr + size)) [[likely]] {
+            std::memcpy(span.data(), src_pointer, size);
+        } else {
+            device_memory.ReadBlockUnsafe(device_addr, span.data(), size);
+        }
         // (local-only) EDEN_UNIFORM_STATS=1: measure identical-content re-copies
         if (UniformStreamStatsEnabled()) {
             UniformShadow& shadow =
@@ -1162,7 +1169,13 @@ void BufferCache<P>::BindHostComputeUniformBuffers() {
             if (needs_alignment_stream) {
                 const std::span<u8> span =
                     runtime.BindMappedUniformBuffer(0, binding_index, size);
-                device_memory.ReadBlockUnsafe(binding.device_addr, span.data(), size);
+                u8* const src_pointer = device_memory.GetPointer<u8>(binding.device_addr);
+                if (src_pointer + size ==
+                    device_memory.GetPointer<u8>(binding.device_addr + size)) [[likely]] {
+                    std::memcpy(span.data(), src_pointer, size);
+                } else {
+                    device_memory.ReadBlockUnsafe(binding.device_addr, span.data(), size);
+                }
                 return;
             }
         }
