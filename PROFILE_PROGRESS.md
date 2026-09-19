@@ -1708,3 +1708,21 @@ E+D 里另有 ~4-6% 不需要线程的串行减负（堆churn、memcmp/hash、Gp
   快照槽或 ~300B token 槽）——它们是帧内 draw 级流水（µs 尺度），帧 N 仍在最后一个 draw
   录完时就绪，不多等任何 vsync。**输入延迟不变或略降（帧产出更快）**，60Hz 量化不受影响。
   PCSX2 源码同样警告帧级缓冲伤延迟——我们恰好不做那个。
+
+### 27.4 第 1 步串行减负：首批两切口（2026-09-19 傍晚）
+归因（ETW 调用栈）→ 修复 → 验证：
+1. **FlushCaching 的 FixSmallVectorADL**：每次累加器触发都把 page_stash2 整个按值拷贝
+   （>32 项还堆分配）再传给 InnerInvalidation——而后者收的就是 span。改为直传 span
+   （零拷贝零分配）。
+2. **uniform 上传的 ReadBlockUnsafe**：guest→host 的 uniform 拷贝走通用 WalkBlock 逐页
+   分派；uniform 几百字节基本单页。按代码库既有惯例（GetPointer 两端连续性检查）加
+   单页 memcpy 快路径（图形+计算两条路径）。
+
+bench：serialcuts c1=44.31/22.50，c2=43.64/22.50（两局均快档 27 ticks；今日基线带
+43.5±0.5，med 有 22.50/23.32 两档）。**判定：+0.5~1%，正收益，保留。** p99 同步改善
+（30.0/31.7 vs 基线 31.7-32.5）。
+
+后续候选（已归因未做）：宏参数 vector churn（_Copy_memmove_tail 129B≈SamplerKey 拷贝
++ProcessMacro 参数收集）、query CounterReport 的 std::function 每次堆分配（MSVC 无 SBO）、
+CommitAsyncFlushesHigh 的 small_vector 越界增长、GpuToCpuAddress 页表走查 memo。
+每项 ~0.3-0.5%。commit: serialcuts。
