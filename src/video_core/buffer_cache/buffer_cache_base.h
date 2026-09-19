@@ -235,6 +235,17 @@ public:
 
     void UpdateComputeBuffers();
 
+    // (local-only) P2 uniform epoch: copy the guest bytes of the snapshot
+    // engine's enabled constant buffers into the caller's arena so the
+    // delayed tail upload can read resolve-time content instead of live
+    // guest memory. Runs at resolve time under the same locking as the
+    // binding lookups; returns the number of entries captured (bindings
+    // that no longer fit are skipped and their tail upload falls back to
+    // the tracked path).
+    size_t CaptureUniformEpoch(const Tegra::Engines::Maxwell3D& engine, u8* bytes,
+                               size_t bytes_capacity,
+                               VideoCommon::UniformEpochEntry* entries, size_t entries_capacity);
+
     void BindHostGeometryBuffers(bool is_indexed);
 
     void BindHostStageBuffers(size_t stage);

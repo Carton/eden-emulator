@@ -319,6 +319,10 @@ void RasterizerVulkan::EnsureResolver() {
                                   ? DrawResolver::SnapshotMode::FullCopy
                                   : DrawResolver::SnapshotMode::Journal;
     resolver->check_enabled = token_check_enabled;
+    // (local-only) EDEN_TOKEN_EPOCH=0 turns the uniform epoch capture off
+    // (A/B switch: tail keeps reading guest memory directly).
+    const char* epoch{std::getenv("EDEN_TOKEN_EPOCH")};
+    resolver->epoch_enabled = !(epoch && *epoch != '\0' && *epoch == '0');
 }
 
 void RasterizerVulkan::CommitPendingDraw() {
@@ -334,6 +338,9 @@ void RasterizerVulkan::CommitPendingDraw() {
     {
         // Cache code inside the commit reads the snapshot engine.
         VideoCommon::tls_engine_snapshot = &shadow;
+        // Uniform uploads read the resolve-time epoch copy, never the guest
+        // (the game CPU may have rewritten it inside the tail-delay window).
+        VideoCommon::tls_uniform_epoch = job.epoch_valid ? &job.epoch_snapshot : nullptr;
         std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
         // Consume dirty flags on the shadow so the dirty merge sees what the
         // Touch* family consumed (they operate on whichever flag set the
@@ -345,6 +352,7 @@ void RasterizerVulkan::CommitPendingDraw() {
         ++diag_tail_calls;
         state_tracker.RetargetFlags(maxwell3d->dirty.flags);
         VideoCommon::tls_engine_snapshot = nullptr;
+        VideoCommon::tls_uniform_epoch = nullptr;
     }
     // Deferred inline writes follow the committed draw in stream order; they
     // must land before the next snapshot observes them.
@@ -490,6 +498,8 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
             Tegra::Engines::Maxwell3D& shadow{resolver->SnapshotEngine()};
             {
                 VideoCommon::tls_engine_snapshot = &shadow;
+                VideoCommon::tls_uniform_epoch =
+                    job.epoch_valid ? &job.epoch_snapshot : nullptr;
                 std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
                 state_tracker.RetargetFlags(shadow.dirty.flags);
                 // Mirrors CommitPendingDraw's tail chrono (FinishDrawLocked
@@ -501,6 +511,7 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
                 ++diag_tail_calls;
                 state_tracker.RetargetFlags(maxwell3d->dirty.flags);
                 VideoCommon::tls_engine_snapshot = nullptr;
+                VideoCommon::tls_uniform_epoch = nullptr;
             }
             ApplyDeferredInlineWrites();
             resolver->FinishJob(*maxwell3d);

@@ -375,6 +375,56 @@ void BufferCache<P>::UpdateComputeBuffers() {
 }
 
 template <class P>
+size_t BufferCache<P>::CaptureUniformEpoch(const Tegra::Engines::Maxwell3D& engine, u8* bytes,
+                                           size_t bytes_capacity,
+                                           VideoCommon::UniformEpochEntry* entries,
+                                           size_t entries_capacity) {
+    // Reads the SNAPSHOT engine's constant-buffer state (resolve time = the
+    // serial path's read moment), not the parser-driven channel bindings:
+    // those may already have moved on to the next draw by the time the
+    // delayed tail runs. Slots are keyed by (device_addr, size); a tail whose
+    // binding was re-pointed in between simply misses and takes the tracked
+    // classic path, which is race-free by construction.
+    size_t byte_off = 0;
+    size_t count = 0;
+    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+        ForEachEnabledBit(channel_state->enabled_uniform_buffer_masks[stage], [&](u32 index) {
+            const auto& cb{engine.state.shader_stages[stage].const_buffers[index]};
+            if (!cb.enabled || cb.size == 0) {
+                return;
+            }
+            const u32 size =
+                (std::min)(cb.size, (*channel_state->uniform_buffer_sizes)[stage][index]);
+            if (size == 0) {
+                return;
+            }
+            const auto device_addr{gpu_memory->GpuToCpuAddress(cb.address)};
+            if (!device_addr) {
+                return;
+            }
+            if (count >= entries_capacity || byte_off + size > bytes_capacity) {
+                return; // arena full: tail falls back to the tracked path
+            }
+            // Same single-page fast check as the tail upload; either way the
+            // bytes come from device_memory as of right now (resolve time).
+            const u8* const src_pointer = device_memory.GetPointer<u8>(*device_addr);
+            if (!src_pointer) {
+                return;
+            }
+            if (src_pointer + size == device_memory.GetPointer<u8>(*device_addr + size))
+                [[likely]] {
+                std::memcpy(bytes + byte_off, src_pointer, size);
+            } else {
+                device_memory.ReadBlockUnsafe(*device_addr, bytes + byte_off, size);
+            }
+            entries[count++] = {*device_addr, size, static_cast<u32>(byte_off)};
+            byte_off += size;
+        });
+    }
+    return count;
+}
+
+template <class P>
 void BufferCache<P>::BindHostGeometryBuffers(bool is_indexed) {
     if (is_indexed) {
         BindHostIndexBuffer();
@@ -971,9 +1021,27 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
             return alignment > 1 && (offset % alignment) != 0;
         }
     }();
-    const bool use_fast_buffer = needs_alignment_stream
+    bool use_fast_buffer = needs_alignment_stream
         || (has_host_buffer && size <= channel_state->uniform_buffer_skip_cache_size
             && !memory_tracker.IsRegionGpuModified(device_addr, size));
+    // (local-only) P2 uniform epoch: inside a token tail the guest bytes may
+    // have been rewritten during the tail delay, so the untracked fast path
+    // may only read the resolve-time copy held in the job's epoch slot.
+    // Bindings without a slot (capture disabled / arena overflow) must take
+    // the tracked classic path below, which is race-free by construction.
+    // Null outside a token tail: the serial path is byte-for-byte unchanged.
+    const u8* epoch_src{};
+    if (use_fast_buffer && VideoCommon::tls_uniform_epoch) [[unlikely]] {
+        const auto& epoch{*VideoCommon::tls_uniform_epoch};
+        for (size_t i = 0; i < epoch.entry_count; ++i) {
+            const auto& entry{epoch.entries[i]};
+            if (entry.device_addr == device_addr && entry.size == size) {
+                epoch_src = epoch.bytes + entry.offset;
+                break;
+            }
+        }
+        use_fast_buffer = epoch_src != nullptr;
+    }
     if (use_fast_buffer) {
         if constexpr (IS_OPENGL) {
             if (runtime.HasFastBufferSubData()) {
@@ -997,12 +1065,18 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
         // Stream buffer path to avoid stalling on non-Nvidia drivers or Vulkan
         const std::span<u8> span = runtime.BindMappedUniformBuffer(stage, binding_index, size);
         // (local-only) uniforms are small and single-page in practice; the
-        // generic ReadBlockUnsafe page walk costs more than the copy itself
-        u8* const src_pointer = device_memory.GetPointer<u8>(device_addr);
-        if (src_pointer + size == device_memory.GetPointer<u8>(device_addr + size)) [[likely]] {
-            std::memcpy(span.data(), src_pointer, size);
+        // generic ReadBlockUnsafe page walk costs more than the copy itself.
+        // Token tails read the epoch slot instead (see use_fast_buffer gate).
+        if (epoch_src) [[unlikely]] {
+            std::memcpy(span.data(), epoch_src, size);
         } else {
-            device_memory.ReadBlockUnsafe(device_addr, span.data(), size);
+            u8* const src_pointer = device_memory.GetPointer<u8>(device_addr);
+            if (src_pointer + size == device_memory.GetPointer<u8>(device_addr + size))
+                [[likely]] {
+                std::memcpy(span.data(), src_pointer, size);
+            } else {
+                device_memory.ReadBlockUnsafe(device_addr, span.data(), size);
+            }
         }
         // (local-only) EDEN_UNIFORM_STATS=1: measure identical-content re-copies
         if (UniformStreamStatsEnabled()) {

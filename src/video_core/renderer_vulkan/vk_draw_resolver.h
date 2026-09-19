@@ -3,10 +3,12 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <memory>
 
+#include "video_core/control/engine_override.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 
@@ -41,6 +43,19 @@ public:
         bool is_indexed{};
         u32 instance_count{};
         DrawContext ctx;
+
+        // (local-only) uniform epoch slot: guest bytes of the enabled
+        // uniform bindings copied at resolve time; the delayed tail upload
+        // reads this arena instead of guest memory that the game CPU may
+        // have rewritten inside the tail-delay window (right-edge HUD bug).
+        // Sized from measurement: ~4.3 bindings x ~393B = ~1.7KB/draw.
+        static constexpr size_t EpochBytes = 8192;
+        static constexpr size_t EpochEntries = 16;
+        std::array<VideoCommon::UniformEpochEntry, EpochEntries> epoch_entries{};
+        size_t epoch_entry_count{};
+        std::array<u8, EpochBytes> epoch_bytes{};
+        VideoCommon::UniformEpochSnapshot epoch_snapshot{};
+        bool epoch_valid{}; // capture succeeded; the tail installs the snapshot
     };
 
     DrawResolver(Tegra::MemoryManager& gpu_memory_, BufferCache& buffer_cache_,
@@ -89,6 +104,9 @@ public:
 
     SnapshotMode snapshot_mode{SnapshotMode::Journal};
     bool check_enabled{false};
+    // (local-only) EDEN_TOKEN_EPOCH=0 disables the uniform epoch capture
+    // (A/B switch; the tail then keeps the old direct-guest fast path).
+    bool epoch_enabled{true};
 
     // (local-only) P2 diagnostics (aggregate since startup)
     u64 diag_kicks{};
