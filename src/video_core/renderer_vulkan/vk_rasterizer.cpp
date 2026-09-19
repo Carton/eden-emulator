@@ -320,6 +320,12 @@ void RasterizerVulkan::FlushPendingDraw() {
     }
 }
 
+void RasterizerVulkan::WaitForDrawResolve() {
+    if (resolver) {
+        resolver->WaitResolved();
+    }
+}
+
 void RasterizerVulkan::ApplyDeferredInlineWrites() {
     if (deferred_inline_writes.empty()) {
         return;
@@ -331,7 +337,8 @@ void RasterizerVulkan::ApplyDeferredInlineWrites() {
 }
 
 bool RasterizerVulkan::TryDeferInlineWrite(GPUVAddr addr, std::span<const u8> data) {
-    if (!resolver || !resolver->ResolveInFlight()) {
+    if (!resolver || !resolver->ResolveInFlight() ||
+        std::this_thread::get_id() != gpu_thread_id) {
         return false;
     }
     deferred_inline_writes.emplace_back(addr, std::vector<u8>(data.begin(), data.end()));
@@ -412,7 +419,10 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
     }
     if (resolver->SnapshotAndKick(*maxwell3d, pipeline, is_indexed, instance_count)) {
         pending_commit.store(true, std::memory_order_release);
-        ++pipelined_draws;
+        if (++pipelined_draws % 2000 == 0) {
+            LOG_INFO(Render_Vulkan, "P2 diag: pipelined={} fallback={}",
+                     pipelined_draws, fallback_draws);
+        }
         return;
     }
     ++fallback_draws;

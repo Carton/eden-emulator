@@ -9,6 +9,9 @@
 #include <immintrin.h>
 #endif
 
+#include <chrono>
+
+#include "common/logging.h"
 #include "video_core/control/engine_override.h"
 #include "video_core/memory_manager.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
@@ -35,10 +38,22 @@ DrawResolver::DrawResolver(Tegra::MemoryManager& gpu_memory_, BufferCache& buffe
     : gpu_memory{gpu_memory_}, buffer_cache{buffer_cache_}, texture_cache{texture_cache_},
       shadow{std::make_unique<Tegra::Engines::Maxwell3D>(gpu_memory_)} {
     thread = std::jthread([this](std::stop_token stop_token) { Run(stop_token); });
+    // (local-only) P2: pin to the last logical processor. An unpinned spin
+    // loop floats onto the SMT sibling of a GPU/JIT thread and halves its
+    // throughput; a fixed LP keeps the handshake latency near zero without
+    // that contention.
+    const unsigned ncpus{std::thread::hardware_concurrency()};
+    if (ncpus > 0) {
+        SetThreadAffinityMask(thread.native_handle(), 1ULL << (ncpus - 1));
+    }
 }
 
 DrawResolver::~DrawResolver() {
     WaitResolved();
+    if (thread.joinable()) {
+        thread.request_stop();
+        job_phase.notify_all();
+    }
 }
 
 void DrawResolver::WaitResolved() {
@@ -49,6 +64,9 @@ void DrawResolver::WaitResolved() {
             spins = 0;
             std::this_thread::yield();
         }
+    }
+    if (spins > 0) {
+        diag_wait_spins += spins;
     }
 }
 
@@ -88,21 +106,34 @@ bool DrawResolver::SnapshotAndKick(Tegra::Engines::Maxwell3D& engine,
     job.instance_count = instance_count;
     job.ctx.Reset(shadow.get(), &gpu_memory);
     job_phase.store(Phase::Resolving, std::memory_order_release);
+    job_phase.notify_one();
+    if (++diag_kicks % 2000 == 0) {
+        LOG_INFO(Render_Vulkan,
+                 "DrawResolver diag: kicks={} resolve_ns_total={} wait_spins={}",
+                 diag_kicks, diag_resolve_ns.count(), diag_wait_spins);
+    }
     return true;
 }
 
 void DrawResolver::Run(std::stop_token stop_token) {
-    while (!stop_token.stop_requested()) {
-        if (job_phase.load(std::memory_order_acquire) != Phase::Resolving) {
+    while (true) {
+        while (job_phase.load(std::memory_order_acquire) != Phase::Resolving) {
+            if (stop_token.stop_requested()) {
+                return;
+            }
             PauseSpin();
-            continue;
         }
+        const auto kick_time{std::chrono::steady_clock::now()};
         tls_engine_snapshot = shadow.get();
         {
             std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
             job.pipeline->ConfigureResolve(job.ctx, job.is_indexed);
         }
         tls_engine_snapshot = nullptr;
+        const auto done{std::chrono::steady_clock::now()};
+        if (kick_time != std::chrono::steady_clock::time_point{}) {
+            diag_resolve_ns += done - kick_time;
+        }
         job_phase.store(Phase::Resolved, std::memory_order_release);
     }
 }

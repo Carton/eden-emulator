@@ -173,6 +173,7 @@ private:
                           DrawContext& ctx, bool is_indexed, u32 instance_count);
     void RecordDraw(Tegra::Engines::Maxwell3D& engine, bool is_indexed, u32 instance_count);
     bool TryDeferInlineWrite(GPUVAddr addr, std::span<const u8> data) override;
+    void WaitForDrawResolve() override;
 
     void UpdateDynamicStates(Tegra::Engines::Maxwell3D& engine);
 

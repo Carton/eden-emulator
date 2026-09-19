@@ -84,6 +84,11 @@ private:
     std::atomic<Phase> job_phase{Phase::Idle};
     Tegra::Engines::Maxwell3D::DirtyState::Flags dirty_snapshot{};
 
+    // (local-only) P2 diagnostics
+    u64 diag_kicks{};
+    u64 diag_wait_spins{};
+    std::chrono::nanoseconds diag_resolve_ns{};
+
     std::jthread thread;
 };
 

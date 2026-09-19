@@ -632,13 +632,7 @@ void Maxwell3D::ProcessCBMultiData(const u32* start_base, u32 amount) {
 
     const GPUVAddr address{buffer_address + regs.const_buffer.offset};
     const size_t copy_size = amount * sizeof(u32);
-    // (local-only) P2: while a parallel draw resolve is in flight, defer
-    // inline const-buffer writes so they cannot interleave with the
-    // resolver's guest memory reads; they are applied once it goes idle.
-    if (!rasterizer->TryDeferInlineWrite(
-            address, std::span{reinterpret_cast<const u8*>(start_base), copy_size})) {
-        memory_manager.WriteBlockCached(address, start_base, copy_size);
-    }
+    memory_manager.WriteBlockCached(address, start_base, copy_size);
 
     // Increment the current buffer position.
     regs.const_buffer.offset += static_cast<u32>(copy_size);

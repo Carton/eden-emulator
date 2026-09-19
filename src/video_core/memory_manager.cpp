@@ -176,18 +176,27 @@ void MemoryManager::BindRasterizer(VideoCore::RasterizerInterface* rasterizer_) 
 }
 
 GPUVAddr MemoryManager::Map(GPUVAddr gpu_addr, DAddr dev_addr, std::size_t size, PTEKind kind, bool is_big_pages) {
+    if (rasterizer) [[unlikely]] {
+        rasterizer->WaitForDrawResolve();
+    }
     if (is_big_pages)
         return BigPageTableOp(gpu_addr, dev_addr, size, kind, EntryType::Mapped);
     return PageTableOp(gpu_addr, dev_addr, size, kind, EntryType::Mapped);
 }
 
 GPUVAddr MemoryManager::MapSparse(GPUVAddr gpu_addr, std::size_t size, bool is_big_pages) {
+    if (rasterizer) [[unlikely]] {
+        rasterizer->WaitForDrawResolve();
+    }
     if (is_big_pages)
         return BigPageTableOp(gpu_addr, 0, size, PTEKind::INVALID, EntryType::Reserved);
     return PageTableOp(gpu_addr, 0, size, PTEKind::INVALID, EntryType::Reserved);
 }
 
 void MemoryManager::Unmap(GPUVAddr gpu_addr, std::size_t size) {
+    if (rasterizer) [[unlikely]] {
+        rasterizer->WaitForDrawResolve();
+    }
     if (size == 0) {
         return;
     }
@@ -394,6 +403,15 @@ void MemoryManager::ReadBlockUnsafe(GPUVAddr gpu_src_addr, void* dest_buffer, co
 }
 
 void MemoryManager::WriteBlockImpl(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size, [[maybe_unused]] VideoCommon::CacheType which, bool unsafe) {
+    // (local-only) P2: while the parallel draw resolver reads guest memory,
+    // GPU-thread writes are deferred (applied when the resolver goes idle)
+    // so they cannot tear mid-read. The deferred path re-enters here with
+    // the resolver idle, so no recursion.
+    if (rasterizer &&
+        rasterizer->TryDeferInlineWrite(gpu_dest_addr,
+                                        {static_cast<const u8*>(src_buffer), size})) {
+        return;
+    }
     auto just_advance = [&]([[maybe_unused]] std::size_t page_index, [[maybe_unused]] std::size_t offset, std::size_t copy_amount) {
         src_buffer = static_cast<const u8*>(src_buffer) + copy_amount;
     };
