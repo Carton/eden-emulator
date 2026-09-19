@@ -445,6 +445,18 @@ void RasterizerVulkan::RecordDraw(Tegra::Engines::Maxwell3D& engine, bool is_ind
     }
 }
 
+void RasterizerVulkan::LogTokenDiag() {
+    LOG_INFO(Render_Vulkan,
+             "DrawToken diag: pipelined={} deferred_writes={} deferred_mb={:.2f} "
+             "resolve_avg_ns={} tail_avg_ns={}",
+             pipelined_draws, deferred_writes_total,
+             static_cast<double>(deferred_bytes_total) / 1048576.0,
+             resolver->diag_resolve_calls
+                 ? resolver->diag_resolve_ns.count() / resolver->diag_resolve_calls
+                 : 0,
+             diag_tail_calls ? diag_tail_ns.count() / diag_tail_calls : 0);
+}
+
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
     if (token_mode == TokenMode::Off) {
         PrepareDraw(is_indexed, [this, is_indexed, instance_count] {
@@ -480,8 +492,13 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
                 VideoCommon::tls_engine_snapshot = &shadow;
                 std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
                 state_tracker.RetargetFlags(shadow.dirty.flags);
+                // Mirrors CommitPendingDraw's tail chrono (FinishDrawLocked
+                // only) so tail_avg_ns means the same thing in both paths.
+                const auto tail_start{std::chrono::steady_clock::now()};
                 FinishDrawLocked(shadow, *job.pipeline, job.ctx, job.is_indexed,
                                  job.instance_count);
+                diag_tail_ns += std::chrono::steady_clock::now() - tail_start;
+                ++diag_tail_calls;
                 state_tracker.RetargetFlags(maxwell3d->dirty.flags);
                 VideoCommon::tls_engine_snapshot = nullptr;
             }
@@ -489,20 +506,15 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
             resolver->FinishJob(*maxwell3d);
             gpu.TickWork();
             ++pipelined_draws;
+            if (pipelined_draws % 2000 == 0) {
+                LogTokenDiag();
+            }
             return;
         }
         pending_commit.store(true, std::memory_order_release);
         ++pipelined_draws;
         if (pipelined_draws % 2000 == 0) {
-            LOG_INFO(Render_Vulkan,
-                     "DrawToken diag: pipelined={} deferred_writes={} deferred_mb={:.2f} "
-                     "resolve_avg_ns={} tail_avg_ns={}",
-                     pipelined_draws, deferred_writes_total,
-                     static_cast<double>(deferred_bytes_total) / 1048576.0,
-                     resolver->diag_resolve_calls
-                         ? resolver->diag_resolve_ns.count() / resolver->diag_resolve_calls
-                         : 0,
-                     diag_tail_calls ? diag_tail_ns.count() / diag_tail_calls : 0);
+            LogTokenDiag();
         }
         if (token_mode == TokenMode::SyncWorker) {
             // Hand the resolve to the VulkanWorker and drain it: exercises

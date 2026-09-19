@@ -169,6 +169,10 @@ private:
     void EnsureResolver();
     void CommitPendingDraw();
     void FlushPendingDraw();
+    // (local-only) 2000-draw diag dump shared by both token commit paths
+    // (deferred and TAIL_IMM; the immediate branch returns before the
+    // inline log site, so both call this helper instead).
+    void LogTokenDiag();
     void ApplyDeferredInlineWrites();
     void FinishDrawLocked(Tegra::Engines::Maxwell3D& engine, GraphicsPipeline& pipeline,
                           DrawContext& ctx, bool is_indexed, u32 instance_count);
