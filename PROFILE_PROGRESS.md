@@ -1726,3 +1726,81 @@ bench：serialcuts c1=44.31/22.50，c2=43.64/22.50（两局均快档 27 ticks；
 +ProcessMacro 参数收集）、query CounterReport 的 std::function 每次堆分配（MSVC 无 SBO）、
 CommitAsyncFlushesHigh 的 small_vector 越界增长、GpuToCpuAddress 页表走查 memo。
 每项 ~0.3-0.5%。commit: serialcuts。
+
+## 28. P2 Step 2 实施轮：draw token 管道 + 图像 QA 体系 + 右缘 bug 二分（2026-09-19 晚）
+
+### 28.1 token 管道落地（里程碑 a：inline/sync 两模式）
+架构按 §27.2：GPU 线程在 Draw() 只做快照+发 token；resolve（B 池绑定解析）就地执行
+（inline 验证模式）或经 scheduler chunk 交给 VulkanWorker（sync 模式，逐 draw drain）；
+commit（tail：上传+录制）保持在 GPU 线程、下一 rasterizer 会合点（沿用 depth-1 的
+CommitPendingDraw 结构与全部 45 个 FlushPendingDraw barrier）。depth-1 专职线程删除。
+- env：`EDEN_DRAW_TOKEN=inline|sync`（默认关）、`EDEN_TOKEN_SNAPSHOT=full|journal`、
+  `EDEN_TOKEN_CHECK=1`、`EDEN_TOKEN_NODEFER=1`、`EDEN_TOKEN_TAIL_IMM=1`（后两个是本轮
+  二分开关）。
+- commit: 06d8d217d1（管道）→ f4bb2bf501（journal 补漏）→ 5eacc0a206（dirty 追踪+arena）
+  → bisect 开关 commit。
+
+### 28.2 寄存器 journal：增量影子引擎（核心成果）
+- chokepoint = `ProcessDirtyRegisters`（相同值写入本来就被跳过 → journal 只记真变化）；
+  旁路点全补：HLE 宏 23 处（`maxwell3d.regs.X=` 别名写，含 `pipelines[].offset`、
+  const_buffer、upload、transform_feedback、bind_groups）、`ProcessCBMultiData` 的
+  `const_buffer.offset +=`、固件 stub。
+- `Maxwell3D::JournalWord<T>`（目标字指针自算 method 索引）；`DrawResolver::SetDirtyFlag`
+  让 HLE/draw_manager 的直接置 dirty 参与 flags_since_snapshot 追踪（见 28.5 bug①）。
+- **实测（水塘，token-inline-check2，306 万 draw）：journal_avg=27.2 条/draw ≈ 218B/draw，
+  比全拷 16KB 小 64 倍；replay 40ns；resyncs=1（仅首帧）；resolve 803ns；checker
+  （shadow vs live 位精确，含未消费 journal 投影）0 mismatch。** codex 预估的 ~300B 命中。
+- journal 比全拷快：token-full 36.26fps vs journal 38.81fps（同日背靠背带内 ~+2.5fps）。
+
+### 28.3 图像 QA 体系（用户要求，本轮建成；此前完全没有）
+- **采集**：`F:\prof\shot_capture.py` ——PrintWindow(PW_RENDERFULLCONTENT)+CreateDIBSection
+  抓 "Form" 渲染窗口，**遮挡免疫**。（教训：先前 ImageGrab 屏幕抓取被 IDE 遮挡污染，
+  一整批结论作废重验；MCP 图像识别当场拆穿了假截图。）
+- **集成**：bench_run.py 测量窗内每 15s 截 6 张到 `F:\prof\shots\<label>\`（--no-shots 关）。
+- **对比**：`shot_compare.py`（降分辨率容忍动画相位）+ 分辨率网格 bad% 热图定位；
+  **规程（血泪教训）**：① golden 参照局必须与测试局**背靠背**（游戏内昼夜/云导致整体
+  亮度漂移，跨小时对比全作废）；② 参照校准：golden vs golden 的坏点分布=噪声地板；
+  ③ 225×250 小窗会掩盖小 UI 元素问题，需要时用 load_capture.py 放大窗口到 1280×720
+  （内部渲染分辨率随窗口提升）。
+- **MCP 复核**：Read(正斜杠路径)→CDN URL→analyze_image 描述/找异常；对加载画面右侧
+  4x 放大裁片复核未见结构差异。
+- 加载画面（干净数据）：启动 logo 屏 token 开/关 0.0-0.3% 差异；加载艺术图（1280×720）
+  右侧/右下无结构差异（中屏散点=随机提示图文）。用户 16:58 目击的加载画面问题在修复
+  采集后的多轮对比中未复现（当时二进制含 bug①，或为遮挡视差——待大窗复测确认）。
+
+### 28.4 已知问题①（主 bug）：token 模式右缘 HUD 元素渲染平坦
+- 症状：右缘中条（~14px，疑似温度计/时钟区）golden 有结构、token 渲染成平坦值；
+  局内时间稳定（非闪烁）、跨对帧稳定、golden vs golden 干净（排游戏状态漂移）。
+- **二分链（全部背靠背干净采集）**：journal/full 都脏→快照机制无关；NODEFER 全局坏
+  （见下）无法判右缘；**TAIL_IMM（快照+resolve+tail 全就地）完全干净**→bug 唯一归因
+  于"tail 延迟到下一 draw"的结构窗口。
+- **NODEFER 全局损坏的机制（重要发现）**：tail N 延迟执行时读 guest 内存取 uniform
+  内容；延迟写（deferral）正是承重墙——挡住 draw N 之后的 CB push 直到 tail N 完成。
+  关掉它→每个 draw 的上传拿到**下一 draw 的 uniform 数据**→全局画面错。这也反证：
+  右缘 bug = deferral 覆盖面之外的 guest 写时序洞（游戏 CPU 直接写 guest 内存不经
+  MemoryManager，serial 与 token 的 tail 读取时刻差 ~10µs，温度计类每帧更新的小
+  uniform 最易踩中）。
+- **修复方向（下轮）**：uniform 内容 epoch——快照时把该 draw 读的 CB 区间一并拷进
+  slot（几百字节级），tail 从 slot 读。这同时是里程碑 (b) 异步化的前置必答题。
+
+### 28.5 已知问题②（已修）：dirty 合并丢位
+depth-1 的 dirty merge 公式会丢弃 HLE 宏/draw_manager 直接置的位（不进
+flags_since_snapshot）→Dirty::Shaders 丢→管线缓存陈旧。修：SetDirtyFlag 统一追踪。
+（该修复真实必要，但不是右缘 bug 的根因——右缘在修复后依旧。）
+
+### 28.6 性能：token 各模式 -12~17%（未解，阻塞里程碑 b 前必须查）
+| 局 | fps | med |
+|---|---|---|
+| golden4/5/6（token 关） | 43.87/42.23/40.99 | 22.50/22.50/23.34 |
+| token-inline2/3/4 | 38.48/34.51/38.81 | 25.83/28.33/25.83 |
+| token-full（全拷快照） | 36.26 | 27.50 |
+| token-tailimm | 39.02 | 25.01 |
+- **TAIL_IMM 也慢（39.0 vs 43.9）→回退主因不在 tail 延迟，而在 token 路径本身**：
+  嫌疑=每 draw 双程缓存锁、影子引擎冷缓存、两段式 Configure 的局部性损失、tail 里
+  UpdateDynamicStates 重复 CurrentGraphicsPipeline 查找。工具已备：ETW 差分
+  （p2_off.etl 方法）。下轮先做这个再谈异步。
+
+### 28.7 下轮入口
+1. ETW 差分 token-tailimm vs golden GPU 线程（-12% 归因）。
+2. uniform epoch 槽（修右缘 + 异步前置）。
+3. 加载画面大窗复测（HQ 采集法已验证）。
