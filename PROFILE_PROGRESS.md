@@ -1672,3 +1672,10 @@ resolver 全套诊断计数、以及"事件日志偏移→llvm-symbolizer 秒级
 - bench 结果补记：p2b-gateoff-c1 ×3 与 p2b-wait-on-c1 ×2 均为 void 局（CSV 里
   12:35/13:24/13:28 三行 40.54 与两行 16.99 作废）；有效局：p2b-fixed/p2b-pinned/
   p2b-final-off。
+
+### 26.8 分支图谱（2026-09-19 重组）
+
+- `test/master-profiling`：文档与结论（§25.6/§26 设计/§26.6 autopsy），**不含 P2 代码**。
+- `test/p2-draw-resolver`：P2 全部实现（ccf6a8f0ae→bb35c2d532，从 36f7613688 追溯）——
+  DrawResolver 线程、shadow 快照、tls 引擎覆盖、撕裂读防御（MM 咽喉延迟写+页表 guard）、
+  诊断计数。后续 depth-2 若启动，从该分支续。

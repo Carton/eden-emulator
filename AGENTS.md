@@ -14,6 +14,9 @@ C++20 + CMake（≥3.31）构建，支持 Windows / Linux / macOS / Android 等�
 ## 当前工作基线
 
 - **工作重心 = master：`test/master-profiling` 分支**（本仓库），一切修改只落这里，构建走 `build-vs22/`。
+- **P2 GPU 线程并行化代码在 `test/p2-draw-resolver` 分支**（2026-09-19 拆出，含 DrawResolver
+  完整实现 + depth-1 判负 autopsy；`EDEN_PARALLEL_DRAW` 门控默认关）；master 不含该代码，
+  过程与结论见 PROFILE §26。
 - **v0.2.1 worktree（F:\devel\opensource\eden-v0.2.1）已冻结**（停在 514a095406，勿改），仅作历史参照。
 - **用户日常游玩 exe = F:\Switch\Yuzu\eden.exe（我们 master 构建的手动拷贝）**——凡改渲染/输入/节奏相关代码，
   用户日常游玩就是真实世界回归测试场，出视觉/手感问题先查我们的变更。
