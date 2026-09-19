@@ -237,6 +237,21 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
         token_mode = (*token == 's' || *token == 'S')   ? TokenMode::SyncWorker
                      : (*token == 'a' || *token == 'A') ? TokenMode::Async
                                                         : TokenMode::Inline;
+        if (token_mode == TokenMode::Async) {
+            // DISABLED (2026-09-20, §28.15): the worker-side resolve runs
+            // texture-cache runtime ops (SynchronizeDescriptors -> CopyImage
+            // -> scheduler.Record) that append to the CURRENT command chunk,
+            // racing the GPU thread's own records on the same chunk and
+            // corrupting it (crash in CommandChunk::Record, ~minutes in;
+            // nvoglv64 fallout crashes on later boots). Needs the batched
+            // handoff design (resolver-private command capture) before the
+            // resolve may run truly concurrent with parsing. Env value kept
+            // parsed for the future; falls back to inline for now.
+            LOG_WARNING(Render_Vulkan,
+                        "DrawToken async mode disabled (chunk-record race); "
+                        "using inline instead");
+            token_mode = TokenMode::Inline;
+        }
         const char* snapshot{std::getenv("EDEN_TOKEN_SNAPSHOT")};
         const char* check{std::getenv("EDEN_TOKEN_CHECK")};
         token_check_enabled = check != nullptr && *check != '\0' && *check != '0';
