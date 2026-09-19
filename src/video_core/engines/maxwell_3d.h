@@ -3163,6 +3163,42 @@ public:
     // flags_since_snapshot accumulation in ProcessDirtyRegisters.
     bool tracking_since_snapshot{false};
 
+    // (local-only) P2 draw tokens: register-write journal used to maintain a
+    // shadow engine incrementally. Identical rewrites are already skipped by
+    // ProcessDirtyRegisters, so entries are genuinely-changed writes only.
+    // Direct mutations outside that chokepoint (HLE macros, CB offset bump)
+    // must call RecordJournal themselves; EDEN_TOKEN_CHECK exists to catch
+    // any site that was missed.
+    struct JournalEntry {
+        u32 method;
+        u32 value;
+    };
+    static constexpr size_t JournalCapacity = 8192;
+
+    std::array<JournalEntry, JournalCapacity> reg_journal{};
+    size_t reg_journal_size{};      // entries appended so far
+    size_t reg_journal_consumed{};  // entries already applied to the shadow
+    bool journal_active{false};
+    bool journal_overflow{false};
+
+    void RecordJournal(u32 method, u32 value) {
+        if (journal_active) [[unlikely]] {
+            if (reg_journal_size < JournalCapacity) [[likely]] {
+                reg_journal[reg_journal_size++] = {method, value};
+            } else {
+                journal_overflow = true;
+            }
+        }
+    }
+
+    // Applies journal entries to this engine's flat register array. Used by
+    // the draw-token shadow, which converges to the live register state.
+    void ReplayJournal(const JournalEntry* entries, size_t count) {
+        for (size_t i = 0; i < count; ++i) {
+            regs.reg_array[entries[i].method] = entries[i].value;
+        }
+    }
+
     DrawManager draw_manager;
 
     GPUVAddr GetMacroAddress(size_t index) const {

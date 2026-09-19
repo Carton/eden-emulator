@@ -226,9 +226,25 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
       fence_manager(*this, gpu, texture_cache, buffer_cache, query_cache, device, scheduler),
       wfi_event(device.GetLogical().CreateEvent()) {
     scheduler.SetQueryCache(query_cache);
-    // (local-only) P2: opt-in parallel draw resolver
-    const char* parallel{std::getenv("EDEN_PARALLEL_DRAW")};
-    parallel_draw_enabled = parallel != nullptr && *parallel != '\0' && *parallel != '0';
+    // (local-only) P2 Step 2 draw tokens. EDEN_DRAW_TOKEN selects the token
+    // pipeline: "1"/"inline" resolves on the GPU thread right after the
+    // snapshot (validation, ~baseline perf), "sync" hands the resolve to the
+    // VulkanWorker and drains per draw (worker-path validation, slower).
+    // EDEN_TOKEN_SNAPSHOT=full forces the depth-1 whole-register copy;
+    // EDEN_TOKEN_CHECK=1 verifies the shadow register state bit-exactly.
+    const char* token{std::getenv("EDEN_DRAW_TOKEN")};
+    if (token && *token != '\0' && *token != '0') {
+        token_mode = (*token == 's' || *token == 'S') ? TokenMode::SyncWorker
+                                                      : TokenMode::Inline;
+        const char* snapshot{std::getenv("EDEN_TOKEN_SNAPSHOT")};
+        const char* check{std::getenv("EDEN_TOKEN_CHECK")};
+        token_check_enabled = check != nullptr && *check != '\0' && *check != '0';
+        LOG_INFO(Render_Vulkan,
+                 "Draw tokens: mode={} snapshot={} check={}",
+                 token_mode == TokenMode::SyncWorker ? "sync-worker" : "inline",
+                 (snapshot && *snapshot == 'f') ? "full" : "journal",
+                 token_check_enabled ? "on" : "off");
+    }
 }
 
 RasterizerVulkan::~RasterizerVulkan() {
@@ -236,9 +252,10 @@ RasterizerVulkan::~RasterizerVulkan() {
         resolver->WaitResolved();
     }
     if (pipelined_draws || fallback_draws) {
-        LOG_INFO(Render_Vulkan, "Parallel draws: {} pipelined, {} synchronous fallback",
+        LOG_INFO(Render_Vulkan, "Draw tokens: {} pipelined, {} synchronous fallback",
                  pipelined_draws, fallback_draws);
     }
+    // Drain queued token commands before member teardown frees the resolver.
     scheduler.WaitWorker();
     scheduler.Finish();
 }
@@ -283,6 +300,11 @@ void RasterizerVulkan::EnsureResolver() {
         return;
     }
     resolver = std::make_unique<DrawResolver>(*gpu_memory, buffer_cache, texture_cache);
+    const char* snapshot{std::getenv("EDEN_TOKEN_SNAPSHOT")};
+    resolver->snapshot_mode = (snapshot && (*snapshot == 'f' || *snapshot == 'F'))
+                                  ? DrawResolver::SnapshotMode::FullCopy
+                                  : DrawResolver::SnapshotMode::Journal;
+    resolver->check_enabled = token_check_enabled;
 }
 
 void RasterizerVulkan::CommitPendingDraw() {
@@ -290,6 +312,9 @@ void RasterizerVulkan::CommitPendingDraw() {
         return;
     }
     resolver->WaitResolved();
+    if (token_check_enabled) {
+        resolver->VerifySnapshot(*maxwell3d);
+    }
     DrawResolver::Job& job{resolver->TakeJob()};
     Tegra::Engines::Maxwell3D& shadow{resolver->SnapshotEngine()};
     {
@@ -394,7 +419,7 @@ void RasterizerVulkan::RecordDraw(Tegra::Engines::Maxwell3D& engine, bool is_ind
 }
 
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
-    if (!parallel_draw_enabled) {
+    if (token_mode == TokenMode::Off) {
         PrepareDraw(is_indexed, [this, is_indexed, instance_count] {
             RecordDraw(*maxwell3d, is_indexed, instance_count);
         });
@@ -405,11 +430,11 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
     }
     EnsureResolver();
 
-    // Commit the previous pipelined draw, keeping draw order.
+    // Commit the previous token draw, keeping draw order.
     CommitPendingDraw();
 
     FlushWork();
-    // The resolver is idle here (CommitPendingDraw drained it), so the
+    // The previous job committed above, so the resolver is idle here and the
     // deferred-unmap execution inside FlushCaching is safe.
     gpu_memory->FlushCaching();
 
@@ -417,15 +442,22 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
     if (!pipeline) {
         return;
     }
-    if (resolver->SnapshotAndKick(*maxwell3d, pipeline, is_indexed, instance_count)) {
+    if (resolver->SnapshotAndEnqueue(*maxwell3d, pipeline, is_indexed, instance_count)) {
         pending_commit.store(true, std::memory_order_release);
-        if (++pipelined_draws % 2000 == 0) {
-            LOG_INFO(Render_Vulkan, "P2 diag: pipelined={} fallback={}",
-                     pipelined_draws, fallback_draws);
+        ++pipelined_draws;
+        if (token_mode == TokenMode::SyncWorker) {
+            // Hand the resolve to the VulkanWorker and drain it: exercises
+            // the worker-side execution path with zero concurrency.
+            scheduler.Record([this](vk::CommandBuffer) { resolver->ExecuteResolve(); });
+            scheduler.DispatchWork();
+            scheduler.WaitWorker();
+        } else {
+            resolver->ExecuteResolve();
         }
         return;
     }
     ++fallback_draws;
+    resolver->diag_fallbacks = fallback_draws;
     // Synchronous draw (e.g. inline index buffer); engine state is live.
     std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
     pipeline->SetEngine(maxwell3d, gpu_memory);

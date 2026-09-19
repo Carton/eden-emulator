@@ -62,6 +62,13 @@ bool IsTopologySafe(Maxwell3D::Regs::PrimitiveTopology topology) {
     }
 }
 
+// (local-only) P2 draw tokens: HLE macros mutate registers directly,
+// bypassing the ProcessDirtyRegisters chokepoint; journal each write so the
+// draw-token shadow engine stays bit-exact with the live registers.
+void SetRegJournaled(Engines::Maxwell3D& maxwell3d, u32 method, u32 value) {
+    maxwell3d.regs.reg_array[method] = value;
+    maxwell3d.RecordJournal(method, value);
+}
 } // Anonymous namespace
 
 void HLE_DrawArraysIndirect::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, std::span<const u32> parameters, [[maybe_unused]] u32 method) {
@@ -111,13 +118,13 @@ void HLE_DrawArraysIndirect::Fallback(Core::System& system, Engines::Maxwell3D& 
     }
     const u32 base_instance = parameters[4];
     if (extended) {
-        maxwell3d.regs.global_base_instance_index = base_instance;
+        SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(global_base_instance_index), base_instance);
         maxwell3d.engine_state = Maxwell3D::EngineHint::OnHLEMacro;
         maxwell3d.SetHLEReplacementAttributeType(0, 0x640, Maxwell3D::HLEReplacementAttributeType::BaseInstance);
     }
     maxwell3d.draw_manager.DrawArray(maxwell3d, topology, vertex_first, vertex_count, base_instance, instance_count);
     if (extended) {
-        maxwell3d.regs.global_base_instance_index = 0;
+        SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(global_base_instance_index), 0);
         maxwell3d.engine_state = Maxwell3D::EngineHint::None;
         maxwell3d.replace_table.clear();
     }
@@ -133,9 +140,9 @@ void HLE_DrawIndexedIndirect::Execute(Core::System& system, Engines::Maxwell3D& 
     const u32 estimate = u32(maxwell3d.EstimateIndexBufferSize());
     const u32 element_base = parameters[4];
     const u32 base_instance = parameters[5];
-    maxwell3d.regs.vertex_id_base = element_base;
-    maxwell3d.regs.global_base_vertex_index = element_base;
-    maxwell3d.regs.global_base_instance_index = base_instance;
+    SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(vertex_id_base), element_base);
+    SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(global_base_vertex_index), element_base);
+    SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(global_base_instance_index), base_instance);
     maxwell3d.dirty.flags[VideoCommon::Dirty::IndexBuffer] = true;
     if (extended) {
         maxwell3d.engine_state = Maxwell3D::EngineHint::OnHLEMacro;
@@ -153,9 +160,9 @@ void HLE_DrawIndexedIndirect::Execute(Core::System& system, Engines::Maxwell3D& 
     params.stride = 0;
     maxwell3d.dirty.flags[VideoCommon::Dirty::IndexBuffer] = true;
     maxwell3d.draw_manager.DrawIndexedIndirect(maxwell3d, topology, 0, estimate);
-    maxwell3d.regs.vertex_id_base = 0x0;
-    maxwell3d.regs.global_base_vertex_index = 0x0;
-    maxwell3d.regs.global_base_instance_index = 0x0;
+    SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(vertex_id_base), 0x0);
+    SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(global_base_vertex_index), 0x0);
+    SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(global_base_instance_index), 0x0);
     if (extended) {
         maxwell3d.engine_state = Maxwell3D::EngineHint::None;
         maxwell3d.replace_table.clear();
@@ -166,9 +173,9 @@ void HLE_DrawIndexedIndirect::Fallback(Core::System& system, Engines::Maxwell3D&
     const u32 instance_count = (maxwell3d.GetRegisterValue(0xD1B) & parameters[2]);
     const u32 element_base = parameters[4];
     const u32 base_instance = parameters[5];
-    maxwell3d.regs.vertex_id_base = element_base;
-    maxwell3d.regs.global_base_vertex_index = element_base;
-    maxwell3d.regs.global_base_instance_index = base_instance;
+    SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(vertex_id_base), element_base);
+    SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(global_base_vertex_index), element_base);
+    SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(global_base_instance_index), base_instance);
     maxwell3d.dirty.flags[VideoCommon::Dirty::IndexBuffer] = true;
     if (extended) {
         maxwell3d.engine_state = Maxwell3D::EngineHint::OnHLEMacro;
@@ -176,9 +183,9 @@ void HLE_DrawIndexedIndirect::Fallback(Core::System& system, Engines::Maxwell3D&
         maxwell3d.SetHLEReplacementAttributeType(0, 0x644, Maxwell3D::HLEReplacementAttributeType::BaseInstance);
     }
     maxwell3d.draw_manager.DrawIndex(maxwell3d, Tegra::Maxwell3D::Regs::PrimitiveTopology(parameters[0]), parameters[3], parameters[1], element_base, base_instance, instance_count);
-    maxwell3d.regs.vertex_id_base = 0x0;
-    maxwell3d.regs.global_base_vertex_index = 0x0;
-    maxwell3d.regs.global_base_instance_index = 0x0;
+    SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(vertex_id_base), 0x0);
+    SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(global_base_vertex_index), 0x0);
+    SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(global_base_instance_index), 0x0);
     if (extended) {
         maxwell3d.engine_state = Maxwell3D::EngineHint::None;
         maxwell3d.replace_table.clear();
@@ -193,7 +200,7 @@ void HLE_MultiLayerClear::Execute(Core::System& system, Engines::Maxwell3D& maxw
     const u32 num_layers = maxwell3d.regs.rt[rt_index].depth;
     ASSERT(clear_params.layer == 0);
 
-    maxwell3d.regs.clear_surface.raw = clear_params.raw;
+    SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(clear_surface), clear_params.raw);
     maxwell3d.draw_manager.Clear(maxwell3d, num_layers);
 }
 void HLE_MultiDrawIndexedIndirectCount::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, std::span<const u32> parameters, [[maybe_unused]] u32 method) {
@@ -236,7 +243,7 @@ void HLE_MultiDrawIndexedIndirectCount::Execute(Core::System& system, Engines::M
 void HLE_MultiDrawIndexedIndirectCount::Fallback(Core::System& system, Engines::Maxwell3D& maxwell3d, std::span<const u32> parameters) {
     SCOPE_EXIT {
         // Clean everything.
-        maxwell3d.regs.vertex_id_base = 0x0;
+        SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(vertex_id_base), 0x0);
         maxwell3d.engine_state = Maxwell3D::EngineHint::None;
         maxwell3d.replace_table.clear();
     };
@@ -258,7 +265,7 @@ void HLE_MultiDrawIndexedIndirectCount::Fallback(Core::System& system, Engines::
         const std::size_t base = index * indirect_words + 5;
         const u32 base_vertex = parameters[base + 3];
         const u32 base_instance = parameters[base + 4];
-        maxwell3d.regs.vertex_id_base = base_vertex;
+        SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(vertex_id_base), base_vertex);
         maxwell3d.engine_state = Maxwell3D::EngineHint::OnHLEMacro;
         maxwell3d.SetHLEReplacementAttributeType(0, 0x640, Maxwell3D::HLEReplacementAttributeType::BaseVertex);
         maxwell3d.SetHLEReplacementAttributeType(0, 0x644, Maxwell3D::HLEReplacementAttributeType::BaseInstance);
@@ -281,9 +288,9 @@ void HLE_DrawIndirectByteCount::Execute(Core::System& system, Engines::Maxwell3D
         params.buffer_size = 4;
         params.max_draw_counts = 1;
         params.stride = parameters[1];
-        maxwell3d.regs.draw.begin = parameters[0];
-        maxwell3d.regs.draw_auto_stride = parameters[1];
-        maxwell3d.regs.draw_auto_byte_count = parameters[2];
+        SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(draw.begin), parameters[0]);
+        SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(draw_auto_stride), parameters[1]);
+        SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(draw_auto_byte_count), parameters[2]);
         maxwell3d.draw_manager.DrawArrayIndirect(maxwell3d, topology);
     } else {
         Fallback(system, maxwell3d, parameters);
@@ -291,9 +298,9 @@ void HLE_DrawIndirectByteCount::Execute(Core::System& system, Engines::Maxwell3D
 }
 void HLE_DrawIndirectByteCount::Fallback(Core::System& system, Engines::Maxwell3D& maxwell3d, std::span<const u32> parameters) {
     maxwell3d.RefreshParameters();
-    maxwell3d.regs.draw.begin = parameters[0];
-    maxwell3d.regs.draw_auto_stride = parameters[1];
-    maxwell3d.regs.draw_auto_byte_count = parameters[2];
+    SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(draw.begin), parameters[0]);
+    SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(draw_auto_stride), parameters[1]);
+    SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(draw_auto_byte_count), parameters[2]);
     maxwell3d.draw_manager.DrawArray(maxwell3d, maxwell3d.regs.draw.topology, 0, maxwell3d.regs.draw_auto_byte_count / maxwell3d.regs.draw_auto_stride, 0, 1);
 }
 void HLE_C713C83D8F63CCF3::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, std::span<const u32> parameters, [[maybe_unused]] u32 method) {

@@ -249,8 +249,18 @@ private:
 
     u32 draw_counter = 0;
 
-    // (local-only) P2 depth-1 draw resolver state (GPU thread owned unless noted)
-    bool parallel_draw_enabled{false};
+    // (local-only) P2 draw-token state (GPU thread owned unless noted).
+    // Token modes: the GPU thread snapshots a draw into the resolver and the
+    // binding-resolution phase runs either inline (validation) or on the
+    // VulkanWorker through a scheduler command; the commit phase always runs
+    // on the GPU thread at the next rasterizer rendezvous.
+    enum class TokenMode : u8 {
+        Off,
+        Inline,    // resolve executes immediately on the GPU thread
+        SyncWorker // resolve executes on the VulkanWorker; GPU thread drains
+    };
+    TokenMode token_mode{TokenMode::Off};
+    bool token_check_enabled{false};
     std::unique_ptr<DrawResolver> resolver;
     std::atomic<bool> pending_commit{false};
     std::thread::id gpu_thread_id{};

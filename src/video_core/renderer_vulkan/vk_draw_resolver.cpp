@@ -3,13 +3,10 @@
 
 #include "video_core/renderer_vulkan/vk_draw_resolver.h"
 
-#include <mutex>
-
-#ifdef _MSC_VER
-#include <immintrin.h>
-#endif
-
 #include <chrono>
+#include <cstring>
+#include <mutex>
+#include <thread>
 
 #include "common/logging.h"
 #include "video_core/control/engine_override.h"
@@ -22,70 +19,31 @@ namespace Vulkan {
 using VideoCommon::tls_engine_snapshot;
 
 namespace {
-
-void PauseSpin() {
-#ifdef _MSC_VER
-    _mm_pause();
-#else
-    std::this_thread::yield();
-#endif
+using Clock = std::chrono::steady_clock;
 }
-
-} // Anonymous namespace
 
 DrawResolver::DrawResolver(Tegra::MemoryManager& gpu_memory_, BufferCache& buffer_cache_,
                            TextureCache& texture_cache_)
     : gpu_memory{gpu_memory_}, buffer_cache{buffer_cache_}, texture_cache{texture_cache_},
-      shadow{std::make_unique<Tegra::Engines::Maxwell3D>(gpu_memory_)} {
-    thread = std::jthread([this](std::stop_token stop_token) { Run(stop_token); });
-    // (local-only) P2: pin to the last logical processor. An unpinned spin
-    // loop floats onto the SMT sibling of a GPU/JIT thread and halves its
-    // throughput; a fixed LP keeps the handshake latency near zero without
-    // that contention.
-    const unsigned ncpus{std::thread::hardware_concurrency()};
-    if (ncpus > 0) {
-        SetThreadAffinityMask(thread.native_handle(), 1ULL << (ncpus - 1));
-    }
-}
+      shadow{std::make_unique<Tegra::Engines::Maxwell3D>(gpu_memory_)} {}
 
 DrawResolver::~DrawResolver() {
     WaitResolved();
-    if (thread.joinable()) {
-        thread.request_stop();
-        job_phase.notify_all();
-    }
 }
 
 void DrawResolver::WaitResolved() {
-    u32 spins{};
     while (job_phase.load(std::memory_order_acquire) == Phase::Resolving) {
-        PauseSpin();
-        if (++spins == 20000) {
-            spins = 0;
-            std::this_thread::yield();
-        }
-    }
-    if (spins > 0) {
-        diag_wait_spins += spins;
+        std::this_thread::yield();
     }
 }
 
-bool DrawResolver::SnapshotAndKick(Tegra::Engines::Maxwell3D& engine,
-                                   GraphicsPipeline* pipeline, bool is_indexed,
-                                   u32 instance_count) {
-    // Inline-index draws carry their indices in a vector that is not
-    // snapshotted; they must run synchronously.
-    const auto& src{engine.draw_manager.draw_state};
-    if (src.draw_mode == Tegra::Engines::Maxwell3D::DrawManager::DrawMode::InlineIndex ||
-        !src.inline_index_draw_indexes.empty()) {
-        return false;
-    }
-
-    // Snapshot every piece of engine state the resolve and commit phases
-    // read. This runs on the GPU thread with the resolver idle.
-    shadow->regs = engine.regs;
+void DrawResolver::CopyDynamicState(Tegra::Engines::Maxwell3D& engine) {
+    // State outside the flat register array, copied wholesale in every mode:
+    // shader-stage constant-buffer bindings (ProcessCBBind), draw parameters
+    // and dirty flags. Together a few KiB, not worth journaling.
     shadow->state = engine.state;
     {
+        const auto& src{engine.draw_manager.draw_state};
         auto& dst{shadow->draw_manager.draw_state};
         dst.topology = src.topology;
         dst.draw_mode = src.draw_mode;
@@ -100,42 +58,88 @@ bool DrawResolver::SnapshotAndKick(Tegra::Engines::Maxwell3D& engine,
     shadow->dirty.flags = engine.dirty.flags;
     engine.dirty.flags_since_snapshot = {};
     engine.tracking_since_snapshot = true;
+}
+
+bool DrawResolver::SnapshotAndEnqueue(Tegra::Engines::Maxwell3D& engine,
+                                      GraphicsPipeline* pipeline, bool is_indexed,
+                                      u32 instance_count) {
+    // Inline-index draws carry their indices in a vector that is not
+    // snapshotted; they must run synchronously.
+    const auto& src{engine.draw_manager.draw_state};
+    if (src.draw_mode == Tegra::Engines::Maxwell3D::DrawManager::DrawMode::InlineIndex ||
+        !src.inline_index_draw_indexes.empty()) {
+        return false;
+    }
+
+    if (snapshot_mode == SnapshotMode::Journal) {
+        engine.journal_active = true;
+        const bool must_resync =
+            !shadow_in_sync || shadow_source != &engine || engine.journal_overflow;
+        if (must_resync) {
+            shadow->regs = engine.regs;
+            engine.reg_journal_consumed = engine.reg_journal_size;
+            shadow_in_sync = true;
+            shadow_source = &engine;
+            engine.journal_overflow = false;
+            ++diag_resyncs;
+            slot_journal_size = 0;
+        } else {
+            const size_t pending{engine.reg_journal_size - engine.reg_journal_consumed};
+            std::memcpy(slot_journal, engine.reg_journal.data() + engine.reg_journal_consumed,
+                        pending * sizeof(engine.reg_journal[0]));
+            slot_journal_size = pending;
+            engine.reg_journal_consumed = engine.reg_journal_size;
+            diag_journal_entries += pending;
+        }
+        // Compact the engine buffer once fully consumed; capacity then bounds
+        // the entries of a single inter-snapshot interval (one draw).
+        if (engine.reg_journal_consumed == engine.reg_journal_size) {
+            engine.reg_journal_size = 0;
+            engine.reg_journal_consumed = 0;
+        }
+    } else {
+        shadow->regs = engine.regs;
+        slot_journal_size = 0;
+    }
+    CopyDynamicState(engine);
 
     job.pipeline = pipeline;
     job.is_indexed = is_indexed;
     job.instance_count = instance_count;
     job.ctx.Reset(shadow.get(), &gpu_memory);
     job_phase.store(Phase::Resolving, std::memory_order_release);
-    job_phase.notify_one();
     if (++diag_kicks % 2000 == 0) {
         LOG_INFO(Render_Vulkan,
-                 "DrawResolver diag: kicks={} resolve_ns_total={} wait_spins={}",
-                 diag_kicks, diag_resolve_ns.count(), diag_wait_spins);
+                 "DrawToken diag: kicks={} fallbacks={} resyncs={} "
+                 "journal_avg={:.1f} resolve_avg_ns={} replay_avg_ns={} mismatches={}",
+                 diag_kicks, diag_fallbacks, diag_resyncs,
+                 diag_resolve_calls ? static_cast<double>(diag_journal_entries) /
+                                          static_cast<double>(diag_resolve_calls)
+                                   : 0.0,
+                 diag_resolve_calls ? diag_resolve_ns.count() / diag_resolve_calls : 0,
+                 diag_resolve_calls ? diag_replay_ns.count() / diag_resolve_calls : 0,
+                 diag_snapshot_mismatches);
     }
     return true;
 }
 
-void DrawResolver::Run(std::stop_token stop_token) {
-    while (true) {
-        while (job_phase.load(std::memory_order_acquire) != Phase::Resolving) {
-            if (stop_token.stop_requested()) {
-                return;
-            }
-            PauseSpin();
+void DrawResolver::ExecuteResolve() {
+    // Runs on the VulkanWorker (token mode) or inline (validation mode).
+    tls_engine_snapshot = shadow.get();
+    {
+        std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
+        const auto replay_start{Clock::now()};
+        if (slot_journal_size != 0) {
+            shadow->ReplayJournal(slot_journal, slot_journal_size);
         }
-        const auto kick_time{std::chrono::steady_clock::now()};
-        tls_engine_snapshot = shadow.get();
-        {
-            std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
-            job.pipeline->ConfigureResolve(job.ctx, job.is_indexed);
-        }
-        tls_engine_snapshot = nullptr;
-        const auto done{std::chrono::steady_clock::now()};
-        if (kick_time != std::chrono::steady_clock::time_point{}) {
-            diag_resolve_ns += done - kick_time;
-        }
-        job_phase.store(Phase::Resolved, std::memory_order_release);
+        const auto resolve_start{Clock::now()};
+        job.pipeline->ConfigureResolve(job.ctx, job.is_indexed);
+        diag_replay_ns += resolve_start - replay_start;
+        diag_resolve_ns += Clock::now() - resolve_start;
     }
+    tls_engine_snapshot = nullptr;
+    ++diag_resolve_calls;
+    job_phase.store(Phase::Resolved, std::memory_order_release);
 }
 
 void DrawResolver::FinishJob(Tegra::Engines::Maxwell3D& engine) {
@@ -150,6 +154,27 @@ void DrawResolver::FinishJob(Tegra::Engines::Maxwell3D& engine) {
     engine.dirty.flags_since_snapshot = {};
     engine.tracking_since_snapshot = false;
     job_phase.store(Phase::Idle, std::memory_order_release);
+}
+
+bool DrawResolver::VerifySnapshot(const Tegra::Engines::Maxwell3D& engine) {
+    // expected == shadow + journal entries parsed since the snapshot.
+    auto expected{shadow->regs};
+    for (size_t i = engine.reg_journal_consumed; i < engine.reg_journal_size; ++i) {
+        expected.reg_array[engine.reg_journal[i].method] = engine.reg_journal[i].value;
+    }
+    const u32* lhs{expected.reg_array.data()};
+    const u32* live{engine.regs.reg_array.data()};
+    for (size_t i = 0; i < expected.reg_array.size(); ++i) {
+        if (lhs[i] != live[i]) {
+            ++diag_snapshot_mismatches;
+            LOG_ERROR(Render_Vulkan,
+                      "DrawToken shadow mismatch at reg {:#x}: shadow={} live={} "
+                      "(mismatch #{})",
+                      i * sizeof(u32), lhs[i], live[i], diag_snapshot_mismatches);
+            return false;
+        }
+    }
+    return true;
 }
 
 } // namespace Vulkan

@@ -4,8 +4,8 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <memory>
-#include <thread>
 
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
@@ -16,15 +16,26 @@ class MemoryManager;
 
 namespace Vulkan {
 
-// (local-only) P2 depth-1 parallel draw resolver.
+// (local-only) P2 Step 2: draw tokens.
 //
-// The GPU thread snapshots draw N's engine state into the shadow engine and
-// kicks the resolver to run the binding-resolution phase; parsing of draw
-// N+1's command stream proceeds meanwhile. The commit phase (uploads +
+// The GPU thread snapshots a draw into the shadow engine and hands the
+// resolve phase (binding lookups) to the VulkanWorker through a scheduler
+// command, or runs it inline for validation. The commit phase (uploads +
 // scheduler records) always runs on the GPU thread, in draw order, at the
 // next rasterizer rendezvous. Exactly one job is in flight at any time.
+//
+// Snapshot modes:
+//  - FullCopy: copy regs/state every draw (depth-1 behaviour, known-good).
+//  - Journal:  maintain the shadow incrementally by replaying the engine's
+//              register-write journal; full copy only on (re)sync events
+//              (first use, channel switch, journal overflow).
 class DrawResolver {
 public:
+    enum class SnapshotMode : u8 {
+        FullCopy,
+        Journal,
+    };
+
     struct Job {
         GraphicsPipeline* pipeline{};
         bool is_indexed{};
@@ -43,15 +54,19 @@ public:
         return job_phase.load(std::memory_order_relaxed) != Phase::Idle;
     }
 
-    // GPU thread: block until the resolver finished the current job (returns
-    // immediately when idle). Bounded by one binding-resolution pass.
+    // GPU thread: block until the current job finished resolving (returns
+    // immediately when none is running).
     void WaitResolved();
 
-    // GPU thread: snapshot the draw into the shadow engine and kick the
-    // resolver. Returns false (doing nothing) when the draw must run
-    // synchronously.
-    bool SnapshotAndKick(Tegra::Engines::Maxwell3D& engine, GraphicsPipeline* pipeline,
-                         bool is_indexed, u32 instance_count);
+    // GPU thread: snapshot the draw into the shadow engine and enqueue it.
+    // Returns false (doing nothing) when the draw must run synchronously.
+    bool SnapshotAndEnqueue(Tegra::Engines::Maxwell3D& engine, GraphicsPipeline* pipeline,
+                            bool is_indexed, u32 instance_count);
+
+    // Execute the resolve phase. Runs on the VulkanWorker (token mode) or
+    // inline on the GPU thread (validation mode); the caller guarantees the
+    // job was enqueued and is not concurrently executed.
+    void ExecuteResolve();
 
     // GPU thread: after WaitResolved(), the finished job.
     Job& TakeJob() {
@@ -66,6 +81,25 @@ public:
     // release the job slot.
     void FinishJob(Tegra::Engines::Maxwell3D& engine);
 
+    // GPU thread, debug: verify the shadow converged to the live registers.
+    // Applies the not-yet-consumed journal entries to a scratch copy first,
+    // so writes parsed after the snapshot do not count as mismatches.
+    // Returns false and logs on the first divergent register.
+    bool VerifySnapshot(const Tegra::Engines::Maxwell3D& engine);
+
+    SnapshotMode snapshot_mode{SnapshotMode::Journal};
+    bool check_enabled{false};
+
+    // (local-only) P2 diagnostics (aggregate since startup)
+    u64 diag_kicks{};
+    u64 diag_fallbacks{};      // set by the rasterizer on sync fallback
+    u64 diag_resyncs{};        // journal-mode full copies
+    u64 diag_journal_entries{};// total journal entries replayed
+    u64 diag_resolve_calls{};
+    u64 diag_snapshot_mismatches{};
+    std::chrono::nanoseconds diag_resolve_ns{};
+    std::chrono::nanoseconds diag_replay_ns{};
+
 private:
     enum class Phase : u32 {
         Idle,
@@ -73,7 +107,7 @@ private:
         Resolved,
     };
 
-    void Run(std::stop_token stop_token);
+    void CopyDynamicState(Tegra::Engines::Maxwell3D& engine);
 
     Tegra::MemoryManager& gpu_memory;
     BufferCache& buffer_cache;
@@ -84,12 +118,15 @@ private:
     std::atomic<Phase> job_phase{Phase::Idle};
     Tegra::Engines::Maxwell3D::DirtyState::Flags dirty_snapshot{};
 
-    // (local-only) P2 diagnostics
-    u64 diag_kicks{};
-    u64 diag_wait_spins{};
-    std::chrono::nanoseconds diag_resolve_ns{};
-
-    std::jthread thread;
+    // Journal mode: entries copied from the engine at snapshot time, replayed
+    // into the shadow at execute time.
+    Tegra::Engines::Maxwell3D::JournalEntry
+        slot_journal[Tegra::Engines::Maxwell3D::JournalCapacity];
+    size_t slot_journal_size{};
+    // Engine instance the shadow is currently synchronized with (channel
+    // switches swap Maxwell3D objects; a different source forces a resync).
+    const Tegra::Engines::Maxwell3D* shadow_source{};
+    bool shadow_in_sync{};
 };
 
 } // namespace Vulkan

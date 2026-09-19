@@ -307,6 +307,7 @@ void Maxwell3D::ProcessDirtyRegisters(u32 method, u32 argument) {
     }
     regs.reg_array[method] = argument;
     ++change_generation;
+    RecordJournal(method, argument);
     for (auto const& table : dirty.tables) {
         const u8 flag = table[method];
         dirty.flags[flag] = true;
@@ -478,6 +479,8 @@ void Maxwell3D::ProcessFirmwareCall4() {
     // Firmware call 4 is a blob that changes some registers depending on its parameters.
     // These registers don't affect emulation and so are stubbed by setting 0xd00 to 1.
     regs.shadow_scratch[0] = 1;
+    // (local-only) P2 draw tokens: keep the journal bit-exact with regs.
+    RecordJournal(MAXWELL3D_REG_INDEX(shadow_scratch), 1);
 }
 
 void Maxwell3D::StampQueryResult(Core::System& system, u64 payload, bool long_query) {
@@ -636,6 +639,9 @@ void Maxwell3D::ProcessCBMultiData(const u32* start_base, u32 amount) {
 
     // Increment the current buffer position.
     regs.const_buffer.offset += static_cast<u32>(copy_size);
+    // (local-only) P2 draw tokens: this mutates regs outside the
+    // ProcessDirtyRegisters chokepoint; journal it for the shadow engine.
+    RecordJournal(MAXWELL3D_REG_INDEX(const_buffer.offset), regs.const_buffer.offset);
 }
 
 void Maxwell3D::ProcessCBData(u32 value) {
