@@ -2029,3 +2029,40 @@ deferred 同步模式 -9.4%（TAIL_IMM -6.9%）、epoch -3.5~4%——两者的�
 **28.15 入口**：① epoch hit/miss diag（若 miss 高→槽查找修复；若全 hit→memcmp 短路）；
 ② **里程碑 (b)：异步 resolve**（批量子交接，capture/resolve 移 VulkanWorker，GPU 线程
 只留 tail）；③ uProf IBS 归因散布成本（异步设计时一并看）。
+
+### 28.15 async 首攻：崩溃根因定位 + 禁用 + 命令块竞态结论（2026-09-20 凌晨）
+
+**实施（db89f73891）**：async 模式（EDEN_DRAW_TOKEN=async）= deferred inline 但 resolve
+经 scheduler chunk 派发不 drain。配套 async 竞态修复（对 deferred/sync 同样生效且被
+验证）：uniform masks 安装移到 GPU 线程快照时（resolve 段不再写 channel_state）、
+storage 绑定写从 resolve 段移 tail 侧（原为每 draw 的 worker-vs-tail 写竞态）、
+CaptureUniformEpoch 改读 pipeline 不可变布局。
+
+**诊断基建突破**：WER 事件 + PDB 符号化打通（ctypes/dbghelp 三层坑：GDI 句柄截断同款
+的 restype 问题、SYMBOL_INFO.SizeOfStruct 必须预填、ICF 折叠符号；最终用 cl 编译
+`F:\prof\sym.cpp` 工具，`sym.exe eden.exe <RVA>` 一击必中）。
+
+**epoch hit/miss 定论**：hit 96.5% / miss 0.3% / classic 3.4%——**epoch 的 -3.5~4%
+不是 miss，是捕获拷贝本身**；对症药=memcmp 短路（70.7% 内容重复，§28.13），下轮可做。
+
+**async 崩溃根因（符号化锁定）**：c0000005 @ `Scheduler::CommandChunk::Record`
+（vk_scheduler.h:220，命令块放置 new；ICF 折叠到 TextureCacheRuntime::CopyImage 的
+lambda）。机制：**worker 侧 ExecuteResolve → SynchronizeDescriptors → CopyImage →
+`scheduler.Record` 往"当前 chunk"追加命令——与同时在 record 的 GPU 线程并发写同一
+32KB 命令块**，command_offset 竞态 → 放置 new 踩坏 → 数分钟内必崩。sync 模式幸存纯因
+WaitWorker 把 GPU 线程挡住（Record 天然串行）。**结论：resolve 阶段的纹理运行时会
+记录调度器命令，"直接不 drain"结构性不可行；正解=批量子交接（resolver 私有命令捕获，
+GPU 线程合并）——这正是原计划里 milestone (b) 的真身。** async 已禁用（env 保留解析、
+警告回退 inline，415156d9ef）。
+
+**nvoglv64 连锁（记录，未结案）**：async 损坏命令提交 GPU 后，后续进程出现 nvoglv64
+启动期崩溃（01:19/01:36，均 boot 后 ~35s）+ 一次 WU 服务崩溃；机器当晚处于不稳态，
+golden 局 4 连败（token 局全胜疑为巧合小样本），按"机器异常=数据作废"纪律停测。
+**下轮第一件事：确认机器恢复（必要时重启），再补 golden 图像 QA。**
+
+**deferred+epoch 在新血统上稳定**（ep5/6/7：35.98/36.83/36.83，med 26.67-27.50，
+0 mismatch，hits 96.5%）——storage-move 重构健康。
+
+**28.16 入口**：① 机器状态确认 + golden QA 补测；② memcmp 短路（回收 epoch 拷贝成本）；
+③ 批量子交接设计实施（resolver 私有命令捕获 + GPU 线程合并点）——async 的正解；
+④ uProf。
