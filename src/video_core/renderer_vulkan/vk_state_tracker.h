@@ -292,6 +292,15 @@ public:
 
     void InvalidateState();
 
+    // (local-only) P2 draw tokens: retarget the flag set consumed by the
+    // Touch*/Exchange family to another engine's flags (the token shadow)
+    // for the duration of a commit, so consumption is visible to the dirty
+    // merge instead of hitting the live engine's aliased set. Restore to
+    // the live engine's flags afterwards.
+    void RetargetFlags(Tegra::Engines::Maxwell3D::DirtyState::Flags& target) {
+        flags = &target;
+    }
+
 private:
     static constexpr auto INVALID_TOPOLOGY = static_cast<Maxwell::PrimitiveTopology>(~0u);
 

@@ -325,7 +325,12 @@ void RasterizerVulkan::CommitPendingDraw() {
         // Cache code inside the commit reads the snapshot engine.
         VideoCommon::tls_engine_snapshot = &shadow;
         std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
+        // Consume dirty flags on the shadow so the dirty merge sees what the
+        // Touch* family consumed (they operate on whichever flag set the
+        // state tracker points at).
+        state_tracker.RetargetFlags(shadow.dirty.flags);
         FinishDrawLocked(shadow, *job.pipeline, job.ctx, job.is_indexed, job.instance_count);
+        state_tracker.RetargetFlags(maxwell3d->dirty.flags);
         VideoCommon::tls_engine_snapshot = nullptr;
     }
     // Deferred inline writes follow the committed draw in stream order; they
@@ -461,8 +466,10 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
             {
                 VideoCommon::tls_engine_snapshot = &shadow;
                 std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
+                state_tracker.RetargetFlags(shadow.dirty.flags);
                 FinishDrawLocked(shadow, *job.pipeline, job.ctx, job.is_indexed,
                                  job.instance_count);
+                state_tracker.RetargetFlags(maxwell3d->dirty.flags);
                 VideoCommon::tls_engine_snapshot = nullptr;
             }
             ApplyDeferredInlineWrites();
