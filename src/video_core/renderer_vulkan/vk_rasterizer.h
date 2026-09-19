@@ -264,7 +264,17 @@ private:
     std::unique_ptr<DrawResolver> resolver;
     std::atomic<bool> pending_commit{false};
     std::thread::id gpu_thread_id{};
-    std::vector<std::pair<GPUVAddr, std::vector<u8>>> deferred_inline_writes;
+    // Guest writes deferred while a token job is in flight; a flat arena
+    // avoids a heap allocation per deferred push (CB data between draws).
+    struct DeferredWrite {
+        GPUVAddr addr;
+        u32 offset;
+        u32 size;
+    };
+    std::vector<u8> deferred_arena;
+    std::vector<DeferredWrite> deferred_records;
+    u64 deferred_writes_total{};
+    u64 deferred_bytes_total{};
     u64 pipelined_draws{};
     u64 fallback_draws{};
 };

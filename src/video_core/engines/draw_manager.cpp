@@ -209,7 +209,7 @@ void Maxwell3D::DrawManager::DrawEnd(Maxwell3D& maxwell3d, u32 instance_count, b
         draw_state.index_buffer = maxwell3d.regs.index_buffer;
         draw_state.index_buffer.count = u32(draw_state.inline_index_draw_indexes.size() / 4);
         draw_state.index_buffer.format = Maxwell3D::Regs::IndexFormat::UnsignedInt;
-        maxwell3d.dirty.flags[VideoCommon::Dirty::IndexBuffer] = true;
+        maxwell3d.SetDirtyFlag(VideoCommon::Dirty::IndexBuffer);
         ProcessDraw(maxwell3d, true, instance_count);
         draw_state.inline_index_draw_indexes.clear();
         break;
@@ -224,7 +224,7 @@ void Maxwell3D::DrawManager::DrawIndexSmall(Maxwell3D& maxwell3d, u32 argument) 
     draw_state.index_buffer.first = index_small_params.first;
     draw_state.index_buffer.count = index_small_params.count;
     draw_state.topology = index_small_params.topology;
-    maxwell3d.dirty.flags[VideoCommon::Dirty::IndexBuffer] = true;
+    maxwell3d.SetDirtyFlag(VideoCommon::Dirty::IndexBuffer);
     ProcessDraw(maxwell3d, true, 1);
 }
 

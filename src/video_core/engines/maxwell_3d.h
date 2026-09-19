@@ -3203,6 +3203,18 @@ public:
                       static_cast<u32>(value));
     }
 
+    // (local-only) P2 draw tokens: direct dirty-flag sets outside
+    // ProcessDirtyRegisters (HLE macros) must participate in
+    // flags_since_snapshot tracking, or the snapshot dirty merge can drop
+    // them while a token job is in flight (e.g. Dirty::Shaders -> stale
+    // pipeline -> missing draws).
+    void SetDirtyFlag(u8 flag) {
+        dirty.flags[flag] = true;
+        if (tracking_since_snapshot) [[unlikely]] {
+            dirty.flags_since_snapshot[flag] = true;
+        }
+    }
+
     // Applies journal entries to this engine's flat register array. Used by
     // the draw-token shadow, which converges to the live register state.
     void ReplayJournal(const JournalEntry* entries, size_t count) {

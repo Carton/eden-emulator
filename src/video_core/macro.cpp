@@ -143,7 +143,7 @@ void HLE_DrawIndexedIndirect::Execute(Core::System& system, Engines::Maxwell3D& 
     SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(vertex_id_base), element_base);
     SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(global_base_vertex_index), element_base);
     SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(global_base_instance_index), base_instance);
-    maxwell3d.dirty.flags[VideoCommon::Dirty::IndexBuffer] = true;
+    maxwell3d.SetDirtyFlag(VideoCommon::Dirty::IndexBuffer);
     if (extended) {
         maxwell3d.engine_state = Maxwell3D::EngineHint::OnHLEMacro;
         maxwell3d.SetHLEReplacementAttributeType(0, 0x640, Maxwell3D::HLEReplacementAttributeType::BaseVertex);
@@ -158,7 +158,7 @@ void HLE_DrawIndexedIndirect::Execute(Core::System& system, Engines::Maxwell3D& 
     params.buffer_size = 5 * sizeof(u32);
     params.max_draw_counts = 1;
     params.stride = 0;
-    maxwell3d.dirty.flags[VideoCommon::Dirty::IndexBuffer] = true;
+    maxwell3d.SetDirtyFlag(VideoCommon::Dirty::IndexBuffer);
     maxwell3d.draw_manager.DrawIndexedIndirect(maxwell3d, topology, 0, estimate);
     SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(vertex_id_base), 0x0);
     SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(global_base_vertex_index), 0x0);
@@ -176,7 +176,7 @@ void HLE_DrawIndexedIndirect::Fallback(Core::System& system, Engines::Maxwell3D&
     SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(vertex_id_base), element_base);
     SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(global_base_vertex_index), element_base);
     SetRegJournaled(maxwell3d, MAXWELL3D_REG_INDEX(global_base_instance_index), base_instance);
-    maxwell3d.dirty.flags[VideoCommon::Dirty::IndexBuffer] = true;
+    maxwell3d.SetDirtyFlag(VideoCommon::Dirty::IndexBuffer);
     if (extended) {
         maxwell3d.engine_state = Maxwell3D::EngineHint::OnHLEMacro;
         maxwell3d.SetHLEReplacementAttributeType(0, 0x640, Maxwell3D::HLEReplacementAttributeType::BaseVertex);
@@ -218,7 +218,7 @@ void HLE_MultiDrawIndexedIndirectCount::Execute(Core::System& system, Engines::M
         const u32 stride = indirect_words * sizeof(u32);
         const std::size_t draw_count = end_indirect - start_indirect;
         const u32 estimate = u32(maxwell3d.EstimateIndexBufferSize());
-        maxwell3d.dirty.flags[VideoCommon::Dirty::IndexBuffer] = true;
+        maxwell3d.SetDirtyFlag(VideoCommon::Dirty::IndexBuffer);
         auto& params = maxwell3d.draw_manager.indirect_state;
         params.is_byte_count = false;
         params.is_indexed = true;
@@ -228,7 +228,7 @@ void HLE_MultiDrawIndexedIndirectCount::Execute(Core::System& system, Engines::M
         params.buffer_size = stride * draw_count;
         params.max_draw_counts = draw_count;
         params.stride = stride;
-        maxwell3d.dirty.flags[VideoCommon::Dirty::IndexBuffer] = true;
+        maxwell3d.SetDirtyFlag(VideoCommon::Dirty::IndexBuffer);
         maxwell3d.engine_state = Maxwell3D::EngineHint::OnHLEMacro;
         maxwell3d.SetHLEReplacementAttributeType(0, 0x640, Maxwell3D::HLEReplacementAttributeType::BaseVertex);
         maxwell3d.SetHLEReplacementAttributeType(0, 0x644, Maxwell3D::HLEReplacementAttributeType::BaseInstance);
@@ -271,7 +271,7 @@ void HLE_MultiDrawIndexedIndirectCount::Fallback(Core::System& system, Engines::
         maxwell3d.SetHLEReplacementAttributeType(0, 0x644, Maxwell3D::HLEReplacementAttributeType::BaseInstance);
         maxwell3d.CallMethod(system, 0x8e3, 0x648, true);
         maxwell3d.CallMethod(system, 0x8e4, u32(index), true);
-        maxwell3d.dirty.flags[VideoCommon::Dirty::IndexBuffer] = true;
+        maxwell3d.SetDirtyFlag(VideoCommon::Dirty::IndexBuffer);
         maxwell3d.draw_manager.DrawIndex(maxwell3d, topology, parameters[base + 2], parameters[base], base_vertex, base_instance, parameters[base + 1]);
     }
 }
@@ -332,7 +332,7 @@ void HLE_BindShader::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d
     }
 
     maxwell3d.JournalWord(regs.pipelines[index & 0xF].offset, parameters[2]);
-    maxwell3d.dirty.flags[VideoCommon::Dirty::Shaders] = true;
+    maxwell3d.SetDirtyFlag(VideoCommon::Dirty::Shaders);
     maxwell3d.JournalWord(regs.shadow_scratch[28 + index], parameters[1]);
     maxwell3d.JournalWord(regs.shadow_scratch[34 + index], parameters[2]);
 

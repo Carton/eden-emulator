@@ -352,13 +352,14 @@ void RasterizerVulkan::WaitForDrawResolve() {
 }
 
 void RasterizerVulkan::ApplyDeferredInlineWrites() {
-    if (deferred_inline_writes.empty()) {
+    if (deferred_records.empty()) {
         return;
     }
-    for (auto& [addr, bytes] : deferred_inline_writes) {
-        gpu_memory->WriteBlockCached(addr, bytes.data(), bytes.size());
+    for (const auto& rec : deferred_records) {
+        gpu_memory->WriteBlockCached(rec.addr, deferred_arena.data() + rec.offset, rec.size);
     }
-    deferred_inline_writes.clear();
+    deferred_records.clear();
+    deferred_arena.clear();
 }
 
 bool RasterizerVulkan::TryDeferInlineWrite(GPUVAddr addr, std::span<const u8> data) {
@@ -366,7 +367,11 @@ bool RasterizerVulkan::TryDeferInlineWrite(GPUVAddr addr, std::span<const u8> da
         std::this_thread::get_id() != gpu_thread_id) {
         return false;
     }
-    deferred_inline_writes.emplace_back(addr, std::vector<u8>(data.begin(), data.end()));
+    deferred_records.push_back(
+        {addr, static_cast<u32>(deferred_arena.size()), static_cast<u32>(data.size())});
+    deferred_arena.insert(deferred_arena.end(), data.begin(), data.end());
+    ++deferred_writes_total;
+    deferred_bytes_total += data.size();
     return true;
 }
 
@@ -445,6 +450,12 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
     if (resolver->SnapshotAndEnqueue(*maxwell3d, pipeline, is_indexed, instance_count)) {
         pending_commit.store(true, std::memory_order_release);
         ++pipelined_draws;
+        if (pipelined_draws % 2000 == 0) {
+            LOG_INFO(Render_Vulkan,
+                     "DrawToken diag: pipelined={} deferred_writes={} deferred_mb={:.2f}",
+                     pipelined_draws, deferred_writes_total,
+                     static_cast<double>(deferred_bytes_total) / 1048576.0);
+        }
         if (token_mode == TokenMode::SyncWorker) {
             // Hand the resolve to the VulkanWorker and drain it: exercises
             // the worker-side execution path with zero concurrency.
