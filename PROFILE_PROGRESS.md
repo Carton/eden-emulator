@@ -1672,3 +1672,39 @@ resolver 全套诊断计数、以及"事件日志偏移→llvm-symbolizer 秒级
 - bench 结果补记：p2b-gateoff-c1 ×3 与 p2b-wait-on-c1 ×2 均为 void 局（CSV 里
   12:35/13:24/13:28 三行 40.54 与两行 16.99 作废）；有效局：p2b-fixed/p2b-pinned/
   p2b-final-off。
+
+## 27. P2 续航前分析轮：重画像 + 生态调研 + 方案重构（2026-09-19 下午）
+
+### 27.1 新鲜 OFF 模式画像（p2_off.etl，40s 水塘，GPU 线程 60,186 采样）
+剔除采样器噪声(~13%)与未符号化后，GPU 线程真实工作分布：
+| 簇 | 占比 | 内容 | 可并行性 |
+|---|---|---|---|
+| A 解析/状态机 | ~22% | DmaPusher/Maxwell3D 方法分派、ProcessDirtyRegisters+ConsumeSink(2.7%)、宏解释器、CB 写 | 串行本质 |
+| B 绑定解析 | ~11% | ConfigureImpl、VisitImageView/PrepareImageView(2.7%)、GetSamplerId 族、描述符表读、RefreshContents(1.2%,实为上传) | **干净可并行（depth-1 实测 0.87µs/draw 与此吻合）** |
+| C 上传/缓冲同步 | ~19% | BindHostGraphicsUniformBuffer(1.5%)、MarkUsage/TouchBuffer/FindBuffer(2.8%)、脏区间追踪(3%)、流缓冲 | 部分可并行（需每线程 ring） |
+| D 提交串行 | ~13% | FixedPipelineState::Refresh(1.1%)、动态状态、PushImageDescriptors(1.8%)、memcmp 去重(1.9%)、hash 族(1.9%) | 串行，但有 memo/去重空间 |
+| E 内存杂项 | ~8% | **堆分配 2.6%**、小 memcpy(MoveSmall4) 3.5% | 串行减负目标 |
+
+**修正结论：§25.5 的"23% 可并行池"偏乐观；干净池=B≈11%，加 C 部件天花板 ~13-15%。**
+E+D 里另有 ~4-6% 不需要线程的串行减负（堆churn、memcmp/hash、GpuToCpuAddress 1.5%）。
+
+### 27.2 生态调研（codex gpt-5.6-luna，存档 F:\prof\codex_gpu_parallel_research.md）
+- **全生态无先例**：RPCS3/PCSX2/Dolphin/Azahar/Citron/yuzu/Ryujinx/Xenia 全部保持 per-draw
+  解析有序——per-draw 绑定解析并行化无人做过；depth-1 撞的墙大家都在绕。
+- **PCSX2 MTGS**=最近先例：批量交接（绝不 per-draw）、cache line 对齐的生产/消费指针、
+  自适应自旋→阻塞、**显式限制缓冲深度防输入延迟**（正中用户延迟关切）。
+- **Xenia**：命令路径事件等待太贵，spin-then-block。**RPCS3 #18828**：offloader 自旋烧核
+  导致 stall——与我们 SMT 教训同型。
+- **codex 最有价值的建议：不再造解析线程，把绑定解析搬到既有 VulkanWorker**（余量
+  50%+），GPU 线程发**紧凑带版本号的 draw token**（地址+代数，~300B，非 16KB 快照），
+  经现有 CommandChunk 队列（天然批量化=PCSX2 模式）交给 worker 解析+上传+录制。
+  无新线程、无新握手、顺序由单 worker 天然保持。难点=缓存所有权移交 worker + guest
+  内存 epoch。次选：32-128 draw 批粒度解析池。PCSX2 draw-buffering（万级 draw 合并
+  到千级）是另一轴但风险高。
+
+### 27.3 buffer/延迟问题澄清（对用户关切的正面回答）
+- depth-2/worker-token 方案**不需要任何新的帧级缓冲**。现有"3 buffer"=呈现链(swapchain)
+  与 FRAMES_IN_FLIGHT=8 描述符环，均不动。新引入的只是 **KB 级内存对象**（2-3 个 16KB
+  快照槽或 ~300B token 槽）——它们是帧内 draw 级流水（µs 尺度），帧 N 仍在最后一个 draw
+  录完时就绪，不多等任何 vsync。**输入延迟不变或略降（帧产出更快）**，60Hz 量化不受影响。
+  PCSX2 源码同样警告帧级缓冲伤延迟——我们恰好不做那个。
