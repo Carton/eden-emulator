@@ -269,6 +269,16 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
 
     FlushPendingDraw();
 
+    // (local-only) per-draw timing diag: whole serial draw path, averaged
+    // over thousands of draws so scene load bands cancel out.
+    const auto prepare_start{std::chrono::steady_clock::now()};
+    SCOPE_EXIT {
+        diag_prepare_ns += std::chrono::steady_clock::now() - prepare_start;
+        if (++diag_prepare_calls % 5000 == 0) {
+            LOG_INFO(Render_Vulkan, "SerialDraw diag: calls={} prepare_avg_ns={}",
+                     diag_prepare_calls, diag_prepare_ns.count() / diag_prepare_calls);
+        }
+    };
     SCOPE_EXIT {
         gpu.TickWork();
     };
@@ -329,7 +339,10 @@ void RasterizerVulkan::CommitPendingDraw() {
         // Touch* family consumed (they operate on whichever flag set the
         // state tracker points at).
         state_tracker.RetargetFlags(shadow.dirty.flags);
+        const auto tail_start{std::chrono::steady_clock::now()};
         FinishDrawLocked(shadow, *job.pipeline, job.ctx, job.is_indexed, job.instance_count);
+        diag_tail_ns += std::chrono::steady_clock::now() - tail_start;
+        ++diag_tail_calls;
         state_tracker.RetargetFlags(maxwell3d->dirty.flags);
         VideoCommon::tls_engine_snapshot = nullptr;
     }
@@ -482,9 +495,14 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
         ++pipelined_draws;
         if (pipelined_draws % 2000 == 0) {
             LOG_INFO(Render_Vulkan,
-                     "DrawToken diag: pipelined={} deferred_writes={} deferred_mb={:.2f}",
+                     "DrawToken diag: pipelined={} deferred_writes={} deferred_mb={:.2f} "
+                     "resolve_avg_ns={} tail_avg_ns={}",
                      pipelined_draws, deferred_writes_total,
-                     static_cast<double>(deferred_bytes_total) / 1048576.0);
+                     static_cast<double>(deferred_bytes_total) / 1048576.0,
+                     resolver->diag_resolve_calls
+                         ? resolver->diag_resolve_ns.count() / resolver->diag_resolve_calls
+                         : 0,
+                     diag_tail_calls ? diag_tail_ns.count() / diag_tail_calls : 0);
         }
         if (token_mode == TokenMode::SyncWorker) {
             // Hand the resolve to the VulkanWorker and drain it: exercises

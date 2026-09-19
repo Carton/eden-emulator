@@ -8,6 +8,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <thread>
 #include <vector>
 
@@ -280,6 +281,11 @@ private:
     u64 deferred_bytes_total{};
     u64 pipelined_draws{};
     u64 fallback_draws{};
+    // (local-only) per-draw timing diag (band-immune regression attribution)
+    std::chrono::nanoseconds diag_tail_ns{};      // commit phase (token mode)
+    u64 diag_tail_calls{};
+    std::chrono::nanoseconds diag_prepare_ns{};   // whole serial PrepareDraw
+    u64 diag_prepare_calls{};
 };
 
 } // namespace Vulkan
