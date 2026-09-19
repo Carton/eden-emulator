@@ -1793,7 +1793,8 @@ flags_since_snapshot）→Dirty::Shaders 丢→管线缓存陈旧。修：SetDir
 （该修复真实必要，但不是右缘 bug 的根因——右缘在修复后依旧。）
 
 ### 28.6 性能：token 各模式 -12~17%（未解，阻塞里程碑 b 前必须查）
-**【28.11 撤回】本表数字为跨档混合（golden 快档 vs token 慢档），同档交错对实测 -0.7%。**
+**【28.13 终版】成本=瓶颈耦合：med 22.5 档 -11%+ / 24.17 档 -6.9%（n=2）/ 25.00 档
+-0.7%（n=3）——本表 17:xx 数字是快档真值，28.11 的"-0.7% 撤回"是慢档掩盖值。**
 | 局 | fps | med |
 |---|---|---|
 | golden4/5/6（token 关） | 43.87/42.23/40.99 | 22.50/22.50/23.34 |
@@ -1900,7 +1901,10 @@ ETW 复用要点：MCP 大 trace（1GB）下会丢已处理状态，查询尽量
 | 2 | 37.04 (26.67) | 38.74 (25.83) | 1.0459 |
 | 3 | 39.58 (25.00) | 39.30 (25.00) | 0.9929 |
 
-中位 **0.9929（-0.7%）**，带内 0.986–1.046 → **token-tailimm 同档成本≈噪声级**。
+中位 **0.9929（-0.7%）**，带内 0.986–1.046 → token-tailimm 同档成本≈噪声级。
+**【28.13 修正】这个 -0.7% 是慢档（med 25.00，全场被非 GPU 线程瓶颈压住）下的
+掩盖值；CPU-bound 档（med 24.17，luma 配对）实测 -6.9%。本节"撤回 -12%"的判断
+错了——-11%（17:xx）与 -0.7%（本节）都是真实的档位耦合测量。**
 
 **§28.6 的 -12~17% 撤回**：那是跨档混合——golden 局全落快档（med 22.50=27×0.83ms 栅格）、
 token 局全落慢档（med 25.83+，相邻档位差恰好 ~11%），交错时间轴上按臂交替"巧合"曾误导
@@ -1931,3 +1935,65 @@ TAIL_IMM 即时提交语义一致：无 pending draw 就无需延迟）。
 master 不可跑 TOTK 等过时条目）——本文件保留案例与推导，规则以 AGENTS.md 为准。
 
 28.12 起为后续（快档确认对 / uProf / epoch 槽）。
+
+### 28.12 §28.12 执行轮：快档确认看门狗 + epoch 槽设计定稿（2026-09-19 深夜三）
+
+**快档确认对（自动化）**：`F:\prof\band_watch.py`（detached 运行，日志
+`F:\prof\band_watch.log`）——机器静置 ≥180s 且无 eden 时自动跑 golden 档位探针
+（含 luma）→ 无条件接跑 2 对交错对（golden vs token-tailimm）。判读：
+探针 med≈22.5=快档环境 → 对比值即 token 真实 CPU-bound 成本；med≈25=慢档环境
+（今晚环境 +2.5ms 的状态仍在）→ 又一组同档确认。**注意本子节动笔时对 17:xx
+数据重读后发现：17:xx 时段 golden 全快档/token 全慢档按臂交替 → token 在快档
+环境的真实成本从未被干净测过；今晚 -0.7% 只证明慢档环境下无增量。**
+
+**epoch 槽设计定稿（右缘 bug① 修复 + 里程碑 b 前置，代码研究完成）**：
+- 洞口位置：`buffer_cache.h` UpdateUniformBuffers 快速路径（~998-1006 行）——
+  `BindMappedUniformBuffer` 后 memcpy 直接读 guest（`device_memory.GetPointer`），
+  无任何失效追踪；tail 延迟 ~1 draw 执行 = 右缘 bug 的竞态窗。
+- 方案：**resolve 阶段**（快照时同步语义）已算出每绑定 {device_addr,size}——
+  在此把各绑定内容 memcpy 进 job 内联槽（arena，FinishJob 归还）；tail 的
+  UpdateUniformBuffers 快速路径改为"槽优先"（job 槽命中→读槽，无槽→旧行为，
+  serial 模式零改动）。语义=串行等价（resolve 时刻=串行的读时刻）。
+- 附加收益：tail 变成 job 的纯函数 → 可整体搬离 GPU 线程（里程碑 b 核心）。
+- 前置测量：`EDEN_UNIFORM_STATS=1`（buffer_cache.h:70 的 copies/identical/
+  bytes 日志）量水塘每 draw uniform 字节数 → 定槽容量（预估几百字节~几 KB）。
+  该测量需要游戏运行，排进下一个静置窗（watcher 跑完后）。
+
+**uProf 侦察**：`AMDuProfCLI.exe`（bin 下）有 collect 子命令可挂程序采样；
+CLI help 走控制台 API 不吃重定向（挂起两回），具体 IBS 事件参数下轮用 GUI 或
+官方文档定。仅当快档确认对显示真实回退时才启用。
+
+### 28.13 §28.12 结果轮：token 成本=瓶颈耦合（终版）+ epoch 槽容量实测（2026-09-19 深夜四，watcher 自动）
+
+**看门狗战果**（band_watch.py 23:06-23:27 自动，机器静置触发）：
+- 探针 golden-band1：med **24.17**（29 tick，新中档）、luma **56.8**——比 17:38
+  快档的 60.8 暗 7%，场景光照/天气确实在漂移；档位=连续负载被 0.83ms tick 量化。
+- 2 对交错对，**对内 luma 配对成功**（56.8/56.7、56.8/56.6）：
+  golden 41.01 vs token 37.39（**-8.8%**）、golden 40.54 vs token 38.50（-5.0%），
+  **中位 -6.9%**。
+
+**终版结论（修正 §28.11 的撤回——那次撤回本身错了）**：
+| 档位（med） | token-tailimm 成本 | n |
+|---|---|---|
+| 22.50（17:xx 快档） | 推算 -11%+ | 跨局 |
+| 24.17（23:1x 中档） | **-6.9%（-8.8/-5.0）** | 2 对 luma 配对 |
+| 25.00（21:39 慢档） | -0.7% | 3 对 |
+
+-11% 与 -0.7% **都是真实测量**：token 成本是瓶颈耦合的——CPU-bound 档全额显形，
+重负载档被非 GPU 线程瓶颈掩盖。判档用 med+luma（luma 列已自动化），跨档比值不可比。
+
+**归因账本**：观测净增 ~0.8µs/draw（2.4ms/帧 ÷ ~3000 draws/帧）vs 计时器覆盖
+resolve 0.66µs + tail 1.69µs（tail 与串行路径重叠，非净增）→ 散布成本嫌疑：
+ProcessDirtyRegisters 内 journal 记录（27 次/draw）、影子/dirty 维护、
+deferred-write 检查、双 CurrentGraphicsPipeline 查找——**uProf IBS @ CPU-bound 档**
+做函数级归因（share 采样看不见的缓存损失也在此列）。
+
+**epoch 槽容量实测**（EDEN_UNIFORM_STATS=1 局，fps 9.2 属插桩正常，数据有效）：
+copies=18,841,965 / draws=4,350,000 = **4.33 次/draw**，7070MiB/18.84M =
+**~393B/次 ≈ 1.7KB/draw**；**70.7% 拷贝内容与同绑定上次完全相同**——槽实现带
+memcmp 短路（内容未变跳拷贝），同时量化了 uniform dedup backlog 的收益上限。
+（stats 插桩本身 ~15µs/draw：prepare 3.2→17.9µs。）
+
+**28.14 入口**：① uProf IBS @ CPU-bound 档归因散布成本；② epoch 槽实施
+（设计定稿见 28.12：UpdateGraphicsBuffers 挪 resolve 尾部 + job 内联内容槽，
+tail 槽优先——修右缘 bug① + 异步前置）；③ 视 ① 决定先调同步模式还是直上异步。
