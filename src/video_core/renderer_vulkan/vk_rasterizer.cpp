@@ -269,7 +269,6 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
         return;
     }
 
-    draw_engine = maxwell3d;
     UpdateDynamicStates(*maxwell3d);
 
     query_cache.NotifySegment(true);
@@ -343,7 +342,6 @@ void RasterizerVulkan::FinishDrawLocked(Tegra::Engines::Maxwell3D& engine,
                                         GraphicsPipeline& pipeline, DrawContext& ctx,
                                         bool is_indexed, u32 instance_count) {
     // Caller holds buffer_cache.mutex + texture_cache.mutex.
-    draw_engine = &engine;
     if (!pipeline.ConfigureTail(ctx, is_indexed)) {
         return;
     }
@@ -498,7 +496,6 @@ void RasterizerVulkan::DrawTexture() {
     texture_cache.SynchronizeDescriptors(false);
     texture_cache.UpdateRenderTargets(false);
 
-    draw_engine = maxwell3d;
     UpdateDynamicStates(*maxwell3d);
 
     query_cache.NotifySegment(true);
@@ -638,7 +635,7 @@ void RasterizerVulkan::Clear(u32 layer_count) {
 
     query_cache.NotifySegment(true);
     query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64, maxwell3d->regs.zpass_pixel_count_enable);
-    UpdateViewportsState(regs);
+    UpdateViewportsState(*maxwell3d);
 
     const u32 color_attachment = regs.clear_surface.RT;
     if (use_color && framebuffer->HasAspectColorBit(color_attachment)) {
@@ -1242,7 +1239,7 @@ void RasterizerVulkan::UpdateDynamicStates(Tegra::Engines::Maxwell3D& engine) {
         flags[Dirty::PrimitiveRestartEnable] = true;
     }
 
-    UpdateViewportsState(regs);
+    UpdateViewportsState(engine);
     UpdateScissorsState(regs);
     UpdateDepthBias(regs);
     UpdateBlendConstants(regs);
@@ -1311,7 +1308,7 @@ void RasterizerVulkan::UpdateDynamicStates(Tegra::Engines::Maxwell3D& engine) {
 
     if (device.IsExtVertexInputDynamicStateSupported()) {
         if (auto* gp = pipeline_cache.CurrentGraphicsPipeline(); gp && gp->HasDynamicVertexInput()) {
-            UpdateVertexInput(regs);
+            UpdateVertexInput(engine);
         }
     }
 }
@@ -1345,12 +1342,13 @@ void RasterizerVulkan::HandleTransformFeedback(Tegra::Engines::Maxwell3D& engine
     }
 }
 
-void RasterizerVulkan::UpdateViewportsState(Tegra::Engines::Maxwell3D::Regs& regs) {
+void RasterizerVulkan::UpdateViewportsState(Tegra::Engines::Maxwell3D& engine) {
     if (!state_tracker.TouchViewports()) {
         return;
     }
 
-    draw_engine->dirty.flags[Dirty::Scissors] = true;
+    auto& regs = engine.regs;
+    engine.dirty.flags[Dirty::Scissors] = true;
 
     if (!regs.viewport_scale_offset_enabled) {
         float x = static_cast<float>(regs.surface_clip.x);
@@ -2051,8 +2049,9 @@ void RasterizerVulkan::UpdateStencilTestEnable(Tegra::Engines::Maxwell3D::Regs& 
     });
 }
 
-void RasterizerVulkan::UpdateVertexInput(Tegra::Engines::Maxwell3D::Regs& regs) {
-    auto& dirty{draw_engine->dirty.flags};
+void RasterizerVulkan::UpdateVertexInput(Tegra::Engines::Maxwell3D& engine) {
+    auto& regs = engine.regs;
+    auto& dirty{engine.dirty.flags};
     const bool vertex_input_dirty = dirty[Dirty::VertexInput];
     const bool vertex_buffers_dirty = dirty[VideoCommon::Dirty::VertexBuffers];
     if (!vertex_input_dirty && !vertex_buffers_dirty) {

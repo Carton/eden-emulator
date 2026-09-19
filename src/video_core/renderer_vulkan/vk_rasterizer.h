@@ -178,7 +178,7 @@ private:
 
     void HandleTransformFeedback(Tegra::Engines::Maxwell3D& engine);
 
-    void UpdateViewportsState(Tegra::Engines::Maxwell3D::Regs& regs);
+    void UpdateViewportsState(Tegra::Engines::Maxwell3D& engine);
     void UpdateScissorsState(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateDepthBias(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateBlendConstants(Tegra::Engines::Maxwell3D::Regs& regs);
@@ -209,7 +209,7 @@ private:
     void UpdateBlending(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateColorWriteEnable(Tegra::Engines::Maxwell3D::Regs& regs);
 
-    void UpdateVertexInput(Tegra::Engines::Maxwell3D::Regs& regs);
+    void UpdateVertexInput(Tegra::Engines::Maxwell3D& engine);
 
     Tegra::GPU& gpu;
     Tegra::MaxwellDeviceMemoryManager& device_memory;
@@ -254,7 +254,6 @@ private:
     std::atomic<bool> pending_commit{false};
     std::thread::id gpu_thread_id{};
     std::vector<std::pair<GPUVAddr, std::vector<u8>>> deferred_inline_writes;
-    Tegra::Engines::Maxwell3D* draw_engine{}; // engine of the draw being committed
     u64 pipelined_draws{};
     u64 fallback_draws{};
 };
