@@ -1627,3 +1627,48 @@ ConfigureImpl 拆两相：
   调两相。bench 必须 == 基线。
 - **Commit B（门控+线程）**：DrawResolver 类 + shadow 快照 + tls 覆盖 + 屏障。
   bench ON vs OFF 各 n≥2。
+
+### 26.6 Commit B 实施 + depth-1 判负 autopsy（2026-09-19 下午）
+
+**实施**（全部 `EDEN_PARALLEL_DRAW` 门控，默认关）：Commit A（两相拆分）+ Commit B
+（DrawResolver 线程 + shadow Maxwell3D 快照 + 缓存 Engine3D() tls 覆盖 + 脏位合并 +
+全入口屏障 + 内联写延迟）。覆盖率 100%（5.79M kicks / 0 fallback），resolver 平均
+**0.87µs/任务**——机器本身工作正常。
+
+**三连环正确性 bug（全部修复，皆因 resolver 并发读暴露）**：
+1. Clear() 路径在首次 draw 前调 UpdateViewportsState → draw_engine 空指针启动崩溃
+   （事件日志偏移 + llvm-symbolizer 一击定位）。修复：helper 改收 engine&。
+2. **撕裂读**：assert "Invalid sampler filter=3"——GPU 线程 guest 内存写与 resolver 读
+   竞争（DMA fallback/inline 上传不走 rasterizer 入口）。修复：延迟写钩子下沉到
+   `MemoryManager::WriteBlockImpl` 单一咽喉（仅 GPU 线程 + resolve 在飞时入队），
+   + `Map/MapSparse/Unmap` 页表变更前 `WaitForDrawResolve()`。
+3. wait 版 Run 循环把 Resolved 也当任务 → 同 job 双重 resolve → views 数翻倍 assert。
+   修复：状态机严格只认 Resolving。
+
+**性能 autopsy（ON 模式演进，pond 场景 ~2900 draw/帧）**：
+| 版本 | fps/med | 根因 |
+|---|---|---|
+| spin 版 | 20.8 / 47.5 | **pause 自旋占 SMT 兄弟核**，JIT 核被抢半（ETW：GPU 线程仅 57% 忙，帧被 guest CPU 限速） |
+| WaitOnAddress 版 | 12.4 / 80.0 | **每 kick 唤醒延迟 10-20µs × 2900/帧 = +40ms/帧** |
+| 绑核+spin 版 | 32.4 / 30.0 | 上述两项消除后剩**结构地板**：每 draw 快照 16KB（L1 一半，抖掉解析器工作集）+ 握手 ≈ 2-4µs 开销 > 可并行收益 ~1µs×3 |
+| 门控 OFF（最终验证） | **42.89 / 23.33** | **== 基线带，零开销** ✓ |
+
+**depth-1 判决：净负收益（-10fps），结构性不可行。** 每 draw 可并行池只有 ~1µs（8µs
+串行中的小头），而任何跨线程交接（快照+kick+wait）≥1-2µs、唤醒 ≥10µs、自旋烧 SMT——
+三条路全被算术堵死。要赢必须 depth≥2 摊薄交接成本：多 job 槽 + ticket 有序提交 +
+增量快照（脏位图替代 16KB 整拷）+ 免唤醒握手（GPU 线程写槽位后 resolver 常驻自旋于
+专属核）。这是 §25.5 原设计 worker 池的完整形态，工程量另计一轮。
+
+**本轮沉淀（对后续任何线程化改造直接复用）**：撕裂读防御（MM 咽喉延迟写 + 页表
+guard）、脏位合并公式 + flags_since_snapshot、Engine3D() tls 覆盖、屏障清单、
+resolver 全套诊断计数、以及"事件日志偏移→llvm-symbolizer 秒级定位崩溃"流程。
+门控默认关 = 用户日常 exe 行为零变化。
+
+### 26.7 bench 自动化事故与修复（2026-09-19）
+- **前台锁吞按键**：用户活跃时 SetForegroundWindow 全拒 → 连续 void 局（进程活着但
+  没进游戏，解析到旧 CSV 数字逐位复现 = void 局铁证）。修复：focus_test.ps1 改
+  **PostMessage 投递按键**（无需前台）+ bench_run 按键重试 ×8。判废规则：同日同
+  帧数同逐位统计 = 旧 CSV。
+- bench 结果补记：p2b-gateoff-c1 ×3 与 p2b-wait-on-c1 ×2 均为 void 局（CSV 里
+  12:35/13:24/13:28 三行 40.54 与两行 16.99 作废）；有效局：p2b-fixed/p2b-pinned/
+  p2b-final-off。
