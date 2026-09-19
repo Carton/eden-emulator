@@ -1997,3 +1997,35 @@ memcmp 短路（内容未变跳拷贝），同时量化了 uniform dedup backlog
 **28.14 入口**：① uProf IBS @ CPU-bound 档归因散布成本；② epoch 槽实施
 （设计定稿见 28.12：UpdateGraphicsBuffers 挪 resolve 尾部 + job 内联内容槽，
 tail 槽优先——修右缘 bug① + 异步前置）；③ 视 ① 决定先调同步模式还是直上异步。
+
+### 28.14 epoch 槽实施+验证轮（2026-09-20 凌晨，commit 8d35f18f68，watcher 自动）
+
+**实施（比 28.12 定稿更稳的变体）**：`UpdateGraphicsBuffers` **不挪**——解析器可能在
+tail 前重绑 CB（channel_state 绑定被重置为未解析 id，tail 侧 slot_buffers 会踩空）。
+改为 `BufferCache::CaptureUniformEpoch(engine)` 直接读**影子引擎**的
+`state.shader_stages[].const_buffers[]`（CopyDynamicState 已快照）+ resolve 阶段安装的
+管线 masks/sizes；槽按 (device_addr,size) 键控；tail 的 `BindHostGraphicsUniformBuffer`
+快速路径仅在 token tail 里改源（槽命中→读槽；miss→走带追踪的经典路径=构造上无竞态）；
+串行路径经 tls 门控逐字节不变。`EDEN_TOKEN_EPOCH=0` 为 A/B 开关。
+job 内联槽 8KB/16 条（实测均值 1.7KB/draw，4.33 次）。
+
+**验证（epoch_watch.py 9 局自动轮，全 luma 配对 56.7-57.0）**：
+| 检验 | 结果 |
+|---|---|
+| 正确性（CHECK=1 局） | **0 mismatch、无崩溃**、优雅关闭 |
+| **图像 QA（核心）** | **右缘 16px 条带坏点 0.00%（bug① 修复确认）**；全帧 5.4-6.8% vs golden 自对地板 3.7-6.5% —— 判定在地板上（=动画相位噪声），12×8 热图无结构异常 |
+| deferred+epoch vs golden | 0.8722 / 0.9395（中位 -9.4%，med 24.16-24.95 档） |
+| **epoch 开/关成本** | **0.9650 / 0.9585 → epoch 本身 -3.5~4%**（36.9 vs 38.3-38.6，med 差一 tick） |
+
+**epoch 的 -3.5~4% 超出原始拷贝账（1.7KB/draw ≈ -1.1%）**：嫌疑=槽 miss 落到经典
+路径（SynchronizeBuffer 比快速路径贵得多）或线性查找；下轮加 hit/miss diag 定位。
+注意：异步化（里程碑 b）会把 capture 移出 GPU 线程，此成本大头自动消失——epoch 是
+异步的门票而非最终形态。70.7% 内容重复（28.13）还留着一个 memcmp 短路的免费优化。
+
+**状态：bug① 结案（右缘 HUD 元素渲染平坦——epoch 槽修复，图像 QA 验证）；
+里程碑 (b) 异步化解锁**（tail 已是 job 纯函数 + 内容自洽）。剩余已知成本：
+deferred 同步模式 -9.4%（TAIL_IMM -6.9%）、epoch -3.5~4%——两者的最终归宿都是异步。
+
+**28.15 入口**：① epoch hit/miss diag（若 miss 高→槽查找修复；若全 hit→memcmp 短路）；
+② **里程碑 (b)：异步 resolve**（批量子交接，capture/resolve 移 VulkanWorker，GPU 线程
+只留 tail）；③ uProf IBS 归因散布成本（异步设计时一并看）。
