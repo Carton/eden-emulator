@@ -1573,3 +1573,57 @@ wpr 挂死强杀/DiagTrack 重启/C 盘满事故重合，且与 §16 历史模�
 附带结论：pagefile 迁 F 盘对帧率无负面影响。
 
 P2（跨 draw 流水线）实施门槛已过，待启动。
+
+## 26. P2 实施轮：depth-1 draw resolver（2026-09-19 启动）
+
+### 26.1 架构定案：P2-lite（单 resolver 深度 1），而非 §25.5 的 worker 池
+
+**关键算术**：每 draw 串行 ~9.2µs / 可并行 ~2.8µs。depth-1 只需 1 个 resolver 线程
+即可完全遮蔽 2.8µs（重叠窗口 = 下一 draw 的串行段 9.2µs >> 2.8µs）→ 理论收益
+与 worker 池方案相同（~23% GPU 线程时间 ≈ +15-18% fps 上限），而复杂度/风险大降：
+无票据排序（顺序天然保持）、无每线程描述符 ring、无缓存分片竞争（只有 2 个持锁者）。
+
+### 26.2 触碰图（读码定案，vk_graphics_pipeline.cpp ConfigureImpl 全剖）
+
+ConfigureImpl 拆两相：
+- **Resolve 相（搬到 resolver 线程）**= config_stage 循环（cbuf 表读 gpu_memory +
+  BindGraphicsStorageBuffer + GetSamplerId）+ bind_stage_info 循环（GetImageView +
+  BindGraphicsTextureBuffer）+ SynchronizeDescriptors + FillImageViews。
+  特性：**零 dirty 位消费、零 scheduler 触碰、零 Vulkan 命令**（读 vk 对象创建除外，
+  驱动线程安全）；写 channel_state 绑定槽位 + 缓存 memo（与今天同锁纪律）。
+- **Tail/Commit 相（留 GPU 线程）**= transform feedback ctx + UpdateGraphicsBuffers/
+  BindHost*（上传，读 shadow regs）+ descriptor Acquire/PushImageDescriptors +
+  UpdateRenderTargets/CheckFeedbackLoop + ConfigureDraw（scheduler.Record 全家）+
+  rasterizer 侧 UpdateDynamicStates + draw lambda 录制。
+
+### 26.3 快照设计（Maxwell3D shadow 实例）
+- 常驻一个 shadow Maxwell3D（构造只需 MemoryManager&），每 draw 快照拷入：
+  `regs`（0xE00×4=14KB，trivially copyable 有 static_assert；复用 §19 的
+  `change_generation` 跳过不变拷贝）+ `state.shader_stages`（~2.2KB）+
+  `draw_manager.draw_state` 字段级拷（跳过 inline_index vector，inline-index draw
+  走同步回退）+ `dirty.flags`（32B bitset）。
+- **引擎重定向**：两缓存经 ChannelSetupCaches::maxwell3d 指针访问引擎 → 加
+  `Engine3D()` 访问器（thread_local 覆盖，仅 resolver 线程设置）；GraphicsPipeline
+  侧用 ctx.engine 直传。cache mutex 本就防 CPU 线程（OnCPUWrite/fence 回调），
+  resolver 只是多一个合法持锁者。
+- **dirty 合并公式**（提交末尾，GPU 线程独占窗口，无并发写者）：
+  `real.flags = shadow_now | (real_now & ~snapshot_flags)`
+  （resolver+tail 消费掉的位被丢弃；解析期间新置位保留；提交期新置位传播）。
+  成立前提 = Resolve 相不碰 dirty（26.2 已验证）。
+
+### 26.4 同步纪律
+- 深度 1：GPU 线程在 PrepareDraw(N+1) 开头 WaitCommit(N)（resolver 通常早已完成，
+  spin+pause 等待）；快照→kick→GPU 线程继续解析 N+1 命令。
+- **WaitResolve 屏障**：RasterizerVulkan 所有公共入口（Clear/FlushRegion/
+  InvalidateRegion/OnCPUWrite/UnmapMemory/DispatchCompute/DrawTexture/DrawIndirect/
+  TickFrame/…）先等 resolver 清空——防 GPU 线程在 resolve 进行中重映射显存/写缓存。
+- DrawIndirect/DrawTexture/Clear/inline-index draw：v1 一律同步回退（WaitResolve 后
+  走老路径），只流水化 RasterizerVulkan::Draw 主路径。
+- 环境门控 `EDEN_PARALLEL_DRAW`（默认关）。
+
+### 26.5 分两步 commit
+- **Commit A（纯重构，行为零变化）**：ConfigureImpl 拆 Resolve/Tail 两相 + DrawContext
+  结构（views/samplers 持久化，顺带消掉每 draw 2 次堆分配）+ PrepareDraw 同步内联
+  调两相。bench 必须 == 基线。
+- **Commit B（门控+线程）**：DrawResolver 类 + shadow 快照 + tls 覆盖 + 屏障。
+  bench ON vs OFF 各 n≥2。
