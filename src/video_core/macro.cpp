@@ -308,10 +308,10 @@ void HLE_C713C83D8F63CCF3::Execute(Core::System& system, Engines::Maxwell3D& max
     const u32 offset = (parameters[0] & 0x3FFFFFFF) << 2;
     const u32 address = maxwell3d.regs.shadow_scratch[24];
     auto& const_buffer = maxwell3d.regs.const_buffer;
-    const_buffer.size = 0x7000;
-    const_buffer.address_high = (address >> 24) & 0xFF;
-    const_buffer.address_low = address << 8;
-    const_buffer.offset = offset;
+    maxwell3d.JournalWord(const_buffer.size, 0x7000);
+    maxwell3d.JournalWord(const_buffer.address_high, (address >> 24) & 0xFF);
+    maxwell3d.JournalWord(const_buffer.address_low, address << 8);
+    maxwell3d.JournalWord(const_buffer.offset, offset);
 }
 void HLE_D7333D26E0A93EDE::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, std::span<const u32> parameters, [[maybe_unused]] u32 method) {
     maxwell3d.RefreshParameters();
@@ -319,9 +319,9 @@ void HLE_D7333D26E0A93EDE::Execute(Core::System& system, Engines::Maxwell3D& max
     const u32 address = maxwell3d.regs.shadow_scratch[42 + index];
     const u32 size = maxwell3d.regs.shadow_scratch[47 + index];
     auto& const_buffer = maxwell3d.regs.const_buffer;
-    const_buffer.size = size;
-    const_buffer.address_high = (address >> 24) & 0xFF;
-    const_buffer.address_low = address << 8;
+    maxwell3d.JournalWord(const_buffer.size, size);
+    maxwell3d.JournalWord(const_buffer.address_high, (address >> 24) & 0xFF);
+    maxwell3d.JournalWord(const_buffer.address_low, address << 8);
 }
 void HLE_BindShader::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, std::span<const u32> parameters, [[maybe_unused]] u32 method) {
     maxwell3d.RefreshParameters();
@@ -331,20 +331,20 @@ void HLE_BindShader::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d
         return;
     }
 
-    regs.pipelines[index & 0xF].offset = parameters[2];
+    maxwell3d.JournalWord(regs.pipelines[index & 0xF].offset, parameters[2]);
     maxwell3d.dirty.flags[VideoCommon::Dirty::Shaders] = true;
-    regs.shadow_scratch[28 + index] = parameters[1];
-    regs.shadow_scratch[34 + index] = parameters[2];
+    maxwell3d.JournalWord(regs.shadow_scratch[28 + index], parameters[1]);
+    maxwell3d.JournalWord(regs.shadow_scratch[34 + index], parameters[2]);
 
     const u32 address = parameters[4];
     auto& const_buffer = regs.const_buffer;
-    const_buffer.size = 0x10000;
-    const_buffer.address_high = (address >> 24) & 0xFF;
-    const_buffer.address_low = address << 8;
+    maxwell3d.JournalWord(const_buffer.size, 0x10000);
+    maxwell3d.JournalWord(const_buffer.address_high, (address >> 24) & 0xFF);
+    maxwell3d.JournalWord(const_buffer.address_low, address << 8);
 
     const size_t bind_group_id = parameters[3] & 0x7F;
     auto& bind_group = regs.bind_groups[bind_group_id];
-    bind_group.raw_config = 0x11;
+    maxwell3d.JournalWord(bind_group.raw_config, 0x11);
     maxwell3d.ProcessCBBind(bind_group_id);
 }
 void HLE_SetRasterBoundingBox::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, std::span<const u32> parameters, [[maybe_unused]] u32 method) {
@@ -355,15 +355,16 @@ void HLE_SetRasterBoundingBox::Execute(Core::System& system, Engines::Maxwell3D&
     const u32 scratch_data = maxwell3d.regs.shadow_scratch[52];
     regs.raster_bounding_box.raw = raster_mode & 0xFFFFF00F;
     regs.raster_bounding_box.pad.Assign(scratch_data & raster_enabled);
+    maxwell3d.JournalWord(regs.raster_bounding_box.raw, regs.raster_bounding_box.raw);
 }
 void HLE_ClearConstBuffer::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, std::span<const u32> parameters, [[maybe_unused]] u32 method) {
     static constexpr std::array<u32, 0x7000> zeroes{}; //must be bigger than either 7000 or 5F00
     maxwell3d.RefreshParameters();
     auto& regs = maxwell3d.regs;
-    regs.const_buffer.size = u32(base_size);
-    regs.const_buffer.address_high = parameters[0];
-    regs.const_buffer.address_low = parameters[1];
-    regs.const_buffer.offset = 0;
+    maxwell3d.JournalWord(regs.const_buffer.size, u32(base_size));
+    maxwell3d.JournalWord(regs.const_buffer.address_high, parameters[0]);
+    maxwell3d.JournalWord(regs.const_buffer.address_low, parameters[1]);
+    maxwell3d.JournalWord(regs.const_buffer.offset, 0);
     maxwell3d.ProcessCBMultiData(zeroes.data(), parameters[2] * 4);
 }
 void HLE_ClearMemory::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, std::span<const u32> parameters, [[maybe_unused]] u32 method) {
@@ -373,25 +374,25 @@ void HLE_ClearMemory::Execute(Core::System& system, Engines::Maxwell3D& maxwell3
         zero_memory.resize(needed_memory, 0);
     }
     auto& regs = maxwell3d.regs;
-    regs.upload.line_length_in = parameters[2];
-    regs.upload.line_count = 1;
-    regs.upload.dest.address_high = parameters[0];
-    regs.upload.dest.address_low = parameters[1];
+    maxwell3d.JournalWord(regs.upload.line_length_in, parameters[2]);
+    maxwell3d.JournalWord(regs.upload.line_count, 1u);
+    maxwell3d.JournalWord(regs.upload.dest.address_high, parameters[0]);
+    maxwell3d.JournalWord(regs.upload.dest.address_low, parameters[1]);
     maxwell3d.CallMethod(system, size_t(MAXWELL3D_REG_INDEX(launch_dma)), 0x1011, true);
     maxwell3d.CallMultiMethod(system, size_t(MAXWELL3D_REG_INDEX(inline_data)), zero_memory.data(), needed_memory, needed_memory);
 }
 void HLE_TransformFeedbackSetup::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, std::span<const u32> parameters, [[maybe_unused]] u32 method) {
     maxwell3d.RefreshParameters();
     auto& regs = maxwell3d.regs;
-    regs.transform_feedback_enabled = 1;
-    regs.transform_feedback.buffers[0].start_offset = 0;
-    regs.transform_feedback.buffers[1].start_offset = 0;
-    regs.transform_feedback.buffers[2].start_offset = 0;
-    regs.transform_feedback.buffers[3].start_offset = 0;
-    regs.upload.line_length_in = 4;
-    regs.upload.line_count = 1;
-    regs.upload.dest.address_high = parameters[0];
-    regs.upload.dest.address_low = parameters[1];
+    maxwell3d.JournalWord(regs.transform_feedback_enabled, 1u);
+    maxwell3d.JournalWord(regs.transform_feedback.buffers[0].start_offset, 0);
+    maxwell3d.JournalWord(regs.transform_feedback.buffers[1].start_offset, 0);
+    maxwell3d.JournalWord(regs.transform_feedback.buffers[2].start_offset, 0);
+    maxwell3d.JournalWord(regs.transform_feedback.buffers[3].start_offset, 0);
+    maxwell3d.JournalWord(regs.upload.line_length_in, 4u);
+    maxwell3d.JournalWord(regs.upload.line_count, 1u);
+    maxwell3d.JournalWord(regs.upload.dest.address_high, parameters[0]);
+    maxwell3d.JournalWord(regs.upload.dest.address_low, parameters[1]);
     maxwell3d.CallMethod(system, size_t(MAXWELL3D_REG_INDEX(launch_dma)), 0x1011, true);
     maxwell3d.CallMethod(system, size_t(MAXWELL3D_REG_INDEX(inline_data)), regs.transform_feedback.controls[0].stride, true);
     maxwell3d.Rasterizer().RegisterTransformFeedback(regs.upload.dest.Address());

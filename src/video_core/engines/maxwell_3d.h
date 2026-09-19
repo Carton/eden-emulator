@@ -3191,6 +3191,18 @@ public:
         }
     }
 
+    // Direct-write helper for HLE macros: stores through the destination word
+    // itself, so array-index and union-member offset math stays local to the
+    // caller's expression. `word` must be a plain integer member of regs.
+    template <typename T>
+        requires std::is_integral_v<T>
+    void JournalWord(T& word, std::type_identity_t<T> value) {
+        word = value;
+        RecordJournal(static_cast<u32>(reinterpret_cast<const u32*>(&word) -
+                                       &regs.reg_array[0]),
+                      static_cast<u32>(value));
+    }
+
     // Applies journal entries to this engine's flat register array. Used by
     // the draw-token shadow, which converges to the live register state.
     void ReplayJournal(const JournalEntry* entries, size_t count) {
