@@ -153,6 +153,16 @@ public:
         return configure_func(this, ctx, is_indexed, ConfigurePhase::Tail);
     }
 
+    // (local-only) P2 uniform epoch / async resolve: the per-pipeline uniform
+    // layout is immutable after construction; the resolver reads it instead
+    // of channel state (which a concurrently parsing GPU thread may mutate).
+    [[nodiscard]] const std::array<u32, 5>& UniformBufferMasks() const noexcept {
+        return enabled_uniform_buffer_masks;
+    }
+    [[nodiscard]] const VideoCommon::UniformBufferSizes& UniformBufferSizeTable() const noexcept {
+        return uniform_buffer_sizes;
+    }
+
     [[nodiscard]] GraphicsPipeline* Next(const GraphicsPipelineCacheKey& current_key) noexcept {
         if (key == current_key) {
             return this;

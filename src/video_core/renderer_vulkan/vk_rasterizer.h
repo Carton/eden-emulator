@@ -262,7 +262,10 @@ private:
     enum class TokenMode : u8 {
         Off,
         Inline,    // resolve executes immediately on the GPU thread
-        SyncWorker // resolve executes on the VulkanWorker; GPU thread drains
+        SyncWorker,// resolve executes on the VulkanWorker; GPU thread drains
+        Async      // resolve dispatched to the VulkanWorker without draining;
+                   // the next draw's commit waits. Same one-job envelope as
+                   // Inline, but resolve + epoch capture overlap GPU parsing.
     };
     TokenMode token_mode{TokenMode::Off};
     bool token_check_enabled{false};

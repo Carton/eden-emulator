@@ -238,13 +238,20 @@ public:
     // (local-only) P2 uniform epoch: copy the guest bytes of the snapshot
     // engine's enabled constant buffers into the caller's arena so the
     // delayed tail upload can read resolve-time content instead of live
-    // guest memory. Runs at resolve time under the same locking as the
-    // binding lookups; returns the number of entries captured (bindings
-    // that no longer fit are skipped and their tail upload falls back to
-    // the tracked path).
-    size_t CaptureUniformEpoch(const Tegra::Engines::Maxwell3D& engine, u8* bytes,
+    // guest memory. The uniform layout comes from the immutable pipeline
+    // (async resolve must not touch channel state). Returns the number of
+    // entries captured; bindings that no longer fit are skipped and their
+    // tail upload falls back to the tracked path.
+    size_t CaptureUniformEpoch(const Tegra::Engines::Maxwell3D& engine,
+                               const std::array<u32, NUM_STAGES>& masks,
+                               const UniformBufferSizes& sizes, u8* bytes,
                                size_t bytes_capacity,
                                VideoCommon::UniformEpochEntry* entries, size_t entries_capacity);
+
+    // (local-only) P2 uniform epoch diagnostics (GPU-thread tail side)
+    u64 diag_epoch_hits{};
+    u64 diag_epoch_misses{};   // slot capture skipped -> tracked classic path
+    u64 diag_epoch_classic{};  // predicate chose classic before the slot gate
 
     void BindHostGeometryBuffers(bool is_indexed);
 

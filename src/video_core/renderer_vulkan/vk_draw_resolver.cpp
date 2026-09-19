@@ -107,6 +107,12 @@ bool DrawResolver::SnapshotAndEnqueue(Tegra::Engines::Maxwell3D& engine,
     job.is_indexed = is_indexed;
     job.instance_count = instance_count;
     job.ctx.Reset(shadow.get(), &gpu_memory);
+    // (local-only) P2 async: install the pipeline's uniform layout here, on
+    // the GPU thread. The resolve phase no longer writes this channel state
+    // (async races), and the previous draw's tail has already consumed the
+    // old layout -- CommitPendingDraw runs before the snapshot.
+    buffer_cache.SetUniformBuffersState(pipeline->UniformBufferMasks(),
+                                        &pipeline->UniformBufferSizeTable());
     job_phase.store(Phase::Resolving, std::memory_order_release);
     if (++diag_kicks % 2000 == 0) {
         LOG_INFO(Render_Vulkan,
@@ -139,14 +145,14 @@ void DrawResolver::ExecuteResolve() {
         // (local-only) uniform epoch: snapshot the constant-buffer contents
         // from the shadow engine now -- resolve time matches the serial
         // path's read moment, so the guest still holds this draw's bytes.
-        // ConfigureResolve has installed this pipeline's uniform masks and
-        // shader-declared sizes; the addresses come from the shadow state.
-        // The delayed tail reads this copy instead of guest memory.
+        // Layout comes from the (immutable) pipeline, never channel state:
+        // with async resolve the GPU thread may be mutating it concurrently.
         job.epoch_valid = false;
         if (epoch_enabled) {
             job.epoch_entry_count = buffer_cache.CaptureUniformEpoch(
-                *shadow, job.epoch_bytes.data(), job.epoch_bytes.size(),
-                job.epoch_entries.data(), job.epoch_entries.size());
+                *shadow, job.pipeline->UniformBufferMasks(),
+                job.pipeline->UniformBufferSizeTable(), job.epoch_bytes.data(),
+                job.epoch_bytes.size(), job.epoch_entries.data(), job.epoch_entries.size());
             job.epoch_snapshot = {job.epoch_entries.data(), job.epoch_entry_count,
                                   job.epoch_bytes.data()};
             job.epoch_valid = true;

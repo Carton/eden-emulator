@@ -375,7 +375,9 @@ void BufferCache<P>::UpdateComputeBuffers() {
 }
 
 template <class P>
-size_t BufferCache<P>::CaptureUniformEpoch(const Tegra::Engines::Maxwell3D& engine, u8* bytes,
+size_t BufferCache<P>::CaptureUniformEpoch(const Tegra::Engines::Maxwell3D& engine,
+                                           const std::array<u32, NUM_STAGES>& masks,
+                                           const UniformBufferSizes& sizes, u8* bytes,
                                            size_t bytes_capacity,
                                            VideoCommon::UniformEpochEntry* entries,
                                            size_t entries_capacity) {
@@ -384,17 +386,17 @@ size_t BufferCache<P>::CaptureUniformEpoch(const Tegra::Engines::Maxwell3D& engi
     // those may already have moved on to the next draw by the time the
     // delayed tail runs. Slots are keyed by (device_addr, size); a tail whose
     // binding was re-pointed in between simply misses and takes the tracked
-    // classic path, which is race-free by construction.
+    // classic path, which is race-free by construction. The layout comes
+    // from the immutable pipeline, safe against concurrent GPU-thread use.
     size_t byte_off = 0;
     size_t count = 0;
     for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
-        ForEachEnabledBit(channel_state->enabled_uniform_buffer_masks[stage], [&](u32 index) {
+        ForEachEnabledBit(masks[stage], [&](u32 index) {
             const auto& cb{engine.state.shader_stages[stage].const_buffers[index]};
             if (!cb.enabled || cb.size == 0) {
                 return;
             }
-            const u32 size =
-                (std::min)(cb.size, (*channel_state->uniform_buffer_sizes)[stage][index]);
+            const u32 size = (std::min)(cb.size, sizes[stage][index]);
             if (size == 0) {
                 return;
             }
@@ -1041,6 +1043,13 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
             }
         }
         use_fast_buffer = epoch_src != nullptr;
+        if (epoch_src) {
+            ++diag_epoch_hits;
+        } else {
+            ++diag_epoch_misses;
+        }
+    } else if (!use_fast_buffer && VideoCommon::tls_uniform_epoch) [[unlikely]] {
+        ++diag_epoch_classic;
     }
     if (use_fast_buffer) {
         if constexpr (IS_OPENGL) {

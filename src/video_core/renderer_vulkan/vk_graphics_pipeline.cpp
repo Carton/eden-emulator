@@ -367,23 +367,19 @@ bool GraphicsPipeline::ConfigureImpl(DrawContext& ctx, bool is_indexed,
 
         texture_cache.SynchronizeDescriptors(false);
 
-        buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks,
-                                            &uniform_buffer_sizes);
+        // (local-only) P2 async: the uniform layout install is channel-state
+        // mutation -- skipped here so the worker resolve never races the GPU
+        // thread. The serial path (phase All) installs in place; the token
+        // path installs on the GPU thread at snapshot time.
+        if (phase != ConfigurePhase::Resolve) {
+            buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks,
+                                                &uniform_buffer_sizes);
+        }
 
         const bool via_header_index{
             regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding};
         const auto config_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
             const Shader::Info& info{stage_infos[stage]};
-            buffer_cache.UnbindGraphicsStorageBuffers(stage);
-            if constexpr (Spec::has_storage_buffers) {
-                size_t ssbo_index{};
-                for (const auto& desc : info.storage_buffers_descriptors) {
-                    ASSERT(desc.count == 1);
-                    buffer_cache.BindGraphicsStorageBuffer(stage, ssbo_index, desc.cbuf_index,
-                                                           desc.cbuf_offset, desc.is_written);
-                    ++ssbo_index;
-                }
-            }
             const auto& cbufs{ctx.engine->state.shader_stages[stage].const_buffers};
             const auto read_handle{[&](const auto& desc, u32 index) {
                 ASSERT(cbufs[desc.cbuf_index].enabled);
@@ -527,6 +523,39 @@ bool GraphicsPipeline::ConfigureImpl(DrawContext& ctx, bool is_indexed,
 
     if (regs.transform_feedback_enabled != 0) {
         scheduler.RequestOutsideRenderPassOperationContext();
+    }
+
+    // (local-only) P2 async: storage binding state is mutable channel state;
+    // writing it from the worker resolve would race the GPU thread's tail
+    // reads. Bound here instead, right before the update consumes them --
+    // ctx.engine is still the draw's snapshot when the tail is deferred.
+    const auto bind_stage_storage{[&](size_t stage) LAMBDA_FORCEINLINE {
+        buffer_cache.UnbindGraphicsStorageBuffers(stage);
+        if constexpr (Spec::has_storage_buffers) {
+            const Shader::Info& info{stage_infos[stage]};
+            size_t ssbo_index{};
+            for (const auto& desc : info.storage_buffers_descriptors) {
+                ASSERT(desc.count == 1);
+                buffer_cache.BindGraphicsStorageBuffer(stage, ssbo_index, desc.cbuf_index,
+                                                       desc.cbuf_offset, desc.is_written);
+                ++ssbo_index;
+            }
+        }
+    }};
+    if constexpr (Spec::enabled_stages[0]) {
+        bind_stage_storage(0);
+    }
+    if constexpr (Spec::enabled_stages[1]) {
+        bind_stage_storage(1);
+    }
+    if constexpr (Spec::enabled_stages[2]) {
+        bind_stage_storage(2);
+    }
+    if constexpr (Spec::enabled_stages[3]) {
+        bind_stage_storage(3);
+    }
+    if constexpr (Spec::enabled_stages[4]) {
+        bind_stage_storage(4);
     }
 
     buffer_cache.UpdateGraphicsBuffers(is_indexed);

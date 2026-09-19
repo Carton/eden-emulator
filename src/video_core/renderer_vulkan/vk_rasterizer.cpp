@@ -234,8 +234,9 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
     // EDEN_TOKEN_CHECK=1 verifies the shadow register state bit-exactly.
     const char* token{std::getenv("EDEN_DRAW_TOKEN")};
     if (token && *token != '\0' && *token != '0') {
-        token_mode = (*token == 's' || *token == 'S') ? TokenMode::SyncWorker
-                                                      : TokenMode::Inline;
+        token_mode = (*token == 's' || *token == 'S')   ? TokenMode::SyncWorker
+                     : (*token == 'a' || *token == 'A') ? TokenMode::Async
+                                                        : TokenMode::Inline;
         const char* snapshot{std::getenv("EDEN_TOKEN_SNAPSHOT")};
         const char* check{std::getenv("EDEN_TOKEN_CHECK")};
         token_check_enabled = check != nullptr && *check != '\0' && *check != '0';
@@ -245,7 +246,9 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
         token_tail_immediate = tail_imm != nullptr && *tail_imm != '\0' && *tail_imm != '0';
         LOG_INFO(Render_Vulkan,
                  "Draw tokens: mode={} snapshot={} check={}",
-                 token_mode == TokenMode::SyncWorker ? "sync-worker" : "inline",
+                 token_mode == TokenMode::SyncWorker ? "sync-worker"
+                 : token_mode == TokenMode::Async    ? "async"
+                                                     : "inline",
                  (snapshot && *snapshot == 'f') ? "full" : "journal",
                  token_check_enabled ? "on" : "off");
     }
@@ -456,13 +459,15 @@ void RasterizerVulkan::RecordDraw(Tegra::Engines::Maxwell3D& engine, bool is_ind
 void RasterizerVulkan::LogTokenDiag() {
     LOG_INFO(Render_Vulkan,
              "DrawToken diag: pipelined={} deferred_writes={} deferred_mb={:.2f} "
-             "resolve_avg_ns={} tail_avg_ns={}",
+             "resolve_avg_ns={} tail_avg_ns={} epoch hit/miss/classic={}/{}/{}",
              pipelined_draws, deferred_writes_total,
              static_cast<double>(deferred_bytes_total) / 1048576.0,
              resolver->diag_resolve_calls
                  ? resolver->diag_resolve_ns.count() / resolver->diag_resolve_calls
                  : 0,
-             diag_tail_calls ? diag_tail_ns.count() / diag_tail_calls : 0);
+             diag_tail_calls ? diag_tail_ns.count() / diag_tail_calls : 0,
+             buffer_cache.diag_epoch_hits, buffer_cache.diag_epoch_misses,
+             buffer_cache.diag_epoch_classic);
 }
 
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
@@ -533,6 +538,14 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
             scheduler.Record([this](vk::CommandBuffer) { resolver->ExecuteResolve(); });
             scheduler.DispatchWork();
             scheduler.WaitWorker();
+        } else if (token_mode == TokenMode::Async) {
+            // (local-only) milestone (b): dispatch without draining. The
+            // worker resolves (incl. epoch capture) while the GPU thread
+            // parses ahead; the next draw's CommitPendingDraw -> WaitResolved
+            // is the only rendezvous. One job in flight, same envelope as
+            // the deferred inline mode.
+            scheduler.Record([this](vk::CommandBuffer) { resolver->ExecuteResolve(); });
+            scheduler.DispatchWork();
         } else {
             resolver->ExecuteResolve();
         }
