@@ -1926,4 +1926,8 @@ TAIL_IMM 即时提交语义一致：无 pending draw 就无需延迟）。
 对真实游戏 Form 窗端到端验证通过（tkinter 对照 std 74；游戏标题菜单 60fps+RTSS 层）。
 **§28.3"遮挡免疫采集已生效"的说法从今晚起才为真。**
 
+**方法论固化**：本章+28.10 的图像 QA 规程与三层评估法已收编进 `AGENTS.md`
+（"图形验收与性能评估规程"章）与 `.agents/skills/eden-bench`（同步修正了
+master 不可跑 TOTK 等过时条目）——本文件保留案例与推导，规则以 AGENTS.md 为准。
+
 28.12 起为后续（快档确认对 / uProf / epoch 槽）。

@@ -118,8 +118,47 @@ cmake.exe --build build-vs22     # RelWithDebInfo，产物在 build-vs22/bin/
 5. eden 无内建插桩（Tracy/microprofile），走采样式；RelWithDebInfo 的 PDB 直接可用；
    `/OPT:ICF` 会折叠相同函数体，火焰图符号合并属正常噪声。
 
+## 图形验收与性能评估规程（2026-09-19 固化；案例与推导见 PROFILE §28.3/28.10/28.11）
+
+### 图像 QA（改渲染/图形路径的必做验收）
+- **采集**：bench_run.py 测量窗内每 15s 自动截 6 张到 `F:\prof\shots\<label>\`
+  （PrintWindow(PW_RENDERFULLCONTENT) 抓 "Form" 渲染窗，遮挡免疫——注意该路径
+  2026-09-19 才真正修好，此前截图全来自屏幕抓取兜底，历史结论属性见 PROFILE §28.11）。
+  **每局必须确认 shots 存在且内容是游戏画面**：截图内容=桌面/其他应用 ⇒ 该局作废
+  （用户占机铁证，golden6 案例）。截不到（游戏窗最小化/隐藏）= 运行可疑，查 tap 日志。
+- **对比**：`python F:\prof\shot_compare.py DIR_A DIR_B`（降采样容忍动画相位，
+  PASS/WARN/FAIL + 逐对坏点%）。**先跑 golden vs golden 校准噪声地板**，测试对比
+  的差异须超出地板才算真差异。
+- **配对纪律**：golden 参照局与测试局**背靠背**（跨小时对比作废）；按索引配对；
+  异常定位用分辨率网格 bad% 热图；MCP 复核路径 = Read（**正斜杠**路径）→ CDN URL →
+  analyze_image（反斜杠 URL 会 1210 失败）。
+- **luma 协变量**：每局自动算截图平均亮度入 bench_results.csv（干净水塘 60–61、
+  窗内 std≈0.2）；离带 = 场景档位不同或截图污染，该对比无效。
+- 加载画面对比只看右侧/右下（固定元素），左侧每次加载随机；225×250 小窗会掩盖
+  小 UI 问题，需要时用 load_capture.py 放大到 1280×720 再截。
+
+### 性能评估三层法（宏观结论只出自第 2/3 层，归因出自第 1 层）
+1. **局部归因 = 自插桩逐 draw 均值**：SerialDraw/DrawToken diag（每 5000/2000 draw
+   打点，ns/draw 级），bench 自动留档 `F:\prof\diag\<label>.txt`；对场景档位免疫，
+   回答"贵在哪"。
+2. **宏观速率 = 交错对中位比值**：`python F:\prof\bench_ab.py --pairs 3 --a golden
+   --b LABEL --benv "K=V,K=V"`（AB/BA 交替消慢漂移）；**只报逐对比值的中位数**，
+   |中位-1| 须大于 ±2% 噪声带才算真差异；单局绝对 fps 只在静置时有效，只报带内范围。
+3. **宏观 ETW = 同脚本背靠背对 + 逐 draw 归一**：采集走 tailimm_ab.py 的 UAC
+   helper 模式（一次提权双相位）；对比时用 diag 计数差分把线程 CPU 归一到窗内
+   draw 数；**跨窗绝对量一律不比**；ETW MCP 大 trace（1GB）会丢已处理状态、按
+   Timestamp 分组会超时——查询要一次跑完。
+- **场景档位纪律**：水塘有快/慢两档（med 22.50 vs 25.00+ms，跨档 ~11%），档位
+  持续数小时；**跨档对比无效**（曾把 -0.7% 误判成 -11%）。判档看 med 与 luma；
+  med 落在 0.83ms 栅格整数倍时警惕量化栅格不是真实负载（§23.4）。
+- **缓存归因**（"成本均匀摊在所有函数"类假设）：用 AMD uProf
+  （`D:\Program Files\AMD\AMDuProf`，IBS 按函数归因 L2/L3 miss），share 采样
+  （ETW）看不见这类；CPU=Ryzen 5 5600 适用。
+
 ## 速查
 
 - 性能优化全流程 skill：`.agents/skills/eden-bench`
-- 基准历史：`F:\prof\bench_results.csv`；trace 存档与脚本清单：PROFILE_PROGRESS.md §7
+- 基准历史：`F:\prof\bench_results.csv`（含 luma 列）；交错 A/B：`F:\prof\bench_ab.py`；
+  图像 QA：`F:\prof\shot_compare.py`；逐 draw diag 留档：`F:\prof\diag\<label>.txt`
+- trace 存档与脚本清单：PROFILE_PROGRESS.md §7
 - 测试存档（水塘场景）在 build-vs22/bin/user/nand；同步自 F:\Switch\Yuzu（只读源）

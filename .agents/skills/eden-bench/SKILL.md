@@ -1,17 +1,21 @@
 ---
 name: eden-bench
-description: Eden 模拟器（TOTK）性能基准与 profiling 工作流——构建 v0.2.1 worktree、跑自动 FPS 基准（内建帧时间 CSV）、wpr+ETW 微 profile 采集分析。用于 Eden 性能优化相关任务。
+description: Eden 模拟器（TOTK）性能基准与 profiling 工作流——VS2022 构建、自动 FPS 基准（内建帧时间 CSV + 图像 QA 截图）、交错 A/B 对、wpr+ETW 微 profile 采集分析。用于 Eden 性能优化相关任务。
 ---
 
 # Eden TOTK 性能基准与 Profiling
 
-完整背景读仓库根目录 `PROFILE_PROGRESS.md`（性能进度记录，含所有坑）。本 skill 是速查卡。
+完整背景读仓库根目录 `PROFILE_PROGRESS.md`（性能进度记录，含所有坑）；
+**方法论与规则以 `AGENTS.md` 为准（"图形验收与性能评估规程" 章 + 工作规则与纪律），
+本 skill 是速查卡**。
 
 ## 关键路径
 
-- 工作基线（改代码、跑测试都在这）：`F:\devel\opensource\eden-emulator`，分支 `test/master-profiling`，构建目录 `build-vs22`（v0.2.1 worktree 已冻结，勿改）
-- 游戏硬链接：`F:\prof\TOTK.nsp`；数据目录：`build\bin\user\`（portable）
-- **一切 AI 生成内容仅限本地，严禁 push 上游 / 提 issue / PR**
+- 工作基线：`F:\devel\opensource\eden-emulator`，分支以 AGENTS.md 当前基线为准
+  （P2 draw-resolver 阶段在 `test/p2-draw-resolver`），构建目录 `build-vs22`
+  （v0.2.1 worktree 已冻结，勿改）
+- 游戏硬链接：`F:\prof\TOTK.nsp`；数据目录：`build-vs22\bin\user\`（portable）
+- **一切 AI 生成内容仅限本地，严禁 push 上游 / 提 issue / PR**（推自己 fork 允许）
 
 ## 构建（Git Bash，增量 ~1-5 分钟）
 
@@ -25,23 +29,28 @@ cmake.exe --build build-vs22 2>&1 | tee /f/prof/build_last.log | tail -15
 
 产物 `build-vs22/bin/eden.exe`。**勿用 eden-cli 跑 TOTK（shader 段必崩）**。
 
-## FPS 基准（一条命令，~4 分钟）
+## FPS 基准（单局 ~4 分钟；A/B 结论用交错对）
 
 ```bash
-python F:/prof/bench_run.py <LABEL> --measure 90
+python F:/prof/bench_run.py <LABEL> --measure 90          # 单局
+python F:/prof/bench_ab.py --pairs 3 --a golden --b LABEL \
+    --benv "EDEN_XXX=1,EDEN_YYY=1"                        # A/B 结论只认这个
 ```
 
-自动完成：杀残留 → 启动 eden → 自动 A 键进游戏（~110s）→ 静置测量 90s →
-优雅关闭（WM_CLOSE）→ 解析 eden 内建 `record_frame_times` 的逐帧 CSV → 追加到
-`F:\prof\bench_results.csv`，stdout 打一行 `RESULT <label>: frames=... fps=... med=...ms`
-（另有 tail_fps = 丢掉窗口头 15s 后的均值，规避读档后追赶帧）。
+自动完成：杀残留 → 启动 eden → 自动 A 键进游戏（~110s）→ 静置测量 90s（窗内每
+15s 截 QA 图）→ 优雅关闭（WM_CLOSE）→ 解析逐帧 CSV → 追加
+`F:\prof\bench_results.csv`（含 luma 亮度列），stdout 打 `RESULT <label>: ...`
++ 逐 draw diag 行（自动留档 `F:\prof\diag\<label>.txt`）。
 
 - 前提：qt-config.ini 已设 `record_frame_times=true`、`confirmStop=2`（都已配好）
-- **跑基准期间用户不能碰键盘/鼠标**（前台锁会吃掉注入按键）
-- 每个构建至少跑 2 次看方差；该场景（卡卡利科村）中位帧时极稳（24.99ms 量化），
-  但 fps_mean 噪声 ±1.5——**小收益（<4%）优化不要用 FPS 判定，用下面的微 profile**
-- 强杀游戏会丢帧时间 CSV（PerfStats 析构才落盘）；改 qt-config 前先确认游戏没在跑
-- 历史结果：`cat F:\prof\bench_results.csv`（含 git commit 列，可追溯）
+- **跑基准期间用户不能碰键盘/鼠标**（前台锁吃掉注入按键；测试时段有人=数据作废）
+- **VOID 签名**（RESULT VOID，不进 CSV）：陈旧 CSV / fps>52 或 med<20（60fps
+  菜单栅格；游戏内 med 最低 21.67）
+- **场景档位**：水塘有快/慢两档（med 22.50 vs 25.00+ms，跨档 ~11%，档位持续数小时）
+  ——单局绝对值只在同档内可比；**A/B 用 bench_ab 交错对，报逐对比值中位数**，
+  阈值 ±2%；med 落 0.83ms 栅格整数倍警惕量化栅格（PROFILE §23.4）
+- 小收益（<4%）优化用 FPS 不可判——用微 profile 或逐 draw diag 归因
+- 强杀游戏会丢帧时 CSV（PerfStats 析构才落盘）；改 qt-config 前确认游戏没在跑
 
 ## 微 profile（wpr 采集 + ETW MCP 分析）——小收益优化的判定手段
 
@@ -78,10 +87,20 @@ mcp__etw__process_trace(filePath="F:\\prof\\totk_cpugpu.etl",
 注意：`/OPT:ICF` 折叠 + 内联会让函数归因在版本间偏移，**对比要按"函数簇合计"看**；
 每次 perform_query 超时可直接重发（queryId 保留）。
 
+## 图像 QA（改渲染/图形路径的必做验收；完整规程见 AGENTS.md）
+
+- bench 测量窗自动截 6 张到 `F:\prof\shots\<LABEL>\`（PrintWindow 抓 "Form" 渲染窗，
+  遮挡免疫）；**每局确认截图内容是游戏画面**——内容=桌面/其他应用 ⇒ 该局作废
+  （用户占机铁证）。截不到=游戏窗不可用，查 tap 日志。
+- 对比：`python F:/prof/shot_compare.py DIR_A DIR_B`（PASS/WARN/FAIL+坏点%）；
+  先跑 golden vs golden 校准噪声地板；参照局与测试局**背靠背**。
+- 水塘干净局 luma 60–61（CSV 有列），离带=档位不同或污染。
+- 加载画面只比右侧/右下（左侧每次加载随机）；细节问题用 load_capture.py 放大窗口。
+
 ## 渲染正确性检查（改了状态跟踪类代码后必做）
 
-基准测量窗口期间用 computer-use 全屏截图（`mcp__computer-use__screenshot`），
-比对场景是否正常（卡卡利科村：帐篷/树/人物/HUD 齐全，无黑块花屏）。
+基准测量窗口期间比对 QA 截图（同上）：水塘场景水面/植被/HUD 齐全，无黑块花屏、
+无右缘 HUD 元素渲染异常（P2 token 模式的已知敏感位，PROFILE §28.4）。
 
 ## 配置 A/B 注意（qt-config.ini）
 
@@ -92,6 +111,9 @@ mcp__etw__process_trace(filePath="F:\\prof\\totk_cpugpu.etl",
 
 ## 已知纪律
 
-- master 构建产物跑不了 TOTK（卡 launching）——实验全在 v0.2.1 worktree
-- 采集/基准时确认 Lossless Scaling 已退出（`F:\prof\cleanup.cmd` 提权强杀）
+- master 是现役基线（TOTK 已验收）；v0.2.1 worktree 冻结只作历史对照
+- 采集/基准前 `python F:\prof\check_config.py`（LosslessScaling 等会被拦；
+  **NVIDIA Overlay 一律不杀不拦**，2026-09-19 用户定规，med 实测无扰）
+- 缓存归因（"成本摊匀在所有函数"类）：AMD uProf @ `D:\Program Files\AMD\AMDuProf`
+  （IBS 按函数归因 L2/L3 miss），share 采样看不见这类
 - 强杀游戏进程前记得 `fsp_srv` 补丁必须在（已在分支里，勿 revert）
