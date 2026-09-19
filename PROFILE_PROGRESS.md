@@ -1804,3 +1804,32 @@ flags_since_snapshot）→Dirty::Shaders 丢→管线缓存陈旧。修：SetDir
 1. ETW 差分 token-tailimm vs golden GPU 线程（-12% 归因）。
 2. uniform epoch 槽（修右缘 + 异步前置）。
 3. 加载画面大窗复测（HQ 采集法已验证）。
+
+### 28.8 ETW 差分轮：scissors 复活 bug（已修）+ 方法论教训（2026-09-19 深夜）
+工具：`F:\prof\tailimm_ab.py`（一次 UAC 提权 helper，同二进制同会话背靠背双 40s 采集，
+tailimm_off/on.etl；v1=修复前二进制，v2=修复后）。ETW MCP 按函数名直接分组（无需手工
+symbolizer）。
+
+**bug③（已修，ETW 抓获并验证）**：token 模式动态状态族每 draw 全量重录
+（UpdateScissorsState 占 GPU 线程 0.15%→1.42%、GetScissorState 0→1.0%、viewport/
+stencil/colorwrite 同族）。机制：`StateTracker::flags` 是**指针**，绑在 live 引擎
+dirty 集上；Touch* 消费 live 位，而 UpdateViewportsState 的级联写（Dirty::Scissors 等）
+落在 shadow；FinishJob 合并把 shadow_flags 整体写回 live → 被消费的位每 draw 复活
+（自维持循环）。修复：`StateTracker::RetargetFlags()`——token commit 期间把 flags
+指针换绑到 shadow（消费对合并可见，级联同 draw 消费=串行等价），结束恢复 live。
+两个 commit 点（标准 + TAIL_IMM）都加。**验证：v2 trace 上 scissors 族 778→51 采样
+（回落 15 倍到基线级）**。commit 含完整分析。
+
+**token 管道本身成本达标**：ExecuteResolve 0.66% + SnapshotAndEnqueue/FinishJob/
+CopyDynamicState ~0.4% ≈ 1.1% GPU 线程。
+
+**-12~17% 回退的 ETW 判定：未定案，方法受限**。同模式两次 OFF 采集 GPU 线程总量
+11,269 vs 21,987（2 倍带方差）——40s 窗口在场景负载带面前不可用；函数占比除 scissors
+族外全部持平（无其他热点）→ 回退要么是"均匀摊在所有函数上的单位 draw 变贵"（影子/
+两段式的缓存局部性损失，share 分析天然看不见），要么不在 GPU 线程。
+**下轮改用自插桩**：resolver 已有 resolve_ns（603ns/draw）；给 FinishDrawLocked 和
+Draw/PrepareDraw 总时长加同样的 chrono 对数，逐 draw 均值对场景带免疫，直接量出
+每 draw 净增成本及其归属（resolve/tail/其他）。golden 侧（PrepareDraw）同法。
+
+ETW 复用要点：MCP 大 trace（1GB）下会丢已处理状态，查询尽量一次跑完；按 Timestamp
+逐值分组会超时；UAC helper 双相位采集模式（wpr_helper.cmd 轮询 go 文件）好用。
