@@ -186,7 +186,8 @@ bool Passes(const std::array<vk::ShaderModule, NUM_STAGES>& modules,
     return true;
 }
 
-using ConfigureFuncPtr = bool (*)(GraphicsPipeline*, bool);
+using ConfigureFuncPtr = bool (*)(GraphicsPipeline*, DrawContext&, bool,
+                                  GraphicsPipeline::ConfigurePhase);
 
 template <typename Spec, typename... Specs>
 ConfigureFuncPtr FindSpec(const std::array<vk::ShaderModule, NUM_STAGES>& modules,
@@ -350,164 +351,178 @@ void GraphicsPipeline::AddTransition(GraphicsPipeline* transition) {
 }
 
 template <typename Spec>
-bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
-    boost::container::small_vector<VideoCommon::ImageViewInOut, 64> views;
-    boost::container::small_vector<VideoCommon::SamplerId, 64> samplers;
-    views.reserve(num_image_elements);
-    samplers.reserve(num_textures);
+bool GraphicsPipeline::ConfigureImpl(DrawContext& ctx, bool is_indexed,
+                                     ConfigurePhase phase) {
+    auto& views{ctx.views};
+    auto& samplers{ctx.samplers};
+    const auto& regs{ctx.engine->regs};
 
-    texture_cache.SynchronizeDescriptors(false);
+    if (phase != ConfigurePhase::Tail) {
+        // Resolve phase: guest binding resolution, driven by ctx.engine
+        // (live engine when synchronous, snapshot when the resolver runs it).
+        views.clear();
+        samplers.clear();
+        views.reserve(num_image_elements);
+        samplers.reserve(num_textures);
 
-    buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks, &uniform_buffer_sizes);
+        texture_cache.SynchronizeDescriptors(false);
 
-    const auto& regs{maxwell3d->regs};
-    const bool via_header_index{regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding};
-    const auto config_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
-        const Shader::Info& info{stage_infos[stage]};
-        buffer_cache.UnbindGraphicsStorageBuffers(stage);
-        if constexpr (Spec::has_storage_buffers) {
-            size_t ssbo_index{};
-            for (const auto& desc : info.storage_buffers_descriptors) {
-                ASSERT(desc.count == 1);
-                buffer_cache.BindGraphicsStorageBuffer(stage, ssbo_index, desc.cbuf_index,
-                                                       desc.cbuf_offset, desc.is_written);
-                ++ssbo_index;
-            }
-        }
-        const auto& cbufs{maxwell3d->state.shader_stages[stage].const_buffers};
-        const auto read_handle{[&](const auto& desc, u32 index) {
-            ASSERT(cbufs[desc.cbuf_index].enabled);
-            const u32 index_offset{index << desc.size_shift};
-            const u32 offset{desc.cbuf_offset + index_offset};
-            const GPUVAddr addr{cbufs[desc.cbuf_index].address + offset};
-            if constexpr (std::is_same_v<decltype(desc), const Shader::TextureDescriptor&> ||
-                          std::is_same_v<decltype(desc), const Shader::TextureBufferDescriptor&>) {
-                if (desc.has_secondary) {
-                    ASSERT(cbufs[desc.secondary_cbuf_index].enabled);
-                    const u32 second_offset{desc.secondary_cbuf_offset + index_offset};
-                    const GPUVAddr separate_addr{cbufs[desc.secondary_cbuf_index].address +
-                                                 second_offset};
-                    const u32 lhs_raw{gpu_memory->Read<u32>(addr) << desc.shift_left};
-                    const u32 rhs_raw{gpu_memory->Read<u32>(separate_addr)
-                                      << desc.secondary_shift_left};
-                    const u32 raw{lhs_raw | rhs_raw};
-                    return TexturePair(raw, via_header_index);
+        buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks,
+                                            &uniform_buffer_sizes);
+
+        const bool via_header_index{
+            regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding};
+        const auto config_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
+            const Shader::Info& info{stage_infos[stage]};
+            buffer_cache.UnbindGraphicsStorageBuffers(stage);
+            if constexpr (Spec::has_storage_buffers) {
+                size_t ssbo_index{};
+                for (const auto& desc : info.storage_buffers_descriptors) {
+                    ASSERT(desc.count == 1);
+                    buffer_cache.BindGraphicsStorageBuffer(stage, ssbo_index, desc.cbuf_index,
+                                                           desc.cbuf_offset, desc.is_written);
+                    ++ssbo_index;
                 }
             }
-            return TexturePair(gpu_memory->Read<u32>(addr), via_header_index);
-        }};
-        const auto add_image{[&](const auto& desc, bool blacklist) LAMBDA_FORCEINLINE {
-            for (u32 index = 0; index < desc.count; ++index) {
-                const auto handle{read_handle(desc, index)};
-                views.push_back({
-                    .index = handle.first,
-                    .blacklist = blacklist,
-                    .id = {}
-                });
-            }
-        }};
-        if constexpr (Spec::has_texture_buffers) {
-            for (const auto& desc : info.texture_buffer_descriptors) {
-                add_image(desc, false);
-            }
-        }
-        if constexpr (Spec::has_image_buffers) {
-            for (const auto& desc : info.image_buffer_descriptors) {
-                add_image(desc, false);
-            }
-        }
-        for (const auto& desc : info.texture_descriptors) {
-            for (u32 index = 0; index < desc.count; ++index) {
-                const auto handle{read_handle(desc, index)};
-                views.push_back({handle.first});
-
-                VideoCommon::SamplerId sampler{texture_cache.GetSamplerId(handle.second, false)};
-                samplers.push_back(sampler);
-            }
-        }
-        if constexpr (Spec::has_images) {
-            for (const auto& desc : info.image_descriptors) {
-                add_image(desc, desc.is_written);
-            }
-        }
-
-        return true;
-    }};
-    if constexpr (Spec::enabled_stages[0]) {
-        config_stage(0);
-    }
-    if constexpr (Spec::enabled_stages[1]) {
-        config_stage(1);
-    }
-    if constexpr (Spec::enabled_stages[2]) {
-        config_stage(2);
-    }
-    if constexpr (Spec::enabled_stages[3]) {
-        config_stage(3);
-    }
-    if constexpr (Spec::enabled_stages[4]) {
-        config_stage(4);
-    }
-    ASSERT(views.size() == num_image_elements);
-    ASSERT(samplers.size() == num_textures);
-    texture_cache.FillImageViews(std::span(views.data(), views.size()), false, Spec::has_images);
-
-    VideoCommon::ImageViewInOut* texture_buffer_it{views.data()};
-    const auto bind_stage_info{[&](size_t stage) LAMBDA_FORCEINLINE {
-        size_t index{};
-        const auto add_buffer{[&](const auto& desc) {
-            constexpr bool is_image = std::is_same_v<decltype(desc), const ImageBufferDescriptor&>;
-            for (u32 i = 0; i < desc.count; ++i) {
-                bool is_written{false};
-                if constexpr (is_image) {
-                    is_written = desc.is_written;
-                }
-                ImageView& image_view{texture_cache.GetImageView(texture_buffer_it->id)};
-                PixelFormat format{image_view.format};
-                if constexpr (is_image) {
-                    if (const auto explicit_format{PixelFormatFromImageFormat(desc.format)}) {
-                        format = *explicit_format;
+            const auto& cbufs{ctx.engine->state.shader_stages[stage].const_buffers};
+            const auto read_handle{[&](const auto& desc, u32 index) {
+                ASSERT(cbufs[desc.cbuf_index].enabled);
+                const u32 index_offset{index << desc.size_shift};
+                const u32 offset{desc.cbuf_offset + index_offset};
+                const GPUVAddr addr{cbufs[desc.cbuf_index].address + offset};
+                if constexpr (std::is_same_v<decltype(desc), const Shader::TextureDescriptor&> ||
+                              std::is_same_v<decltype(desc), const Shader::TextureBufferDescriptor&>) {
+                    if (desc.has_secondary) {
+                        ASSERT(cbufs[desc.secondary_cbuf_index].enabled);
+                        const u32 second_offset{desc.secondary_cbuf_offset + index_offset};
+                        const GPUVAddr separate_addr{cbufs[desc.secondary_cbuf_index].address +
+                                                     second_offset};
+                        const u32 lhs_raw{ctx.gpu_memory->Read<u32>(addr) << desc.shift_left};
+                        const u32 rhs_raw{ctx.gpu_memory->Read<u32>(separate_addr)
+                                          << desc.secondary_shift_left};
+                        const u32 raw{lhs_raw | rhs_raw};
+                        return TexturePair(raw, via_header_index);
                     }
                 }
-                buffer_cache.BindGraphicsTextureBuffer(stage, index, image_view.GpuAddr(),
-                                                       image_view.BufferSize(), format,
-                                                       is_written, is_image);
-                ++index;
-                ++texture_buffer_it;
+                return TexturePair(ctx.gpu_memory->Read<u32>(addr), via_header_index);
+            }};
+            const auto add_image{[&](const auto& desc, bool blacklist) LAMBDA_FORCEINLINE {
+                for (u32 index = 0; index < desc.count; ++index) {
+                    const auto handle{read_handle(desc, index)};
+                    views.push_back({
+                        .index = handle.first,
+                        .blacklist = blacklist,
+                        .id = {}
+                    });
+                }
+            }};
+            if constexpr (Spec::has_texture_buffers) {
+                for (const auto& desc : info.texture_buffer_descriptors) {
+                    add_image(desc, false);
+                }
+            }
+            if constexpr (Spec::has_image_buffers) {
+                for (const auto& desc : info.image_buffer_descriptors) {
+                    add_image(desc, false);
+                }
+            }
+            for (const auto& desc : info.texture_descriptors) {
+                for (u32 index = 0; index < desc.count; ++index) {
+                    const auto handle{read_handle(desc, index)};
+                    views.push_back({handle.first});
+
+                    VideoCommon::SamplerId sampler{texture_cache.GetSamplerId(handle.second, false)};
+                    samplers.push_back(sampler);
+                }
+            }
+            if constexpr (Spec::has_images) {
+                for (const auto& desc : info.image_descriptors) {
+                    add_image(desc, desc.is_written);
+                }
+            }
+
+            return true;
+        }};
+        if constexpr (Spec::enabled_stages[0]) {
+            config_stage(0);
+        }
+        if constexpr (Spec::enabled_stages[1]) {
+            config_stage(1);
+        }
+        if constexpr (Spec::enabled_stages[2]) {
+            config_stage(2);
+        }
+        if constexpr (Spec::enabled_stages[3]) {
+            config_stage(3);
+        }
+        if constexpr (Spec::enabled_stages[4]) {
+            config_stage(4);
+        }
+        ASSERT(views.size() == num_image_elements);
+        ASSERT(samplers.size() == num_textures);
+        texture_cache.FillImageViews(std::span(views.data(), views.size()), false, Spec::has_images);
+
+        VideoCommon::ImageViewInOut* texture_buffer_it{views.data()};
+        const auto bind_stage_info{[&](size_t stage) LAMBDA_FORCEINLINE {
+            size_t index{};
+            const auto add_buffer{[&](const auto& desc) {
+                constexpr bool is_image = std::is_same_v<decltype(desc), const ImageBufferDescriptor&>;
+                for (u32 i = 0; i < desc.count; ++i) {
+                    bool is_written{false};
+                    if constexpr (is_image) {
+                        is_written = desc.is_written;
+                    }
+                    ImageView& image_view{texture_cache.GetImageView(texture_buffer_it->id)};
+                    PixelFormat format{image_view.format};
+                    if constexpr (is_image) {
+                        if (const auto explicit_format{PixelFormatFromImageFormat(desc.format)}) {
+                            format = *explicit_format;
+                        }
+                    }
+                    buffer_cache.BindGraphicsTextureBuffer(stage, index, image_view.GpuAddr(),
+                                                           image_view.BufferSize(), format,
+                                                           is_written, is_image);
+                    ++index;
+                    ++texture_buffer_it;
+                }
+            }};
+            buffer_cache.UnbindGraphicsTextureBuffers(stage);
+
+            const Shader::Info& info{stage_infos[stage]};
+            if constexpr (Spec::has_texture_buffers) {
+                for (const auto& desc : info.texture_buffer_descriptors) {
+                    add_buffer(desc);
+                }
+            }
+            if constexpr (Spec::has_image_buffers) {
+                for (const auto& desc : info.image_buffer_descriptors) {
+                    add_buffer(desc);
+                }
+            }
+            texture_buffer_it += Shader::NumDescriptors(info.texture_descriptors);
+            if constexpr (Spec::has_images) {
+                texture_buffer_it += Shader::NumDescriptors(info.image_descriptors);
             }
         }};
-        buffer_cache.UnbindGraphicsTextureBuffers(stage);
+        if constexpr (Spec::enabled_stages[0]) {
+            bind_stage_info(0);
+        }
+        if constexpr (Spec::enabled_stages[1]) {
+            bind_stage_info(1);
+        }
+        if constexpr (Spec::enabled_stages[2]) {
+            bind_stage_info(2);
+        }
+        if constexpr (Spec::enabled_stages[3]) {
+            bind_stage_info(3);
+        }
+        if constexpr (Spec::enabled_stages[4]) {
+            bind_stage_info(4);
+        }
 
-        const Shader::Info& info{stage_infos[stage]};
-        if constexpr (Spec::has_texture_buffers) {
-            for (const auto& desc : info.texture_buffer_descriptors) {
-                add_buffer(desc);
-            }
+        if (phase == ConfigurePhase::Resolve) {
+            return true;
         }
-        if constexpr (Spec::has_image_buffers) {
-            for (const auto& desc : info.image_buffer_descriptors) {
-                add_buffer(desc);
-            }
-        }
-        texture_buffer_it += Shader::NumDescriptors(info.texture_descriptors);
-        if constexpr (Spec::has_images) {
-            texture_buffer_it += Shader::NumDescriptors(info.image_descriptors);
-        }
-    }};
-    if constexpr (Spec::enabled_stages[0]) {
-        bind_stage_info(0);
-    }
-    if constexpr (Spec::enabled_stages[1]) {
-        bind_stage_info(1);
-    }
-    if constexpr (Spec::enabled_stages[2]) {
-        bind_stage_info(2);
-    }
-    if constexpr (Spec::enabled_stages[3]) {
-        bind_stage_info(3);
-    }
-    if constexpr (Spec::enabled_stages[4]) {
-        bind_stage_info(4);
     }
 
     if (regs.transform_feedback_enabled != 0) {

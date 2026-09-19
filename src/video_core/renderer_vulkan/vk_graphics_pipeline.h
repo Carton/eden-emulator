@@ -72,10 +72,38 @@ class RescalingPushConstant;
 class RenderAreaPushConstant;
 class Scheduler;
 
+// (local-only) P2 depth-1 draw resolver: per-draw state handed between the
+// resolve phase (binding lookups, snapshot-driven) and the commit phase
+// (uploads + scheduler records, GPU thread). In synchronous mode both phases
+// see the live engine; when the resolver thread is active, ctx carries the
+// snapshot engine so both phases observe draw N's state regardless of how far
+// the GPU thread has parsed into draw N+1.
+struct DrawContext {
+    Tegra::Engines::Maxwell3D* engine{};
+    Tegra::MemoryManager* gpu_memory{};
+
+    // Resolve-phase outputs consumed by the commit phase. Persisted to avoid
+    // per-draw heap allocation.
+    boost::container::small_vector<VideoCommon::ImageViewInOut, 64> views;
+    boost::container::small_vector<VideoCommon::SamplerId, 64> samplers;
+
+    void Reset(Tegra::Engines::Maxwell3D* engine_, Tegra::MemoryManager* gpu_memory_) {
+        engine = engine_;
+        gpu_memory = gpu_memory_;
+        views.clear();
+        samplers.clear();
+    }
+};
+
 class GraphicsPipeline {
     static constexpr size_t NUM_STAGES = Tegra::Engines::Maxwell3D::Regs::MaxShaderStage;
 
 public:
+    enum class ConfigurePhase : u8 {
+        Resolve, // binding resolution only (safe off the GPU thread)
+        Tail,    // uploads + scheduler records (GPU thread only)
+        All,     // resolve + tail back to back (synchronous path)
+    };
     explicit GraphicsPipeline(
         Scheduler& scheduler, BufferCache& buffer_cache, TextureCache& texture_cache,
         vk::PipelineCache& pipeline_cache, VideoCore::ShaderNotify* shader_notify,
@@ -107,7 +135,22 @@ public:
     void AddTransition(GraphicsPipeline* transition);
 
     bool Configure(bool is_indexed) {
-        return configure_func(this, is_indexed);
+        DrawContext ctx{maxwell3d, gpu_memory};
+        return Configure(ctx, is_indexed);
+    }
+
+    bool Configure(DrawContext& ctx, bool is_indexed) {
+        return configure_func(this, ctx, is_indexed, ConfigurePhase::All);
+    }
+
+    // (local-only) P2 phase split: Resolve is engine-snapshot driven and
+    // touches no scheduler state; Tail performs uploads and records commands.
+    bool ConfigureResolve(DrawContext& ctx, bool is_indexed) {
+        return configure_func(this, ctx, is_indexed, ConfigurePhase::Resolve);
+    }
+
+    bool ConfigureTail(DrawContext& ctx, bool is_indexed) {
+        return configure_func(this, ctx, is_indexed, ConfigurePhase::Tail);
     }
 
     [[nodiscard]] GraphicsPipeline* Next(const GraphicsPipelineCacheKey& current_key) noexcept {
@@ -139,7 +182,10 @@ public:
 
     template <typename Spec>
     static auto MakeConfigureSpecFunc() {
-        return [](GraphicsPipeline* pl, bool is_indexed) { return pl->ConfigureImpl<Spec>(is_indexed); };
+        return [](GraphicsPipeline* pl, DrawContext& ctx, bool is_indexed,
+                  ConfigurePhase phase) {
+            return pl->ConfigureImpl<Spec>(ctx, is_indexed, phase);
+        };
     }
 
     void SetEngine(Tegra::Engines::Maxwell3D* maxwell3d_, Tegra::MemoryManager* gpu_memory_) {
@@ -149,7 +195,7 @@ public:
 
 private:
     template <typename Spec>
-    bool ConfigureImpl(bool is_indexed);
+    bool ConfigureImpl(DrawContext& ctx, bool is_indexed, ConfigurePhase phase);
 
     bool ConfigureDraw(const RescalingPushConstant& rescaling,
                        const RenderAreaPushConstant& render_are);
@@ -169,7 +215,7 @@ private:
     GuestDescriptorQueue& guest_descriptor_queue;
     DescriptorBufferRing& descriptor_buffer_ring;
 
-    bool (*configure_func)(GraphicsPipeline*, bool){};
+    bool (*configure_func)(GraphicsPipeline*, DrawContext&, bool, ConfigurePhase){};
 
     std::vector<GraphicsPipelineCacheKey> transition_keys;
     std::vector<size_t> transition_hashes;
