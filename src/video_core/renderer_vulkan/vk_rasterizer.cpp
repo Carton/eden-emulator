@@ -239,6 +239,10 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
         const char* snapshot{std::getenv("EDEN_TOKEN_SNAPSHOT")};
         const char* check{std::getenv("EDEN_TOKEN_CHECK")};
         token_check_enabled = check != nullptr && *check != '\0' && *check != '0';
+        const char* nodefer{std::getenv("EDEN_TOKEN_NODEFER")};
+        token_nodefer = nodefer != nullptr && *nodefer != '\0' && *nodefer != '0';
+        const char* tail_imm{std::getenv("EDEN_TOKEN_TAIL_IMM")};
+        token_tail_immediate = tail_imm != nullptr && *tail_imm != '\0' && *tail_imm != '0';
         LOG_INFO(Render_Vulkan,
                  "Draw tokens: mode={} snapshot={} check={}",
                  token_mode == TokenMode::SyncWorker ? "sync-worker" : "inline",
@@ -363,7 +367,7 @@ void RasterizerVulkan::ApplyDeferredInlineWrites() {
 }
 
 bool RasterizerVulkan::TryDeferInlineWrite(GPUVAddr addr, std::span<const u8> data) {
-    if (!resolver || !resolver->ResolveInFlight() ||
+    if (token_nodefer || !resolver || !resolver->ResolveInFlight() ||
         std::this_thread::get_id() != gpu_thread_id) {
         return false;
     }
@@ -448,6 +452,25 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
         return;
     }
     if (resolver->SnapshotAndEnqueue(*maxwell3d, pipeline, is_indexed, instance_count)) {
+        if (token_tail_immediate) {
+            // Bisect mode: snapshot + resolve + commit all inside Draw(),
+            // structurally identical to the serial path plus the shadow.
+            resolver->ExecuteResolve();
+            DrawResolver::Job& job{resolver->TakeJob()};
+            Tegra::Engines::Maxwell3D& shadow{resolver->SnapshotEngine()};
+            {
+                VideoCommon::tls_engine_snapshot = &shadow;
+                std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
+                FinishDrawLocked(shadow, *job.pipeline, job.ctx, job.is_indexed,
+                                 job.instance_count);
+                VideoCommon::tls_engine_snapshot = nullptr;
+            }
+            ApplyDeferredInlineWrites();
+            resolver->FinishJob(*maxwell3d);
+            gpu.TickWork();
+            ++pipelined_draws;
+            return;
+        }
         pending_commit.store(true, std::memory_order_release);
         ++pipelined_draws;
         if (pipelined_draws % 2000 == 0) {

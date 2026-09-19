@@ -261,6 +261,9 @@ private:
     };
     TokenMode token_mode{TokenMode::Off};
     bool token_check_enabled{false};
+    // (local-only) bisect switches for the right-edge HUD divergence.
+    bool token_nodefer{false};       // writes never deferred
+    bool token_tail_immediate{false};// commit runs inside Draw, not deferred
     std::unique_ptr<DrawResolver> resolver;
     std::atomic<bool> pending_commit{false};
     std::thread::id gpu_thread_id{};
