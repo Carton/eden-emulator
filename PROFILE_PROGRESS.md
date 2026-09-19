@@ -1833,3 +1833,18 @@ Draw/PrepareDraw 总时长加同样的 chrono 对数，逐 draw 均值对场景�
 
 ETW 复用要点：MCP 大 trace（1GB）下会丢已处理状态，查询尽量一次跑完；按 Timestamp
 逐值分组会超时；UAC helper 双相位采集模式（wpr_helper.cmd 轮询 go 文件）好用。
+
+### 28.9 补充：全线程对比 + 采集方差闭环 + AMD uProf（2026-09-19 夜）
+- **全线程对比（v2 背靠背，修复后二进制）**：GPU 线程 OFF 21,987 vs ON 22,387（+1.8%），
+  JIT 三核 152k vs 147k——别的线程无隐藏热点。推论：总忙度持平+fps -12% ⇒ 每帧 GPU
+  线程工作 +~14% 且摊匀在所有函数 ⇒ 缓存局部性损失特征（影子 16KB 工作集+两段式），
+  采样式 profile 不可见。
+- **40s 窗方差闭环**：p2_off(14:43)=60,186 / v1-OFF=16,661 / v2-OFF≈33k——同场景同协议
+  3.6 倍散布（昼夜/天气/动画相位，今天已证环境循环真实存在）。规则固化：跨窗绝对量
+  对比一律无效；只认背靠背配对+逐 draw 归一。
+- **每 draw 自插桩已落**（commit）：prepare/tail 计时 + 既有 resolve 603ns，5000/2000
+  draw 均值打日志，场景带免疫。验证局待机器静置时跑（21:03-21:10 三局全 void：
+  用户操作机器→前景锁→tap 全失效→停菜单→CSV 陈旧；bit-identical RESULT 是 void 签名）。
+- **AMD uProf 5.3.521 @ `D:\Program Files\AMD\AMDuProf\`**（CPU=Ryzen 5 5600 ✓ 适用）。
+  定位：IBS 按函数归因 L2/L3 miss 与访存延迟——验证"每 draw +14% 摊匀=缓存冷"假设的
+  对味工具，ETW 做不到。下轮：自插桩先行定量，uProf 随后定位具体函数。
