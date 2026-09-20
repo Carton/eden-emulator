@@ -160,6 +160,7 @@ struct DrawResolver::WorkerState final : Scheduler::CaptureSyncBridge {
             lock.unlock();
             std::exception_ptr failure;
             try {
+                Scheduler::ResolverThreadScope record_scope{*scheduler};
                 owner.ExecuteResolveImpl(*scheduler, this);
             } catch (...) {
                 failure = std::current_exception();

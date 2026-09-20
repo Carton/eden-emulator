@@ -2629,3 +2629,71 @@ empty/multi-chunk paths, channel changes, shutdown and service-error propagation
 Natural scene runs with zero sync requests do NOT validate the bridge. Because
 scheduler producer state is only exclusively borrowed here, removing the GPU
 rendezvous is prohibited until 2A state/guest-dependency work is implemented.
+
+
+### 32.1 First 1B crash: mixed 1A/1B object layouts (2026-09-20, local-only)
+
+Root cause confirmed offline, not a missing CaptureScope or an async decoder
+callback. User reports worker/check/forensics crashed around t+27s, before the
+first DrawToken diagnostic. Examined the existing dump and executable only;
+no build/compiler, game launch, live debugging or git commit was performed.
+
+Evidence:
+- Dump: F:/prof/dumps/20260920T093356535Z-27688/crash.dmp and context.bin.
+  Fault thread 0x6b2c = 27436; RIP 0x7ff7c500428c, RCX=1.
+- IMAGE_BASE 0x7ff7c4580000 -> fault RVA 0xa8428c. Existing exe preferred
+  base 0x140000000 -> disassembly address 0x140a8428c. Dump module timestamp
+  0x6aafa7e0 and image size 0x33db000 match build-vs22/bin/eden.exe; fault
+  bytes in the dump match the executable too.
+- Fault is mov rbx,[rcx+0x10], bytes 48 8b 59 10. Immediately before this,
+  mov rcx,[rdi+0x18] fetches the PRIVATE CapturedBatch current pointer.
+  Control flow comes through ActiveCapture() and its batch reference, not
+  through the main-chunk fallback. RCX=1 therefore explains the read at 0x11.
+- Same exe's ActiveCapture assertion helper tests capturing at batch+0x18
+  and handed_off at +0x19; its SealChunk reads current from +0x20.
+  The old texture upload Record instantiation reads current at +0x18 instead.
+  Receiver/handed_off added in 1B moved these fields: old inline code interprets
+  capturing=true as pointer 1. This is a concrete ABI/ODR inconsistency within
+  one executable, independent of ICF's occasionally misleading symbol names.
+- vk_texture_cache.cpp.obj mtime 16:25:36 vs vk_scheduler.cpp.obj 17:30:58;
+  executable 17:31:13. The final ninja-log entries rebuild resolver/scheduler/
+  rasterizer, then relink. Stale texture/runtime consumers survived the header
+  layout change. This does not establish WHY dependency rebuilding was skipped.
+- QueueAsyncDecode's pool lambda converts data and publishes completion only;
+  UploadMemory occurs synchronously or in TickAsyncDecode on the caller.
+  No evidence supports hypothesis (c) for this fault. Hypothesis (b) describes
+  the failing branch, but the mechanism is mixed layouts, not arena overwrite.
+
+Source hardening (three C++ files; 1A/default semantics preserved):
+- ActiveCapture now takes a defaulted CaptureAbiV2 tag, changing its link symbol.
+  Deliberately no legacy no-argument definition: the observed stale template
+  instances must fail to link instead of silently using obsolete offsets.
+- Dedicated resolver installs ResolverThreadScope around the whole invocation,
+  including capture-suspended rendezvous. A separate TLS marker routes 1B Record
+  to out-of-line RecordResolverCommandAbiV2. Batch fields, allocation, overflow
+  and accounting are accessed inside scheduler.cpp, not runtime inline bodies.
+  The synchronous type-erased thunk only constructs the original TypedCommand;
+  it retains the caller's const qualification and move behavior.
+- Soft ASSERT plus logic_error rejects missing/mismatched capture, wrong owner,
+  handed-off batches or wrong producer. The existing mailbox propagates that
+  error to GPU; it never falls back to the main chunk or silently drops commands.
+  Scope setup/teardown and empty-chunk fit also have diagnostic assertions.
+- Existing CaptureScope extent, 1A Record/overflow implementation, decode policy,
+  bridge protocol, env gates and diagnostic counters remain unchanged. Extending
+  the real capture scope or serializing the decoder pool would not fix this ABI
+  mismatch, so neither speculative change was made.
+
+Static verification: git diff --check passed. Exact source comparison against
+HEAD confirms the old 1A/default Record branch, CapturedBatch::Record template
+and ExecuteResolveImpl body are unchanged. Manual checks covered thunk argument
+lifetime, const/nonconst callable types, soft-assert failure propagation, TLS
+RAII and the old/new ActiveCapture signature. No compilation/runtime verification.
+
+Required ZCode action: cleanly rebuild ALL consumers of vk_scheduler.h and relink
+(or perform a clean full build). Rebuilding only the three directly edited .cpp
+files is insufficient. The on-disk executable was not changed by this turn and
+still contains the faulty mixture. A legacy ActiveCapture unresolved symbol is
+intentional evidence of stale objects, not a reason to restore the old overload.
+Then repeat worker/check/forensics plus 1A/default regression and rare sync-path
+acceptance. This repairs the confirmed crash mechanism; it does not claim that
+all other 1B paths have now been runtime-validated.

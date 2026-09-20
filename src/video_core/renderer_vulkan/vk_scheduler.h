@@ -50,6 +50,18 @@ public:
     // parks until completion, servicing only explicitly handed-off prefixes.
     // Live scheduler state is borrowed exclusively; this is NOT async-safe.
     class CapturedBatch;
+    // Entire dedicated-resolver invocation, including capture suspension.
+    // Missing capture on this thread must never fall back to the main chunk.
+    class ResolverThreadScope {
+    public:
+        explicit ResolverThreadScope(Scheduler& scheduler);
+        ~ResolverThreadScope();
+        ResolverThreadScope(const ResolverThreadScope&) = delete;
+        ResolverThreadScope& operator=(const ResolverThreadScope&) = delete;
+
+    private:
+        Scheduler& scheduler;
+    };
     enum class CaptureSync {
         Publish,
         WaitWorker,
@@ -149,6 +161,16 @@ public:
     template <typename T>
         requires std::is_invocable_v<T, vk::CommandBuffer, vk::CommandBuffer>
     void RecordWithUploadBuffer(T&& command) {
+        if (resolver_record_owner) {
+            // Keep 1B batch field offsets out of texture/runtime template
+            // instantiations. The thunk runs immediately, not on VulkanWorker.
+            auto* opaque = const_cast<void*>(static_cast<const void*>(std::addressof(command)));
+            RecordResolverCommandAbiV2(opaque, [](CommandChunk& target, void* opaque) {
+                // T retains the caller's const qualification after type erasure.
+                return target.Record(*static_cast<std::remove_reference_t<T>*>(opaque));
+            });
+            return;
+        }
         if (active_capture) {
             ActiveCapture()->batch.Record(command);
             return;
@@ -377,10 +399,16 @@ public:
     };
 
 private:
-    ResolverCaptureContext* ActiveCapture();
+    // Intentional link barrier: stale 1A/initial-1B Record instantiations used
+    // ActiveCapture() and incompatible CapturedBatch offsets. Do not provide
+    // the old overload; unresolved references require rebuilding consumers.
+    struct CaptureAbiV2 {};
+    ResolverCaptureContext* ActiveCapture(CaptureAbiV2 = {});
+    void RecordResolverCommandAbiV2(void* command, bool (*record)(CommandChunk&, void*));
     void DrainCapturePrefix();
     bool BridgeCaptureSync(CaptureSync operation, u64 tick = 0);
     static thread_local ResolverCaptureContext* active_capture;
+    static thread_local Scheduler* resolver_record_owner;
 
     struct State {
         VkRenderPass renderpass{};

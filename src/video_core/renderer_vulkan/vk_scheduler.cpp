@@ -6,6 +6,7 @@
 
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 
@@ -28,6 +29,58 @@
 namespace Vulkan {
 
 thread_local Scheduler::ResolverCaptureContext* Scheduler::active_capture = nullptr;
+thread_local Scheduler* Scheduler::resolver_record_owner = nullptr;
+
+Scheduler::ResolverThreadScope::ResolverThreadScope(Scheduler& scheduler_)
+    : scheduler{scheduler_} {
+    const bool valid = resolver_record_owner == nullptr && active_capture == nullptr &&
+                       std::this_thread::get_id() != scheduler.worker_thread.get_id();
+    ASSERT_MSG(valid, "DrawToken worker record scope must be exclusive");
+    if (!valid) {
+        throw std::logic_error("DrawToken worker record scope conflict");
+    }
+    resolver_record_owner = &scheduler;
+}
+
+Scheduler::ResolverThreadScope::~ResolverThreadScope() {
+    ASSERT_MSG(resolver_record_owner == &scheduler && active_capture == nullptr,
+               "DrawToken worker record scope leaked capture state");
+    resolver_record_owner = nullptr;
+}
+
+void Scheduler::RecordResolverCommandAbiV2(void* command,
+                                          bool (*record)(CommandChunk&, void*)) {
+    auto* capture = active_capture;
+    const bool valid = resolver_record_owner == this && capture &&
+                       &capture->scheduler == this && capture->bridge &&
+                       capture->batch.owner == this && capture->job_id != 0 &&
+                       capture->batch.job_id == capture->job_id && capture->batch.capturing &&
+                       !capture->batch.handed_off &&
+                       capture->batch.producer == std::this_thread::get_id();
+    ASSERT_MSG(valid, "DrawToken worker Record requires an owned, active capture");
+    if (!valid) {
+        // Soft assertion alone may continue. Reject the job rather than
+        // silently recording into the GPU producer's chunk or dropping work.
+        throw std::logic_error("DrawToken worker Record outside capture");
+    }
+    auto& batch = capture->batch;
+    if (!batch.current) {
+        batch.current = std::make_unique<CommandChunk>(true);
+    }
+    const size_t before = batch.current->UsedBytes();
+    if (record(*batch.current, command)) {
+        batch.captured_bytes += batch.current->UsedBytes() - before;
+        return;
+    }
+    batch.SealChunk();
+    batch.current = std::make_unique<CommandChunk>(true);
+    const bool recorded = record(*batch.current, command);
+    ASSERT_MSG(recorded, "DrawToken worker command must fit in an empty chunk");
+    if (!recorded) {
+        throw std::logic_error("DrawToken worker command exceeds chunk capacity");
+    }
+    batch.captured_bytes += batch.current->UsedBytes();
+}
 
 Scheduler::CaptureScope::CaptureScope(Scheduler& scheduler, CapturedBatch& batch, u64 job_id,
                                      CaptureSyncBridge* bridge, std::thread::id receiver)
@@ -54,7 +107,7 @@ Scheduler::CaptureScope::~CaptureScope() {
     active_capture = nullptr;
 }
 
-Scheduler::ResolverCaptureContext* Scheduler::ActiveCapture() {
+Scheduler::ResolverCaptureContext* Scheduler::ActiveCapture(CaptureAbiV2) {
     if (active_capture) {
         ASSERT(&active_capture->scheduler == this);
         ASSERT(active_capture->batch.owner == this);
