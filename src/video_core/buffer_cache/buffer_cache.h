@@ -12,6 +12,7 @@
 #include <memory>
 #include <numeric>
 
+#include "common/logging.h"
 #include "common/range_sets.inc"
 #include "video_core/buffer_cache/buffer_cache_base.h"
 #include "video_core/guest_memory.h"
@@ -2075,7 +2076,29 @@ void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
 template <class P>
 Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
                                              bool is_written) const {
-    const GPUVAddr gpu_addr = gpu_memory->Read<u64>(ssbo_addr);
+    // (local-only) Thread-local diagnostics avoid shared writes between callers.
+    // Report completed calls before starting the next one, including early returns.
+    static thread_local u64 total_bindings{};
+    static thread_local u64 qword_eliminated_translations{};
+    static thread_local u64 address_pair_eliminated_translations{};
+    if (total_bindings != 0 && (total_bindings & 0xffff) == 0) [[unlikely]] {
+        LOG_INFO(HW_GPU, "SerialCuts ssbo diag: total_bindings={} "
+                        "qword_eliminated_translations={} address_pair_eliminated_translations={}",
+                 total_bindings, qword_eliminated_translations,
+                 address_pair_eliminated_translations);
+    }
+    ++total_bindings;
+    constexpr GPUVAddr page_mask = Core::DEVICE_PAGESIZE - 1;
+    const bool qwords_in_one_page =
+        (ssbo_addr & page_mask) <= Core::DEVICE_PAGESIZE - 2 * sizeof(u64);
+    const u8* const qword_pointer =
+        qwords_in_one_page ? gpu_memory->GetPointer(ssbo_addr) : nullptr;
+    GPUVAddr gpu_addr;
+    if (qword_pointer) {
+        std::memcpy(&gpu_addr, qword_pointer, sizeof(gpu_addr));
+    } else {
+        gpu_addr = gpu_memory->Read<u64>(ssbo_addr);
+    }
 
     if (gpu_addr == 0) {
         return NULL_BINDING;
@@ -2084,7 +2107,14 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
     const auto size = [&]() {
         const u32 memory_layout_size =
             static_cast<u32>(gpu_memory->GetMemoryLayoutSize(gpu_addr));
-        const u64 next_qword = gpu_memory->Read<u64>(ssbo_addr + 8);
+        // Keep the second load after the layout query and the null-address exit.
+        u64 next_qword;
+        if (qword_pointer) {
+            std::memcpy(&next_qword, qword_pointer + sizeof(u64), sizeof(next_qword));
+            ++qword_eliminated_translations;
+        } else {
+            next_qword = gpu_memory->Read<u64>(ssbo_addr + 8);
+        }
         const u32 packed_size = static_cast<u32>(next_qword);
         const bool next_qword_is_size = static_cast<u32>(next_qword >> 32) == 0 &&
                                         packed_size != 0 &&
@@ -2105,7 +2135,14 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
         LOG_DEBUG(HW_GPU, "Failed to find storage buffer for cbuf index {}", cbuf_index);
         return NULL_BINDING;
     }
-    const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
+    std::optional<DAddr> device_addr;
+    // Same-page translation is affine; never infer continuity across a page.
+    if ((aligned_gpu_addr >> Core::DEVICE_PAGEBITS) == (gpu_addr >> Core::DEVICE_PAGEBITS)) {
+        device_addr = *aligned_device_addr + (gpu_addr - aligned_gpu_addr);
+        ++address_pair_eliminated_translations;
+    } else {
+        device_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
+    }
     ASSERT_MSG(device_addr, "Unaligned storage buffer address not found for cbuf index {}",
                cbuf_index);
     // The end address used for size calculation does not need to be aligned
