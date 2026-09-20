@@ -90,7 +90,7 @@ RelWithDebInfo = `/O2 /Ob1 /Zi` + `/DEBUG /OPT:REF /OPT:ICF`，就是 profile �
    `button_b=code:90`（Z）、`button_plus=code:78`（N）。**原手柄配置备份在
    `qt-config.ini.bak-controller`，想还原手柄操作就把它拷回去。**
 
-注入机制（`F:\prof\focus_test.ps1` / `auto_play.ps1` 内的 C# `Win32` 类）：
+注入机制（`tools/prof/focus_test.ps1` / `auto_play.ps1` 内的 C# `Win32` 类）：
 1. `Process.GetProcessesByName("eden")` 拿 `MainWindowHandle`
 2. 抢焦点：`ShowWindow(SW_RESTORE)` + `AttachThreadInput` + `SetForegroundWindow`，
    失败则先发一个**单独的 Left Alt（扫描码 0x38）**再重试（"Alt-trick"，让系统认为我们有输入权）
@@ -139,7 +139,7 @@ RelWithDebInfo = `/O2 /Ob1 /Zi` + `/DEBUG /OPT:REF /OPT:ICF`，就是 profile �
 ```bash
 # 0) 游戏普通权限启动 + auto_play 进游戏（见 §2.2）
 # 1) 一体化采集脚本（启动→采 100s→落盘，必须同一提权进程！）
-powershell.exe -NoProfile -Command "Start-Process -Verb RunAs -WindowStyle Minimized -FilePath 'F:\prof\wpr_run.cmd'"
+powershell.exe -NoProfile -Command "Start-Process -Verb RunAs -WindowStyle Minimized -FilePath 'tools/prof/wpr_run.cmd'"
 #    wpr_run.cmd 内容 = wpr -start CPU -start GPU -filemode → timeout 100 → wpr -stop F:\prof\totk_cpugpu.etl
 # 2) 轮询 F:\prof\wpr_run.log 出现 WPR_DONE 即完成（25s 小样本用 wpr_run2.cmd → totk_cpu25.etl）
 ```
@@ -342,6 +342,14 @@ bench_run 已有 `fps>52 → SUSPICIOUS` 提示；看到它或 taps 的 focus_ok
 
 ## 7. F:\prof 文件与脚本清单
 
+> **2026-09-20 起脚本入库维护**：活跃/有效脚本已复制进仓库 `tools/prof/`（清单、
+> 用法、淘汰名单见 `tools/prof/README.md`；路径约定：`EDEN_PROF_DATA` 默认
+> `F:\prof` = 数据归档，`EDEN_DIR` 默认仓库 `build-vs22\bin`，`EDEN_NSP` 默认
+> `F:\prof\TOTK.nsp`）。**F:\prof 从此只放数据**（bench_results.csv / shots /
+> diag / trace / 存档），不要再往里加脚本。下表的脚本行为历史索引，现行版本以
+> `tools/prof/` 为准；历轮 `*_watch.py` 一次性看门狗已被 `tools/prof/quiet_watch.py`
+> （通用静置序列驱动，sequence 文件 + PAIRS 比值汇总）取代。
+>
 > **2026-09-14 起**：活跃脚本（check_config / bench_run / fixverify_run / visual_run /
 > rot_test / rot_trace / patch_input）的 EDEN_DIR 默认值已改为 master 构建目录
 > `F:\devel\opensource\eden-emulator\build-vs22\bin`（EDEN_DIR 环境变量仍可覆盖；
@@ -365,7 +373,7 @@ bench_run 已有 `fps>52 → SUSPICIOUS` 提示；看到它或 taps 的 focus_ok
 | `auto_play.ps1` | 全自动进游戏（等窗口→110s→A×5 每 12s），日志 `auto_play.log` |
 | `master_run.ps1` | 编排器：提权拉起 auto_play + cap_only（均隐藏窗口）——nsys 时代遗留 |
 | `cap_only.ps1` | nsys 采集脚本（-t wddm -d 300）——nsys 路线遗留，当前不用 |
-| `wpr_run.cmd` | **主力采集**：提权一体化 CPU+GPU 100s → `totk_cpugpu.etl` |
+| `wpr_run.cmd` | **主力采集**：提权一体化 CPU+GPU 100s → `totk_t3.etl`（注：曾名 totk_cpugpu.etl，脚本几经改名，以 cmd 内容为准） |
 | `wpr_run2.cmd` | 快查版：CPU-only 25s → `totk_cpu25.etl` |
 | `wpr_start.cmd` / `wpr_stop.cmd` | 分离式启停（有丢会话坑，仅参考） |
 | `cleanup.cmd` | 提权强杀 eden/nsys/LosslessScaling |
@@ -938,7 +946,7 @@ NVIDIA App 15:55 配置变更、多轮强杀/ETW 采集。**验收流程：重�
 
 ### 16.4 工具沉淀与坑
 
-- **`F:\prof\check_config.py`**（启动前检查，已接入 rot_test.py / bench_run.py preflight，
+- **`tools/prof/check_config.py`**（启动前检查，已接入 rot_test.py / bench_run.py preflight，
   rc≠0 拒绝起测）：守护调优键（ASTC CpuAsync/Bc3/async shaders/CPU Unsafe）+
   **用户基线键（FSR=6/FXAA=1/GPU Low=0，勿"修"回编译默认）** + 默认键白名单 +
   **禁跑进程（NVIDIA Overlay.exe / LosslessScaling.exe）**。用户问过"qt-config 是不是
@@ -1388,7 +1396,7 @@ trace 同时含调度时间轴+采样栈+GPU 行，天然时间对齐。基建�
 2. **wpr 内存环形缓冲**（无 -filemode）：常驻零磁盘写，检测到卡顿立即 -stop
    冻结最近 ~50s 现场。CPU-only profile（CPU+GPU 事件量 200MB/s 环形只盖 5s，
    CPU-only 24MB/s、默认池 ~1GiB ≈ 42-50s 覆盖）。
-3. **`F:\prof\stutter_watch.py`**（提权哨兵，入口 `stutter_watch_start.bat`
+3. **`tools/prof/stutter_watch.py`**（提权哨兵，入口 `stutter_watch_start.bat`
    自提权）：检测规则 = 帧间隔 ≥ severe_ms(默认50) 且 ≥ ratio(1.6)×滚动中位
    (120帧) 且过冷却期(5s) → 后台线程 wpr -stop 落盘 `stutter_<时间>.etl` +
    侧车 JSON（detected_epoch / wpr_start_epoch / frame_ms / med / 最近30帧 /
@@ -1753,7 +1761,7 @@ CommitPendingDraw 结构与全部 45 个 FlushPendingDraw barrier）。depth-1 �
 - journal 比全拷快：token-full 36.26fps vs journal 38.81fps（同日背靠背带内 ~+2.5fps）。
 
 ### 28.3 图像 QA 体系（用户要求，本轮建成；此前完全没有）
-- **采集**：`F:\prof\shot_capture.py` ——PrintWindow(PW_RENDERFULLCONTENT)+CreateDIBSection
+- **采集**：`tools/prof/shot_capture.py` ——PrintWindow(PW_RENDERFULLCONTENT)+CreateDIBSection
   抓 "Form" 渲染窗口，**遮挡免疫**。（教训：先前 ImageGrab 屏幕抓取被 IDE 遮挡污染，
   一整批结论作废重验；MCP 图像识别当场拆穿了假截图。）
   **【28.11 修正】**PrintWindow 路径其实当晚从未成功（GDI 句柄截断+CreateDIBSection
@@ -1812,7 +1820,7 @@ flags_since_snapshot）→Dirty::Shaders 丢→管线缓存陈旧。修：SetDir
 3. 加载画面大窗复测（HQ 采集法已验证）。
 
 ### 28.8 ETW 差分轮：scissors 复活 bug（已修）+ 方法论教训（2026-09-19 深夜）
-工具：`F:\prof\tailimm_ab.py`（一次 UAC 提权 helper，同二进制同会话背靠背双 40s 采集，
+工具：`tools/prof/tailimm_ab.py`（一次 UAC 提权 helper，同二进制同会话背靠背双 40s 采集，
 tailimm_off/on.etl；v1=修复前二进制，v2=修复后）。ETW MCP 按函数名直接分组（无需手工
 symbolizer）。
 
@@ -1877,7 +1885,7 @@ ETW 复用要点：MCP 大 trace（1GB）下会丢已处理状态，查询尽量
 **宏观验证协议（最终验收口径，已固化进脚本）**——三层：
 1. **局部归因**：自插桩逐 draw 均值（prepare/resolve/tail ns，28.9 落地），
    场景带免疫，回答"贵在哪"。
-2. **宏观速率**：`F:\prof\bench_ab.py`——N 对 AB/BA 交错背靠背（消慢漂移），报告
+2. **宏观速率**：`tools/prof/bench_ab.py`——N 对 AB/BA 交错背靠背（消慢漂移），报告
    **逐对比值 B/A 的中位数+范围**；单局绝对 fps 只在机器静置时有效，只报带内范围。
    判读阈值：|中位比值-1| 须大于干净 golden-vs-golden 比值带宽（~±2%）才算真差异。
 3. **宏观 ETW**：只做同脚本背靠背对 + **窗内 draw 数归一**（diag 计数器差分），
@@ -2040,7 +2048,7 @@ CaptureUniformEpoch 改读 pipeline 不可变布局。
 
 **诊断基建突破**：WER 事件 + PDB 符号化打通（ctypes/dbghelp 三层坑：GDI 句柄截断同款
 的 restype 问题、SYMBOL_INFO.SizeOfStruct 必须预填、ICF 折叠符号；最终用 cl 编译
-`F:\prof\sym.cpp` 工具，`sym.exe eden.exe <RVA>` 一击必中）。
+`tools/prof/sym.cpp` 工具，`sym.exe eden.exe <RVA>` 一击必中）。
 
 **epoch hit/miss 定论**：hit 96.5% / miss 0.3% / classic 3.4%——**epoch 的 -3.5~4%
 不是 miss，是捕获拷贝本身**；对症药=memcmp 短路（70.7% 内容重复，§28.13），下轮可做。
@@ -2066,3 +2074,45 @@ golden 局 4 连败（token 局全胜疑为巧合小样本），按"机器异常
 **28.16 入口**：① 机器状态确认 + golden QA 补测；② memcmp 短路（回收 epoch 拷贝成本）；
 ③ 批量子交接设计实施（resolver 私有命令捕获 + GPU 线程合并点）——async 的正解；
 ④ uProf。
+
+### 28.16 §28.16 memcmp 判决 + 工具链入库 + 机器层问题（2026-09-20 上午）
+
+**memcmp 短路实施+判决**（79a2d089c0）：固定槽表（64×2KB，按 (addr,size) 键控、
+哈希探测+时钟逐出，`EDEN_TOKEN_EPOCH_MEMCMP=0` 为关臂）取代 job 内 8KB arena。
+tail 读 `bytes+slot_offset` **零改动**；槽只在 capture 时写、tail(N) 先于
+capture(N+1)（CommitPendingDraw 在 SnapshotAndEnqueue 之前，所有启用模式成立）。
+验证：checker 局 **0 mismatch**；短路率 **76.5%**（97.7M skip/127.7M 捕获，
+>70.7% 预测）；关臂 skip=0 证明开关有效。
+**判决：收益 ≈ 0**——同档背靠背 on/off 对 38.53 vs 38.57（比值 0.999，带内），
+resolve_avg 也没动（486 vs 476ns）。**epoch 的 -3.5~4% 主体是"必须读 guest 才能比
+较"**（GpuToCpu + GetPointer + 跨核 L3 读），省掉的那次写本来就是 L1 级——
+§28.13"70.7% 重复 ⇒ memcmp 省拷贝"假设被证伪（该数据是未来"免读"方案——如
+uniform 脏追踪——的依据）。epoch 成本的唯一回收路径 = 异步化（批量子交接）。
+memcmp 代码保留（默认开、零成本，槽表即批量子交接的地基）。
+
+**机器层问题（跨重启存活，未结案）**：用户 08:03 重启后——① wuauserv 仍在崩
+（wuauengcore.dll c0000005，Insider 26200 + UUS 栈）；② **golden（串行）环境 eden
+3/3 在启动 ~30-35s 崩于 nvoglv64.dll 固定偏移 0xebab1c**，token 环境全过
+（昨夜+今晨 4/4）。serial 不执行我们改的任何代码（token 门控全在 Draw 入口前），
+怀疑驱动时序敏感而非我们引入；golden 宏观对照因此全 VOID。定性/修复需用户参与
+（sfc / 驱动重装 / 观察待定）；nvoglv64 崩溃帧可用 tools/prof/sym.cpp 符号化驱动
+偏移（无符号也能判断是否同_site）。
+
+**watcher 踩坑两则**：① 裸调 `bash` 解析到 WSL 的 bash（`/f/...` 路径不存在）导致
+链式 watcher 内构建假失败——cmd 数组里必须用完整 Git Bash 路径；② bench_run 的
+commit 列读 git HEAD 而非 exe 构建时点——commit 后未重建就跑局会把新 commit 号
+写进旧 exe 的行（token-ep-w1/w2 两行即如此，实际跑在 01:35 旧 exe 上）。
+
+**工具链入库（本轮主任务）**：F:\prof 的 23 个 keeper 脚本+4 个新文件入库
+`tools/prof/`（README=清单+约定；详见 §7 迁移注记）。数据归档留 F:\prof
+（EDEN_PROF_DATA 可覆盖）；新看门狗 `quiet_watch.py`+sequence 文件模式取代历轮
+*_watch.py；tailimm_ab 通用化为 PHASES 驱动。AGENTS/skill 的脚本引用已全部换为
+仓库路径。崩溃取证（query_crash.ps1 + sym.cpp）另立 skill `.agents/skills/
+eden-crash-triage`。
+
+**中断说明**：round2（memcmp ABAB×2 + golden-w3 理论测试 + token-epm3）在
+token-epnomc1 后因用户召回暂停；warmup 规则已入 AGENTS（重启后首局只作 warmup）。
+
+**28.17 入口**：① 批量子交接设计实施（主线，epoch/deferred 成本的共同归宿）；
+② golden nvoglv64 崩溃定性（机器层，需用户参与）；③ 恢复被暂停的 golden QA
+对照（等 golden 环境可用后）；④ uProf IBS。
