@@ -2486,3 +2486,42 @@ No lock, retry, tmp cleanup, or persistence policy change was added.
 Validation is static only: reviewed the diff and git diff --check passed.
 Per user instruction, no compilation, game execution or git commit was done;
 the existing binary is unchanged and does not contain this source patch yet.
+
+### 28.18 §28.18 真凶落网（settings rename abort）+ fix 血统完整验收 + 1A 就位（2026-09-20 晚，eb2901fbc0）
+
+**真凶（全天非确定性崩溃的最终解释）**：`ISystemSettingsServer::StoreSettingsFile`
+写 settings.tmp 后 `std::filesystem::rename(tmp,.dat)`——Windows 上目标被并发占用时
+抛 filesystem_error；该函数由 **TimeWorker 后台线程**周期触发
+（SetNetworkSystemClockContext→SetSaveNeeded），异常无人捕获 → terminate → abort →
+**退出码 0xC0000409**（WER：ucrtbase 0xa527e）。取证链：EDEN_FORENSICS 的 SIGABRT
+钩子抓到 26 帧栈（TimeWorker→…→_Throw_fs_error），磁盘残留 settings.tmp+.dat 并存
+为物证。修复（codex，eb2901fbc0）：Load/StoreSettingsFile 函数级 try-catch
+filesystem_error→LOG_ERROR+false，成功路径逐字节不变。**注意：此 bug 与 P2/token/
+评审修复无关（golden 同样中招），是既有代码踩 Windows 语义坑；触发率 ~50% 局，
+今天下午把它误当成了"修复血统毁加载"的帮凶。**伴生第二实例之谜同日结案：
+`StartupChecks` 的 Vulkan 探测子进程（YUZU_IS_CHILD，~3s 优雅退出），良性。
+
+**fix 血统完整验收（16:26 轮，5/5 有效，exe=eb2901fbc0+1A 未启用）**：
+| 局 | fps | med | luma |
+|---|---|---|---|
+| fix-check（checker+forensics） | 31.27 | 31.67 | — |
+| fix-g1 / fix-g2（golden） | 44.03 / 43.90 | 22.50/22.50 | 56.7-56.9 |
+| fix-t1 / fix-t2（token） | 38.32 / 38.72 | 25.83/25.83 | 56.6-56.7 |
+- **checker 0 mismatch**（门通过）；golden 连续两局正常（今早 nvoglv64 启动崩未复发）。
+- 比值 0.8703/0.8819 → **中位 0.876（-12.4%）**——快档 22.50 下 deferred+epoch 成本
+  全额显形，与 §28.13 瓶颈耦合模型一致（-11%+ 预估 ✓）；med 均落 tick 栅格
+  （22.50/25.83），档内差 4 tick 为真实负载差的量化。
+- **图像 QA**：地板（g1 vs g2）PASS bad% 3.1-4.6；golden vs token WARN 3.9-7.5
+  （§28.14 同型的"地板量级"，动画相位主导，无结构异常）。右缘专项不再重跑
+  （epoch 修复自 §28.14 验证后未改动）。
+- 工具校准：bench 关停门 5s→25s（TOTK 16GB 拆卸实测 15.9-16.5s，5s 门 100% VOID，
+  评审期从未实跑过）；shot_compare 的 PIL mock 假方法修复（getdata 物化）。
+
+**批量子交接 1A 已实现待验**（codex，eeebd2c806，EDEN_TOKEN_BATCH=1 门控）：
+私有命令批次+锁外立即拼接（详见设计稿 docs/local/ 与提交信息）。验收序列已挂
+（batch-check 门 + batch on/off ABAB 对，perf 臂不开 forensics），结果进 §28.19。
+
+**28.19 入口**：① 1A 验收（checker 0 mismatch + capture_batches>0 计数闭合 +
+on/off 比值带内 + 图像 QA）；② 1B（worker 执行不重叠）按设计推进；③ 待办：
+validate-memcmp 那类"内容重复→免读"探索已证伪（§28.16），epoch 成本归宿=异步；
+④ 机器层（wuauserv crash-loop、今早 nvoglv64 簇）仍待用户处理。
