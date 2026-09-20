@@ -2337,3 +2337,43 @@ mode created no session. Dump stream directories were checked for ThreadList,
 ModuleList, Exception and ThreadInfo. Artifacts/scripts are under ignored
 build-vs22/forensics-selftest and build-vs22/forensics-*. No game, graphical QA or
 performance benchmark was run; no files in F:\Switch\Yuzu were written.
+
+### 28.17 §28.17 幻影加载死亡事件 + 死亡取证基建 + fix 血统迟到的验收（2026-09-20 下午，commit 5824bb0d73）
+
+**事件全貌**：下午 13:04 起 9 次"游戏加载 ~t+95s 静默死亡"（无 WER、无 CSV、日志半行截断），
+曾依次怀疑：评审修复血统 → 存档（用户曾指错，13:50 换回后仍"死"）→ 注入方式 → 机器/驱动
+（对照实验耗尽：fix/pre-fix 双 exe、golden/token/checker 全组合、重启后仍"死"、lldb attach 后"存活"）。
+**真相：全部是幻影。** 我的复现循环用 `tasklist //FI "PID eq $PID" | grep -q` 判活——该谓词在
+游戏加载的资源峰值期瞬态失败（首次检查点恰好都在 t+94=打键结束+10s），把健康进程误判为死亡；
+下一循环开局的 `taskkill //IM eden.exe //F` 才是真凶（//F=TerminateProcess：无 WER、无 dtor、
+无 CSV、日志截断——完美伪造了"静默崩溃"全部特征）。lldb 局"存活"另有解释：调试中的进程
+taskkill 杀不死。**决定性反证**：forensics 版 exe 的验证局进程"死亡判定"后其 emergency.log
+仍在持续写入 6 分钟；随后优雅关闭，CSV 落盘（15-05 局 162KB）+ MAIN_RETURN→EXIT 链完整。
+**fix 血统（2260b739a7）实际健康**——加载/进游戏/优雅关闭/CSV 全通（首次真实验收）。
+
+**真实的异常仅存**：① 13:04 单次 WER 崩溃（PerfStats dtor c0000005，current_index<5 =
+该局几乎无成功 present；当时用户在机上、局已 VOID；未再复现，forensics 钩子已就位待复发）；
+② 今早 golden 环境 nvoglv64.dll 0xebab1c 启动 3/3 崩（token 4/4 过，未定性，下午未再现）；
+③ wuauserv 全天 crash-loop（Insider 26200，机器层，需用户处理）；④ 一次 lldb 启动实例冻结成
+不可杀僵尸（重启清除）。**教训入库**：判活/判死一律用进程句柄 poll（bench_run 的做法）或
+`Get-Process -Id`，**禁止 `tasklist //FI | grep`**（本机中文表头 + 加载峰值下不可靠）。
+
+**死亡取证基建（codex-delegate，线程 01a0bd83）**：`EDEN_FORENSICS=1` 门控的
+windows_forensics.{h,cpp}（紧急日志 WriteFile+FlushFileBuffers 无堆依赖；UEF 小型 dump；
+VEH 记 c0000005/c00000fd/c0000409；terminate/invalid_parameter/new_handler/SIGABRT 钩子；
+atexit EXIT_BEGIN→有界 flush→EXIT_FLUSH_DONE；selftest=1..6 六通道）。证据落
+`$EDEN_PROF_DATA/dumps/<UTC>-<PID>/`（emergency.log / crash.dmp / context.bin + IMAGE_BASE
+可离线算 RVA 配 sym.exe）。自测六通道全过（1-4 有 dump；5=_exit/6=外部 TerminateProcess
+按设计绕过——覆盖空洞：内联 fastfail(int 29h) 无法钩、需调试器二次机会，已注释在文件头）。
+已知未解小谜：fix 血统每局启动伴生一个 63ms 后的短命第二 eden 实例（3.2s 优雅退出，
+forensics 日志无 SELFTEST 标记）——非 helper（phase1 无 helper），来源待查，无害。
+
+**批量子交接设计定稿**（codex-delegate，线程 01a0bd33，全文 docs/local/p2-batched-handoff-design.md，
+commit 66053ee8a8）：resolver 私有命令批次 + GPU 线程唯一合并点 + Finish 同步请求桥；
+1A 捕获/合并等价 → 1B worker 不重叠 → 2A 有限重叠 → 2B 读集精化；注意其诚实风险提示
+（0.5µs/draw 的 resolve 可能覆盖不了线程交接成本，INLINE 保持默认除非实测收益）。
+
+**28.18 入口**：① fix 血统正式验收轮（quiet_watch + quiet_seq.py：fix-check 0-mismatch 门 +
+fix-g/fix-t ABBA 对 + 图像 QA——今晨序列被 13:04 崩溃打断后一直未完成）；② 伴生第二实例
+谜团（低成本：forensics 日志已会记录每个实例）；③ 批量子交接 1A 实施（codex）；④ 13:04 式
+崩溃若复发直接有 dump；⑤ 机器层（wuauserv/nvoglv64）交用户决策。
