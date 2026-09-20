@@ -16,6 +16,7 @@
 
 #include "common/alignment.h"
 #include "common/common_types.h"
+#include "common/logging.h"
 #include "video_core/buffer_cache/word_manager.h"
 
 namespace VideoCommon {
@@ -58,6 +59,26 @@ public:
 
     /// Returns true if a region has been modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(VAddr query_cpu_addr, u64 query_size) noexcept {
+        static thread_local u64 total_queries{};
+        static thread_local u64 single_word_hits{};
+        // Report completed queries; no shared counter or atomic RMW on the hot path.
+        if (total_queries != 0 && (total_queries & 0xffff) == 0) [[unlikely]] {
+            LOG_INFO(HW_GPU, "SerialCuts gpu_dirty diag: single_word_hits={} total_queries={}",
+                     single_word_hits, total_queries);
+        }
+        ++total_queries;
+        static_assert(HIGHER_PAGE_SIZE % BYTES_PER_WORD == 0);
+        const u64 word_offset = query_cpu_addr % BYTES_PER_WORD;
+        if (query_size != 0 && query_size <= BYTES_PER_WORD - word_offset) [[likely]] {
+            // A word cannot cross a manager boundary. Do not create absent managers.
+            auto* manager = top_tier[query_cpu_addr >> HIGHER_PAGE_BITS];
+            if (!manager) {
+                return false;
+            }
+            ++single_word_hits;
+            return manager->IsRegionModified(Type::GPU, query_cpu_addr & HIGHER_PAGE_MASK,
+                                             query_size);
+        }
         return IteratePages<false>(query_cpu_addr, query_size, [](Manager* manager, u64 offset, size_t size) {
             return manager->IsRegionModified(Type::GPU, offset, size);
         });
