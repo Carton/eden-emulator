@@ -1,5 +1,5 @@
 // (local-only) Standalone regression tests; no emulator, driver or game required.
-// cl /std:c++20 /EHsc /I src tools/windows/test_uniform_epoch.cpp
+// cl /std:c++20 /EHsc /utf-8 /I src tools/windows/test_uniform_epoch.cpp
 #include <cstdio>
 #include <cstdlib>
 #include "video_core/control/engine_override.h"

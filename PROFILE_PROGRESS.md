@@ -2144,3 +2144,28 @@ vk_buffer_cache, vk_compute_pipeline, gl_rasterizer). No compiler remained after
 stop. User then authorized compilation again using ../eden-emulator as reference.
 Continue isolated object compilation; do not run the game. The final dynamic-state
 fix is newer than those seven objects and must be compiled again.
+
+### 29.4 Verification results (a0db1ecbba)
+
+- MSVC 19.44 / VS2022 RelWithDebInfo compile options: all 13 selected translation
+  units succeeded: vk_draw_resolver, vk_graphics_pipeline, vk_pipeline_cache,
+  vk_rasterizer, vk_buffer_cache, vk_compute_pipeline, gl_rasterizer,
+  gl_buffer_cache, video_core/memory_manager, maxwell_3d, macro, conductor,
+  dynarmic/backend/x64/ir_cache. Commands, logs, timestamped .obj/.pdb files:
+  build-vs22/review-check. Source/include substitution was checked to point to
+  eden-emulator2; dependency/generated headers are read-only from the master build.
+- Standalone tools/windows/test_uniform_epoch.cpp passed with /std:c++20 /utf-8
+  /W4 /WX. First harness attempt omitted /utf-8 and hit C4819 under codepage 936;
+  adding the same /utf-8 flag as the main build fixed the harness, not source.
+- Deterministic before/after repro also executed: header from 79a2d089c0 (only a
+  no-op BeginCapture adapter for the new test API) returned first binding byte
+  238 instead of 1 after a later allocation; fixed header preserved byte 1.
+  Repro source, baseline header and both executables are in review-check.
+- git diff --check passed. This is translation-unit compilation and standalone
+  testing, NOT a full executable link or game/image/performance acceptance.
+  No game launched; no daily-install or original-worktree binaries changed.
+
+Fix commits: 90ef63e00d and a0db1ecbba. Default rendering correctness fixes and
+experimental token fixes are included together; sync/async explicitly fall back
+inline until scheduler ownership is redesigned. Throughput effects of removing
+the incomplete pipeline memo / deferral are deliberately not estimated.
