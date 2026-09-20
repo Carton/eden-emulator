@@ -2885,3 +2885,82 @@ instead of all-dirty (-2.5µs measured), ② slim/incremental snapshot instead o
 FullCopy (-2-4µs inferred). Ceiling unchanged: journal snapshot is GPU-thread
 inherent, so refined 2A ≈ recover the resolve+epoch share of the -12.4%
 INLINE gap (~8-11%).
+
+
+### 28.22 Stage 2A refinement: incremental dirty flags and per-slot journals (2026-09-20)
+
+Input/acceptance supplied by user for 82a76e61ab: checker 0 mismatch over
+10.2M draws, image QA no corruption signature, mechanism accepted. Interleaved
+same-band ABAB (med 25.84, luma 56.7-56.8): pipeline 21.51/21.92 vs inline-token
+37.92/37.61 fps, median ratio 0.575 (-42.5%). GPU spin wins 96.6-96.8%, parks
+0.3%, worker spin wins about 96%, sync requests 0. Max inflight 1, backpressure
+23%; FlushCaching callbacks usually drain early. Approximately 3000 draws/frame
+in both arms. Tail rose from 1448-1463 to 3996-4013 ns; all-dirty was the clear
+2.55 us contributor. Remaining snapshot/spin attribution is an inference, not
+a measured snapshot timer result. None of these numbers measures this refinement.
+
+Source changes (pipeline gate only):
+- Snapshot copies live dirty flags into its slot, then clears live flags. GPU
+  parser owns live writes; worker StateTracker still targets its private flags.
+  Tail retirement forwards residual/unconsumed flags (including runtime-created
+  invalidations) to the next unarmed FIFO head, or ORs them back into live when
+  empty. Already queued snapshots retain their own parser deltas. Simply
+  discarding tail residuals would lose invalidations and deferred dirty bits.
+- Each slot retains its own register baseline across reuse. Rather than copying
+  the previous slot's entire regs on every draw, GPU keeps a bounded catch-up
+  journal for every initialized slot. The selected free slot replays its backlog
+  followed by this snapshot's live delta; other slots append the delta only to
+  GPU-owned metadata. In-flight engine images are never edited. At depth 1 the
+  normal path directly replays the live journal into the same recycled slot,
+  with no register memcpy or backlog append.
+- Initial use of each slot, source change, disabled journal or live journal
+  overflow causes a full live baseline. Per-slot backlog overflow invalidates
+  only that slot's future baseline; its existing queued job is untouched. The
+  backlog is capped at Maxwell3D::JournalCapacity (8192 entries = 64 KiB/slot).
+  Consumption resets live journal size/consumed/overflow just as the legacy
+  pipeline does; skipped/fallback draws do not discard journal history. Drains
+  retain baselines; channel changes recreate the resolver as before.
+- EDEN_TOKEN_SNAPSHOT=full is now honored in the pipeline as a diagnostic full
+  register-copy fallback. Default journal mode gets the incremental path.
+  Depth remains 1 by default; spin budget and queue/bridge policy unchanged.
+- Non-register engine.state (including ProcessCBBind state) and draw parameters
+  still copy from live. Register journal does NOT cover those fields; inheriting
+  them blindly would preserve stale bindings. Thus this removes repeated full
+  REGISTERS copies, not every state copy or all GPU snapshot cost.
+
+Checker: retains an independent full live regs copy at EACH successful enqueue
+when CHECK is enabled, compares the resolved slot directly to that reference
+at consumption. Now it checks incremental reconstruction against an independent
+oracle, rather than comparing two copies of the same full snapshot. It catches
+missed journal writes even if later parser writes overwrite the same register
+before consumption (which can mask errors in the legacy latest-live convergence
+check). Overflow/full baselines remain conservative resets. It still does not
+validate dirty-bit sufficiency, resource identity or command order: image QA and
+render acceptance remain required. CHECK intentionally retains a full reference
+copy and includes that cost in snapshot timing; compare equal checker settings.
+
+New GPU-owned diagnostics: diag_pipeline_snapshot_ns (cumulative nanoseconds),
+diag_pipeline_snapshot_count, pipeline_snapshot_avg_ns; plus pipeline_resyncs
+and pipeline_replayed_entries. Timer covers successful enqueue construction,
+register catch-up/resync, optional checker copy, non-register copies and slot
+initialization. It excludes waiting/retirement, first PipelineState allocation,
+and the later checker comparison. Replay-entry counts include slot catch-up
+work, so at depth >1 they can exceed the live journal entry count.
+
+Static verification: git diff --check passed. Exact-source comparison against
+HEAD verified legacy WorkerState, SnapshotAndEnqueue/ExecuteResolveImpl, dirty
+merge/checker, and 2A arm/request/wait/splice/worker execution unchanged; rasterizer
+commit/drains/draw paths unchanged. Scheduler, ABI-v2 guard, epoch tables,
+poison/no-replay behavior and teardown protocol were not edited. A standalone
+Python register-chain model matched a full-live oracle across 80000 steps at
+depths 1..4, including wrap, skipped snapshots, live/backlog overflow and channel
+resync. This is an algorithm check, NOT execution of the C++ implementation.
+
+Touched: vk_draw_resolver.cpp/.h, vk_rasterizer.cpp (pipeline log/diag only),
+PROFILE_PROGRESS.md. No builds, game runs or commits. Compilation and checker/
+image/A-B acceptance remain with the user. Risks: uncovered direct register
+writes are now relevant again (checker detects them); non-register copying,
+checker reference copying, journaling and spin costs remain; dirty propagation
+requires render QA for conditional/disabled state and rare runtime invalidation.
+Bridge paths still have zero observed runtime requests. No claim of reaching
++/-2% or recovering the resolve/epoch ceiling is made before measurement.

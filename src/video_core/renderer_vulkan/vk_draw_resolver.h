@@ -36,7 +36,7 @@ class StateTracker;
 //  - Journal:  maintain the shadow incrementally by replaying the engine's
 //              register-write journal; full copy only on (re)sync events
 //              (first use, channel switch, journal overflow).
-// Stage 2A uses private full copies regardless of the legacy snapshot setting.
+// Stage 2A retains per-slot register baselines and bounded catch-up journals.
 class DrawResolver {
 public:
     enum class SnapshotMode : u8 {
@@ -99,7 +99,7 @@ public:
     Tegra::Engines::Maxwell3D& SnapshotEngine() const;
 
     // GPU thread: release the job slot after the tail. Legacy modes merge
-    // dirty flags; 2A snapshots conservatively invalidate all state instead.
+    // dirty flags; 2A passes residual flags to the next slot or back to live.
     void FinishJob(Tegra::Engines::Maxwell3D& engine);
 
     // GPU thread, debug: verify the shadow converged to the live registers.
@@ -137,6 +137,8 @@ public:
     u64 diag_worker_resolves{};
     u64 diag_worker_sync_requests{};
     u64 diag_pipeline_resolves{};
+    std::chrono::nanoseconds diag_pipeline_snapshot_ns{};
+    u64 diag_pipeline_snapshot_count{};
     u64 diag_pipeline_max_inflight{};
     u64 diag_pipeline_spin_wins{};
     u64 diag_pipeline_parks{};

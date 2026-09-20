@@ -366,8 +366,10 @@ void RasterizerVulkan::EnsureResolver() {
         resolver->spin_us = bounded_env("EDEN_TOKEN_SPIN_US", 20, 0, 1000);
         resolver->worker_enabled = true;
         LOG_INFO(Render_Vulkan,
-                 "DrawToken pipeline: depth={} spin_us={} snapshot=full tail-gated resolves",
-                 resolver->pipeline_depth, resolver->spin_us);
+                 "DrawToken pipeline: depth={} spin_us={} snapshot={} tail-gated resolves",
+                 resolver->pipeline_depth, resolver->spin_us,
+                 resolver->snapshot_mode == DrawResolver::SnapshotMode::FullCopy ? "full"
+                                                                               : "journal");
     }
     resolver->batch_enabled |= resolver->worker_enabled;
     // (local-only) EDEN_TOKEN_EPOCH=0 turns the uniform epoch capture off
@@ -515,6 +517,15 @@ void RasterizerVulkan::LogTokenDiag() {
                  resolver->diag_worker_resolves, resolver->diag_worker_sync_requests);
     }
     if (resolver->pipeline_enabled) {
+        LOG_INFO(Render_Vulkan,
+                 "DrawToken diag: diag_pipeline_snapshot_ns={} diag_pipeline_snapshot_count={} "
+                 "pipeline_snapshot_avg_ns={} pipeline_resyncs={} pipeline_replayed_entries={}",
+                 resolver->diag_pipeline_snapshot_ns.count(), resolver->diag_pipeline_snapshot_count,
+                 resolver->diag_pipeline_snapshot_count
+                     ? resolver->diag_pipeline_snapshot_ns.count() /
+                           resolver->diag_pipeline_snapshot_count
+                     : 0,
+                 resolver->diag_resyncs, resolver->diag_journal_entries);
         LOG_INFO(Render_Vulkan,
                  "DrawToken diag: diag_pipeline_resolves={} diag_pipeline_max_inflight={} "
                  "diag_pipeline_spin_wins={} diag_pipeline_parks={} diag_pipeline_backpressure={} "

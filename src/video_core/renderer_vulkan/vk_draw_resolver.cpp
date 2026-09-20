@@ -235,6 +235,11 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
         Job job;
         std::unique_ptr<Tegra::Engines::Maxwell3D> engine;
         Tegra::Engines::Maxwell3D::Regs expected_regs{};
+        // GPU-only catch-up journal. Never replay into an in-flight engine.
+        std::array<Tegra::Engines::Maxwell3D::JournalEntry,
+                   Tegra::Engines::Maxwell3D::JournalCapacity> pending_journal;
+        size_t pending_journal_size{};
+        bool registers_valid{};
         VideoCommon::UniformEpochTable epoch;
         std::optional<Scheduler::CapturedBatch> batch;
         Scheduler* scheduler{};
@@ -274,6 +279,57 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
     bool Empty() const { return head == tail; }
     bool Full() const { return tail - head == depth; }
 
+    void SnapshotRegisters(Entry& target, Tegra::Engines::Maxwell3D& live) {
+        // Each slot keeps its last register image. Deltas missed while other
+        // slots were used are GPU-owned metadata, not writes to that image.
+        const bool reset_chain = source != &live || !live.journal_active ||
+                                 live.journal_overflow ||
+                                 owner.snapshot_mode == SnapshotMode::FullCopy;
+        live.journal_active = true;
+        ASSERT(live.reg_journal_consumed <= live.reg_journal_size);
+        if (reset_chain) {
+            for (u32 i = 0; i < depth; ++i) {
+                entries[i]->registers_valid = false;
+                entries[i]->pending_journal_size = 0;
+            }
+            source = &live;
+        }
+        const size_t count = live.reg_journal_size - live.reg_journal_consumed;
+        const auto* delta = live.reg_journal.data() + live.reg_journal_consumed;
+        for (u32 i = 0; i < depth; ++i) {
+            auto& slot = *entries[i];
+            if (&slot == &target || !slot.registers_valid) {
+                continue;
+            }
+            if (count > slot.pending_journal.size() - slot.pending_journal_size) {
+                // Bounded storage: stale slot will resync when next reused.
+                // Its current queued job and checker reference remain intact.
+                slot.registers_valid = false;
+                slot.pending_journal_size = 0;
+                continue;
+            }
+            if (count != 0) {
+                std::memcpy(slot.pending_journal.data() + slot.pending_journal_size,
+                            delta, count * sizeof(*delta));
+                slot.pending_journal_size += count;
+            }
+        }
+        if (!target.registers_valid) {
+            target.engine->regs = live.regs;
+            target.registers_valid = true;
+            ++owner.diag_resyncs;
+        } else {
+            target.engine->ReplayJournal(target.pending_journal.data(),
+                                         target.pending_journal_size);
+            target.engine->ReplayJournal(delta, count);
+            owner.diag_journal_entries += target.pending_journal_size + count;
+        }
+        target.pending_journal_size = 0;
+        live.reg_journal_size = 0;
+        live.reg_journal_consumed = 0;
+        live.journal_overflow = false;
+    }
+
     bool Snapshot(Tegra::Engines::Maxwell3D& live, GraphicsPipeline* pipeline,
                   bool indexed, u32 instances) {
         if (fatal_error) {
@@ -288,8 +344,9 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
         if (Full()) {
             throw std::logic_error("DrawToken pipeline missing backpressure");
         }
+        const auto snapshot_start = Clock::now();
         auto& e = *entries[tail % depth];
-        e.engine->regs = live.regs;
+        SnapshotRegisters(e, live);
         if (owner.check_enabled) {
             e.expected_regs = live.regs;
         }
@@ -303,9 +360,10 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
         dst.index_buffer = src.index_buffer;
         dst.base_instance = src.base_instance;
         dst.instance_count = src.instance_count;
-        // Multiple snapshots cannot share live.flags_since_snapshot. Re-emit
-        // state conservatively; do not clear/merge live flags using an old job.
-        e.engine->dirty.flags.set();
+        // GPU alone owns live flags. The next snapshot receives only writes
+        // after this boundary; worker invalidations target this private set.
+        e.engine->dirty.flags = live.dirty.flags;
+        live.dirty.flags.reset();
         e.job.pipeline = pipeline;
         e.job.is_indexed = indexed;
         e.job.instance_count = instances;
@@ -325,6 +383,8 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
         ++tail;
         owner.diag_pipeline_max_inflight =
             (std::max)(owner.diag_pipeline_max_inflight, tail - head);
+        owner.diag_pipeline_snapshot_ns += Clock::now() - snapshot_start;
+        ++owner.diag_pipeline_snapshot_count;
         return true;
     }
 
@@ -481,10 +541,19 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
         owner.epoch_table.diag_overflows += e.epoch.diag_overflows - e.overflows;
     }
 
-    void Retire() {
+    void Retire(Tegra::Engines::Maxwell3D& live) {
         ASSERT(!Empty() && Front().spliced);
+        // Preserve unconsumed bits, including new invalidations from resolve
+        // and tail. No younger resolve can have started before this tail.
+        const auto remaining = Front().engine->dirty.flags;
         Front().batch.reset();
         ++head;
+        if (Empty()) {
+            live.dirty.flags |= remaining;
+        } else {
+            ASSERT(!Front().armed);
+            Front().engine->dirty.flags |= remaining;
+        }
         // Do NOT arm here: gpu.TickWork/FlushWork still follow the tail.
         // Next Kick or Wait is the explicit scheduler/cache ownership handoff.
     }
@@ -566,6 +635,7 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
     DrawResolver& owner;
     const std::thread::id gpu_thread;
     const u32 depth;
+    const Tegra::Engines::Maxwell3D* source{}; // GPU-only journal chain identity
     std::array<std::unique_ptr<Entry>, MaxPipelineDepth> entries;
     bool teardown{}; // receiver-only, ordinary GPU producer has stopped
     std::exception_ptr fatal_error; // GPU-only; failed prefixes must never replay
@@ -824,7 +894,7 @@ void DrawResolver::ExecuteResolveImpl(Scheduler& scheduler, WorkerState* worker_
 
 void DrawResolver::FinishJob(Tegra::Engines::Maxwell3D& engine) {
     if (pipeline_state) {
-        pipeline_state->Retire();
+        pipeline_state->Retire(engine);
         return;
     }
     // Merge dirty flags: bits consumed by the resolve/commit phases are
@@ -843,7 +913,9 @@ void DrawResolver::FinishJob(Tegra::Engines::Maxwell3D& engine) {
 bool DrawResolver::VerifySnapshot(const Tegra::Engines::Maxwell3D& engine) {
     if (pipeline_state) {
         // Oldest queued job is NOT the latest live engine. Compare with its
-        // own immutable enqueue reference, never the latest draw's journal.
+        // own immutable LIVE enqueue reference, never a replay-derived copy.
+        // Unlike checking shadow + later writes against the latest live regs,
+        // this also catches missed journal writes later overwritten by parser.
         const auto& e = pipeline_state->Front();
         for (size_t i = 0; i < e.expected_regs.reg_array.size(); ++i) {
             if (e.engine->regs.reg_array[i] != e.expected_regs.reg_array[i]) {
