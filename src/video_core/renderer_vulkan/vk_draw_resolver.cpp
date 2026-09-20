@@ -151,10 +151,10 @@ void DrawResolver::ExecuteResolve() {
         if (epoch_enabled) {
             job.epoch_entry_count = buffer_cache.CaptureUniformEpoch(
                 *shadow, job.pipeline->UniformBufferMasks(),
-                job.pipeline->UniformBufferSizeTable(), job.epoch_bytes.data(),
-                job.epoch_bytes.size(), job.epoch_entries.data(), job.epoch_entries.size());
+                job.pipeline->UniformBufferSizeTable(), epoch_table,
+                job.epoch_entries.data(), job.epoch_entries.size());
             job.epoch_snapshot = {job.epoch_entries.data(), job.epoch_entry_count,
-                                  job.epoch_bytes.data()};
+                                  epoch_table.bytes.data()};
             job.epoch_valid = true;
         }
     }

@@ -235,17 +235,17 @@ public:
 
     void UpdateComputeBuffers();
 
-    // (local-only) P2 uniform epoch: copy the guest bytes of the snapshot
-    // engine's enabled constant buffers into the caller's arena so the
-    // delayed tail upload can read resolve-time content instead of live
+    // (local-only) P2 uniform epoch: capture the guest bytes of the snapshot
+    // engine's enabled constant buffers into the persistent slot table so
+    // the delayed tail upload can read resolve-time content instead of live
     // guest memory. The uniform layout comes from the immutable pipeline
-    // (async resolve must not touch channel state). Returns the number of
-    // entries captured; bindings that no longer fit are skipped and their
-    // tail upload falls back to the tracked path.
+    // (async resolve must not touch channel state). Bindings over slot
+    // capacity are skipped and their tail upload falls back to the tracked
+    // path. Returns the number of entries captured.
     size_t CaptureUniformEpoch(const Tegra::Engines::Maxwell3D& engine,
                                const std::array<u32, NUM_STAGES>& masks,
-                               const UniformBufferSizes& sizes, u8* bytes,
-                               size_t bytes_capacity,
+                               const UniformBufferSizes& sizes,
+                               VideoCommon::UniformEpochTable& table,
                                VideoCommon::UniformEpochEntry* entries, size_t entries_capacity);
 
     // (local-only) P2 uniform epoch diagnostics (GPU-thread tail side)

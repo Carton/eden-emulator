@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <array>
+
 #include "common/common_types.h"
 
 namespace Tegra::Engines {
@@ -36,6 +38,63 @@ struct UniformEpochSnapshot {
     const UniformEpochEntry* entries{};
     size_t entry_count{};
     const u8* bytes{};
+};
+
+// (local-only) Fixed-slot backing store for the epoch capture. Each
+// (device_addr, size) key owns one 2KB slot that persists across draws, so a
+// recapture whose guest bytes still equal the slot content skips the copy
+// (70.7% of consecutive recaptures measured content-identical, PROFILE
+// §28.13). Slots are only written by captures, and with one job in flight
+// the tail of job N always runs before the capture of job N+1 (CommitPending
+//Draw precedes SnapshotAndEnqueue in every enabled mode), so a tail never
+// observes a slot mid-rewrite. NOT safe under a concurrent resolve (async
+// mode) without slot versioning -- entries reuse already carries that
+// invariant, which is why async is disabled.
+struct UniformEpochTable {
+    static constexpr size_t kSlots = 64;
+    static constexpr size_t kSlotBytes = 2048;
+
+    std::array<u8, kSlots * kSlotBytes> bytes{};
+    std::array<u64, kSlots> key_addr{};  // 0 = free (address 0 never maps)
+    std::array<u32, kSlots> key_size{};
+    u32 next_victim{};
+    bool short_circuit{true}; // EDEN_TOKEN_EPOCH_MEMCMP=0 forces full copies
+
+    // (local-only) diagnostics (capture side)
+    u64 diag_copies{};    // captures that copied into a slot
+    u64 diag_skips{};     // captures skipped by identical-content memcmp
+    u64 diag_overflows{}; // bindings over slot capacity -> classic path
+
+    // Returns the slot for the key and whether its bytes already hold this
+    // key's previous capture (a memcmp candidate); nullptr = caller falls
+    // back to the tracked classic path. Probes from a hash of the address,
+    // then linearly; inserts into the first free slot, else claims the
+    // clock victim.
+    u8* Acquire(u64 addr, u32 size, bool& content_valid) {
+        if (size > kSlotBytes) {
+            ++diag_overflows;
+            return nullptr;
+        }
+        size_t i{static_cast<size_t>((addr >> 8) & (kSlots - 1))};
+        for (size_t probe{0}; probe < kSlots; ++probe, i = (i + 1) & (kSlots - 1)) {
+            if (key_size[i] == 0) {
+                break; // free slot: insert here
+            }
+            if (key_addr[i] == addr && key_size[i] == size) {
+                content_valid = true;
+                return bytes.data() + i * kSlotBytes;
+            }
+        }
+        if (key_size[i] != 0) {
+            // Occupied at the probe end: claim the clock victim.
+            i = next_victim;
+            next_victim = (next_victim + 1) & (kSlots - 1);
+        }
+        key_addr[i] = addr;
+        key_size[i] = size;
+        content_valid = false;
+        return bytes.data() + i * kSlotBytes;
+    }
 };
 
 inline thread_local const UniformEpochSnapshot* tls_uniform_epoch = nullptr;

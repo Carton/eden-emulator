@@ -377,8 +377,8 @@ void BufferCache<P>::UpdateComputeBuffers() {
 template <class P>
 size_t BufferCache<P>::CaptureUniformEpoch(const Tegra::Engines::Maxwell3D& engine,
                                            const std::array<u32, NUM_STAGES>& masks,
-                                           const UniformBufferSizes& sizes, u8* bytes,
-                                           size_t bytes_capacity,
+                                           const UniformBufferSizes& sizes,
+                                           VideoCommon::UniformEpochTable& table,
                                            VideoCommon::UniformEpochEntry* entries,
                                            size_t entries_capacity) {
     // Reads the SNAPSHOT engine's constant-buffer state (resolve time = the
@@ -388,7 +388,6 @@ size_t BufferCache<P>::CaptureUniformEpoch(const Tegra::Engines::Maxwell3D& engi
     // binding was re-pointed in between simply misses and takes the tracked
     // classic path, which is race-free by construction. The layout comes
     // from the immutable pipeline, safe against concurrent GPU-thread use.
-    size_t byte_off = 0;
     size_t count = 0;
     for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
         ForEachEnabledBit(masks[stage], [&](u32 index) {
@@ -404,23 +403,33 @@ size_t BufferCache<P>::CaptureUniformEpoch(const Tegra::Engines::Maxwell3D& engi
             if (!device_addr) {
                 return;
             }
-            if (count >= entries_capacity || byte_off + size > bytes_capacity) {
-                return; // arena full: tail falls back to the tracked path
+            if (count >= entries_capacity) {
+                return; // entry list full: tail falls back to the tracked path
+            }
+            bool content_valid{};
+            u8* const slot{table.Acquire(*device_addr, size, content_valid)};
+            if (!slot) {
+                return; // over slot capacity: tail falls back to the tracked path
             }
             // Same single-page fast check as the tail upload; either way the
             // bytes come from device_memory as of right now (resolve time).
             const u8* const src_pointer = device_memory.GetPointer<u8>(*device_addr);
-            if (!src_pointer) {
-                return;
-            }
-            if (src_pointer + size == device_memory.GetPointer<u8>(*device_addr + size))
+            if (src_pointer &&
+                src_pointer + size == device_memory.GetPointer<u8>(*device_addr + size))
                 [[likely]] {
-                std::memcpy(bytes + byte_off, src_pointer, size);
+                if (content_valid && table.short_circuit &&
+                    std::memcmp(slot, src_pointer, size) == 0) [[likely]] {
+                    ++table.diag_skips; // content unchanged: keep the slot bytes
+                } else {
+                    std::memcpy(slot, src_pointer, size);
+                    ++table.diag_copies;
+                }
             } else {
-                device_memory.ReadBlockUnsafe(*device_addr, bytes + byte_off, size);
+                device_memory.ReadBlockUnsafe(*device_addr, slot, size);
+                ++table.diag_copies;
             }
-            entries[count++] = {*device_addr, size, static_cast<u32>(byte_off)};
-            byte_off += size;
+            entries[count++] = {*device_addr, size,
+                                static_cast<u32>(slot - table.bytes.data())};
         });
     }
     return count;

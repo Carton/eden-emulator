@@ -341,6 +341,11 @@ void RasterizerVulkan::EnsureResolver() {
     // (A/B switch: tail keeps reading guest memory directly).
     const char* epoch{std::getenv("EDEN_TOKEN_EPOCH")};
     resolver->epoch_enabled = !(epoch && *epoch != '\0' && *epoch == '0');
+    // (local-only) EDEN_TOKEN_EPOCH_MEMCMP=0 forces a full copy on every
+    // epoch recapture (A/B arm isolating the memcmp skip's value).
+    const char* epoch_memcmp{std::getenv("EDEN_TOKEN_EPOCH_MEMCMP")};
+    resolver->epoch_table.short_circuit =
+        !(epoch_memcmp && *epoch_memcmp != '\0' && *epoch_memcmp == '0');
 }
 
 void RasterizerVulkan::CommitPendingDraw() {
@@ -474,7 +479,8 @@ void RasterizerVulkan::RecordDraw(Tegra::Engines::Maxwell3D& engine, bool is_ind
 void RasterizerVulkan::LogTokenDiag() {
     LOG_INFO(Render_Vulkan,
              "DrawToken diag: pipelined={} deferred_writes={} deferred_mb={:.2f} "
-             "resolve_avg_ns={} tail_avg_ns={} epoch hit/miss/classic={}/{}/{}",
+             "resolve_avg_ns={} tail_avg_ns={} epoch hit/miss/classic={}/{}/{} "
+             "slots copy/skip/overflow={}/{}/{}",
              pipelined_draws, deferred_writes_total,
              static_cast<double>(deferred_bytes_total) / 1048576.0,
              resolver->diag_resolve_calls
@@ -482,7 +488,8 @@ void RasterizerVulkan::LogTokenDiag() {
                  : 0,
              diag_tail_calls ? diag_tail_ns.count() / diag_tail_calls : 0,
              buffer_cache.diag_epoch_hits, buffer_cache.diag_epoch_misses,
-             buffer_cache.diag_epoch_classic);
+             buffer_cache.diag_epoch_classic, resolver->epoch_table.diag_copies,
+             resolver->epoch_table.diag_skips, resolver->epoch_table.diag_overflows);
 }
 
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {

@@ -44,16 +44,16 @@ public:
         u32 instance_count{};
         DrawContext ctx;
 
-        // (local-only) uniform epoch slot: guest bytes of the enabled
-        // uniform bindings copied at resolve time; the delayed tail upload
-        // reads this arena instead of guest memory that the game CPU may
-        // have rewritten inside the tail-delay window (right-edge HUD bug).
-        // Sized from measurement: ~4.3 bindings x ~393B = ~1.7KB/draw.
-        static constexpr size_t EpochBytes = 8192;
+        // (local-only) uniform epoch: guest bytes of the enabled uniform
+        // bindings captured at resolve time; the delayed tail upload reads
+        // them instead of guest memory that the game CPU may have rewritten
+        // inside the tail-delay window (right-edge HUD bug). Contents live
+        // in the resolver's persistent UniformEpochTable (fixed slots, so a
+        // recapture with unchanged bytes skips the copy); the job only
+        // carries the per-draw entry list pointing into it.
         static constexpr size_t EpochEntries = 16;
         std::array<VideoCommon::UniformEpochEntry, EpochEntries> epoch_entries{};
         size_t epoch_entry_count{};
-        std::array<u8, EpochBytes> epoch_bytes{};
         VideoCommon::UniformEpochSnapshot epoch_snapshot{};
         bool epoch_valid{}; // capture succeeded; the tail installs the snapshot
     };
@@ -107,6 +107,10 @@ public:
     // (local-only) EDEN_TOKEN_EPOCH=0 disables the uniform epoch capture
     // (A/B switch; the tail then keeps the old direct-guest fast path).
     bool epoch_enabled{true};
+    // (local-only) persistent fixed-slot backing store for the epoch capture.
+    // short_circuit=false (EDEN_TOKEN_EPOCH_MEMCMP=0) forces a full copy on
+    // every recapture -- the A/B arm isolating the memcmp skip's value.
+    VideoCommon::UniformEpochTable epoch_table{};
 
     // (local-only) P2 diagnostics (aggregate since startup)
     u64 diag_kicks{};
