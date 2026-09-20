@@ -388,6 +388,7 @@ size_t BufferCache<P>::CaptureUniformEpoch(const Tegra::Engines::Maxwell3D& engi
     // binding was re-pointed in between simply misses and takes the tracked
     // classic path, which is race-free by construction. The layout comes
     // from the immutable pipeline, safe against concurrent GPU-thread use.
+    table.BeginCapture();
     size_t count = 0;
     for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
         ForEachEnabledBit(masks[stage], [&](u32 index) {
@@ -415,7 +416,7 @@ size_t BufferCache<P>::CaptureUniformEpoch(const Tegra::Engines::Maxwell3D& engi
             // bytes come from device_memory as of right now (resolve time).
             const u8* const src_pointer = device_memory.GetPointer<u8>(*device_addr);
             if (src_pointer &&
-                src_pointer + size == device_memory.GetPointer<u8>(*device_addr + size))
+                size <= DEVICE_PAGESIZE - (*device_addr & Core::DEVICE_PAGEMASK))
                 [[likely]] {
                 if (content_valid && table.short_circuit &&
                     std::memcmp(slot, src_pointer, size) == 0) [[likely]] {
@@ -1051,7 +1052,9 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
                 break;
             }
         }
-        use_fast_buffer = epoch_src != nullptr;
+        // An epoch miss must not bind an unaligned VkBuffer offset. Preserve
+        // the alignment stream path; no snapshot exists for this binding.
+        use_fast_buffer = epoch_src != nullptr || needs_alignment_stream;
         if (epoch_src) {
             ++diag_epoch_hits;
         } else {
@@ -1089,7 +1092,8 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
             std::memcpy(span.data(), epoch_src, size);
         } else {
             u8* const src_pointer = device_memory.GetPointer<u8>(device_addr);
-            if (src_pointer + size == device_memory.GetPointer<u8>(device_addr + size))
+            if (src_pointer &&
+                size <= DEVICE_PAGESIZE - (device_addr & Core::DEVICE_PAGEMASK))
                 [[likely]] {
                 std::memcpy(span.data(), src_pointer, size);
             } else {
@@ -1262,8 +1266,8 @@ void BufferCache<P>::BindHostComputeUniformBuffers() {
                 const std::span<u8> span =
                     runtime.BindMappedUniformBuffer(0, binding_index, size);
                 u8* const src_pointer = device_memory.GetPointer<u8>(binding.device_addr);
-                if (src_pointer + size ==
-                    device_memory.GetPointer<u8>(binding.device_addr + size)) [[likely]] {
+                if (src_pointer &&
+                    size <= DEVICE_PAGESIZE - (binding.device_addr & Core::DEVICE_PAGEMASK)) [[likely]] {
                     std::memcpy(span.data(), src_pointer, size);
                 } else {
                     device_memory.ReadBlockUnsafe(binding.device_addr, span.data(), size);

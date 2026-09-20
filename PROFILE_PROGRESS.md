@@ -2066,3 +2066,60 @@ golden 局 4 连败（token 局全胜疑为巧合小样本），按"机器异常
 **28.16 入口**：① 机器状态确认 + golden QA 补测；② memcmp 短路（回收 epoch 拷贝成本）；
 ③ 批量子交接设计实施（resolver 私有命令捕获 + GPU 线程合并点）——async 的正解；
 ④ uProf。
+
+## 29. Post-port and P2 review (2026-09-20, local-only)
+
+Scope: five v0.2.1 commits after reviewed baseline 06c7a2a6b2, master terminal
+serialization adaptation, and subsequent GPU/P2 changes through 79a2d089c0.
+Fixes stay in fix/p2-draw-resolver-review (eden-emulator2).
+
+### 29.1 Confirmed findings and fixes
+
+1. P1: db89f73891 skipped SetUniformBuffersState for serial Resolve+Tail calls.
+   Only All and token snapshots installed it; default/fallback draws could miss
+   uniform bindings. Install the layout in Tail before UpdateGraphicsBuffers.
+2. P1: d900d7c2ad used an incomplete pipeline memo key. Shader invalidation,
+   direct HLE writes, channel changes, topology and engine_state are not fully
+   represented by ProcessDirtyRegisters' generation. Remove the early return;
+   keep the existing transition/key cache. Performance impact is unmeasured.
+3. P1: deferred writes replayed before FinishJob, so Resolved still satisfied
+   ResolveInFlight and WriteBlockCached appended to the vectors being iterated.
+   Subsequent reads also did not forward deferred data; unsafe/which semantics
+   were lost. Remove the queue and commit preceding draws before memory writes,
+   preserving the original write policy. Map/unmap must commit the tail too,
+   because tail uploads still translate guest addresses.
+4. P1: sync worker resolution is unsafe too: DispatchWork publishes work before
+   replacing chunk; worker Record can race that replacement or WaitWorker's
+   DispatchWork. Texture runtime Finish can wait on the executing worker itself.
+   Both sync/async now warn and use inline; unreachable worker dispatch removed.
+   Publish pending only after inline resolution, avoiding reentrant self-waits.
+5. P1: resolver retained the first channel's MemoryManager reference. Recreate
+   on channel switch/release so memory translations and journal start fresh.
+6. P1: 79a2d089c0 can overwrite a slot already referenced by the SAME draw when
+   the table is full (hit at clock victim, then insert new key). Pin hits and
+   new slots per capture; skip pins during eviction; return miss if all pinned.
+   Standalone C++ regression covers this, capacity and same-address/different-size.
+7. P2: 74d5550276's endpoint pointer check does not prove continuity of middle
+   pages for large uniforms, and performs arithmetic on null pointers. Limit
+   memcpy to a non-null pointer within one DEVICE_PAGE; use ReadBlockUnsafe
+   otherwise (graphics, compute, epoch).
+8. P1: epoch miss overrode needs_alignment_stream and could bind an unaligned
+   Vulkan uniform offset. Preserve the alignment stream on a miss; such a
+   binding has no epoch copy and still reads guest memory. This is not a claim
+   that all delayed resources now have complete snapshot coverage.
+
+Foreign CPU invalidation continues to use cache mutexes. Inline-only mode no
+longer reads the GPU-owned resolver/thread id from those callbacks.
+Also statically inspected journal, descriptor reads, conductor pacing, ASTC
+initialization, JIT counters/dispatch gates and flattened terminal serialization;
+no additional confirmed findings in these groups. Not an all-game guarantee.
+
+### 29.2 Verification boundaries
+
+Commit before compilation. Existing build/CMakeCache points to frozen
+eden-v0.2.1 and must not be reused. Reuse master compile_commands options and
+read-only dependencies with CURRENT worktree source/include paths; write objects
+and PDBs only to this worktree's build-vs22/review-check. Compile affected
+Vulkan/OpenGL/memory translation units and run the standalone epoch regression.
+The user explicitly requested no game launch: image QA and FPS validation are
+pending, with no runtime acceptance or performance claim. Results follow below.

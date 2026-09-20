@@ -5,6 +5,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 
 #include "common/common_types.h"
 
@@ -44,7 +45,7 @@ struct UniformEpochSnapshot {
 // (device_addr, size) key owns one 2KB slot that persists across draws, so a
 // recapture whose guest bytes still equal the slot content skips the copy
 // (70.7% of consecutive recaptures measured content-identical, PROFILE
-// §28.13). Slots are only written by captures, and with one job in flight
+// 搂28.13). Slots are only written by captures, and with one job in flight
 // the tail of job N always runs before the capture of job N+1 (CommitPending
 //Draw precedes SnapshotAndEnqueue in every enabled mode), so a tail never
 // observes a slot mid-rewrite. NOT safe under a concurrent resolve (async
@@ -58,6 +59,12 @@ struct UniformEpochTable {
     std::array<u64, kSlots> key_addr{};  // 0 = free (address 0 never maps)
     std::array<u32, kSlots> key_size{};
     u32 next_victim{};
+    std::array<bool, kSlots> pinned{};
+
+    // Entries in one snapshot must stay valid until its tail has consumed them.
+    void BeginCapture() {
+        pinned.fill(false);
+    }
     bool short_circuit{true}; // EDEN_TOKEN_EPOCH_MEMCMP=0 forces full copies
 
     // (local-only) diagnostics (capture side)
@@ -71,7 +78,8 @@ struct UniformEpochTable {
     // then linearly; inserts into the first free slot, else claims the
     // clock victim.
     u8* Acquire(u64 addr, u32 size, bool& content_valid) {
-        if (size > kSlotBytes) {
+        content_valid = false;
+        if (size == 0 || size > kSlotBytes) {
             ++diag_overflows;
             return nullptr;
         }
@@ -81,15 +89,27 @@ struct UniformEpochTable {
                 break; // free slot: insert here
             }
             if (key_addr[i] == addr && key_size[i] == size) {
+                pinned[i] = true;
                 content_valid = true;
                 return bytes.data() + i * kSlotBytes;
             }
         }
         if (key_size[i] != 0) {
-            // Occupied at the probe end: claim the clock victim.
-            i = next_victim;
-            next_victim = (next_victim + 1) & (kSlots - 1);
+            // Skip slots already referenced by this capture, including hits.
+            size_t probe = 0;
+            for (; probe < kSlots; ++probe) {
+                i = next_victim;
+                next_victim = (next_victim + 1) & (kSlots - 1);
+                if (!pinned[i]) {
+                    break;
+                }
+            }
+            if (probe == kSlots) {
+                ++diag_overflows;
+                return nullptr;
+            }
         }
+        pinned[i] = true;
         key_addr[i] = addr;
         key_size[i] = size;
         content_valid = false;

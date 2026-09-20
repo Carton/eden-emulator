@@ -52,6 +52,8 @@ using VideoCommon::ImageViewType;
 
 
 namespace {
+thread_local RasterizerVulkan* draw_owner{};
+
 struct DrawParams {
     u32 base_instance;
     u32 num_instances;
@@ -230,40 +232,27 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
     // pipeline: "1"/"inline" resolves on the GPU thread right after the
     // snapshot (validation, ~baseline perf), "sync" hands the resolve to the
     // VulkanWorker and drains per draw (worker-path validation, slower).
+    // Worker modes currently fall back to inline (scheduler re-entry).
     // EDEN_TOKEN_SNAPSHOT=full forces the depth-1 whole-register copy;
     // EDEN_TOKEN_CHECK=1 verifies the shadow register state bit-exactly.
     const char* token{std::getenv("EDEN_DRAW_TOKEN")};
     if (token && *token != '\0' && *token != '0') {
-        token_mode = (*token == 's' || *token == 'S')   ? TokenMode::SyncWorker
-                     : (*token == 'a' || *token == 'A') ? TokenMode::Async
-                                                        : TokenMode::Inline;
-        if (token_mode == TokenMode::Async) {
-            // DISABLED (2026-09-20, §28.15): the worker-side resolve runs
-            // texture-cache runtime ops (SynchronizeDescriptors -> CopyImage
-            // -> scheduler.Record) that append to the CURRENT command chunk,
-            // racing the GPU thread's own records on the same chunk and
-            // corrupting it (crash in CommandChunk::Record, ~minutes in;
-            // nvoglv64 fallout crashes on later boots). Needs the batched
-            // handoff design (resolver-private command capture) before the
-            // resolve may run truly concurrent with parsing. Env value kept
-            // parsed for the future; falls back to inline for now.
+        token_mode = TokenMode::Inline;
+        if (*token == 's' || *token == 'S' || *token == 'a' || *token == 'A') {
+            // Resolve can record commands, dispatch chunks, and wait for the
+            // worker through texture runtime operations. Draining the GPU
+            // thread does not make scheduler re-entry from its worker safe.
             LOG_WARNING(Render_Vulkan,
-                        "DrawToken async mode disabled (chunk-record race); "
-                        "using inline instead");
-            token_mode = TokenMode::Inline;
+                        "DrawToken worker resolve disabled (scheduler re-entry); using inline");
         }
         const char* snapshot{std::getenv("EDEN_TOKEN_SNAPSHOT")};
         const char* check{std::getenv("EDEN_TOKEN_CHECK")};
         token_check_enabled = check != nullptr && *check != '\0' && *check != '0';
-        const char* nodefer{std::getenv("EDEN_TOKEN_NODEFER")};
-        token_nodefer = nodefer != nullptr && *nodefer != '\0' && *nodefer != '0';
         const char* tail_imm{std::getenv("EDEN_TOKEN_TAIL_IMM")};
         token_tail_immediate = tail_imm != nullptr && *tail_imm != '\0' && *tail_imm != '0';
         LOG_INFO(Render_Vulkan,
                  "Draw tokens: mode={} snapshot={} check={}",
-                 token_mode == TokenMode::SyncWorker ? "sync-worker"
-                 : token_mode == TokenMode::Async    ? "async"
-                                                     : "inline",
+                 "inline",
                  (snapshot && *snapshot == 'f') ? "full" : "journal",
                  token_check_enabled ? "on" : "off");
     }
@@ -280,6 +269,9 @@ RasterizerVulkan::~RasterizerVulkan() {
     // Drain queued token commands before member teardown frees the resolver.
     scheduler.WaitWorker();
     scheduler.Finish();
+    if (draw_owner == this) {
+        draw_owner = nullptr;
+    }
 }
 
 template <typename Func>
@@ -377,55 +369,22 @@ void RasterizerVulkan::CommitPendingDraw() {
         VideoCommon::tls_engine_snapshot = nullptr;
         VideoCommon::tls_uniform_epoch = nullptr;
     }
-    // Deferred inline writes follow the committed draw in stream order; they
-    // must land before the next snapshot observes them.
-    ApplyDeferredInlineWrites();
     resolver->FinishJob(*maxwell3d);
     gpu.TickWork();
 }
 
 void RasterizerVulkan::FlushPendingDraw() {
-    if (!pending_commit.load(std::memory_order_acquire)) {
-        return;
-    }
-    if (std::this_thread::get_id() == gpu_thread_id) {
+    // Resolves execute inline. Foreign cache-invalidation callers synchronize
+    // via the cache mutexes; they must not read/reset the GPU-owned resolver.
+    if (draw_owner == this && pending_commit.load(std::memory_order_acquire)) {
         CommitPendingDraw();
-    } else {
-        // Foreign thread (CPU-side invalidation): fence the resolver's cache
-        // writes only; the commit itself stays on the GPU thread. Bounded by
-        // one binding-resolution pass.
-        resolver->WaitResolved();
     }
 }
 
 void RasterizerVulkan::WaitForDrawResolve() {
-    if (resolver) {
-        resolver->WaitResolved();
-    }
-}
-
-void RasterizerVulkan::ApplyDeferredInlineWrites() {
-    if (deferred_records.empty()) {
-        return;
-    }
-    for (const auto& rec : deferred_records) {
-        gpu_memory->WriteBlockCached(rec.addr, deferred_arena.data() + rec.offset, rec.size);
-    }
-    deferred_records.clear();
-    deferred_arena.clear();
-}
-
-bool RasterizerVulkan::TryDeferInlineWrite(GPUVAddr addr, std::span<const u8> data) {
-    if (token_nodefer || !resolver || !resolver->ResolveInFlight() ||
-        std::this_thread::get_id() != gpu_thread_id) {
-        return false;
-    }
-    deferred_records.push_back(
-        {addr, static_cast<u32>(deferred_arena.size()), static_cast<u32>(data.size())});
-    deferred_arena.insert(deferred_arena.end(), data.begin(), data.end());
-    ++deferred_writes_total;
-    deferred_bytes_total += data.size();
-    return true;
+    // Resolve completion alone is insufficient: the tail still translates
+    // addresses and uploads vertex/index/storage data from guest memory.
+    FlushPendingDraw();
 }
 
 void RasterizerVulkan::FinishDrawLocked(Tegra::Engines::Maxwell3D& engine,
@@ -478,11 +437,10 @@ void RasterizerVulkan::RecordDraw(Tegra::Engines::Maxwell3D& engine, bool is_ind
 
 void RasterizerVulkan::LogTokenDiag() {
     LOG_INFO(Render_Vulkan,
-             "DrawToken diag: pipelined={} deferred_writes={} deferred_mb={:.2f} "
+             "DrawToken diag: pipelined={} "
              "resolve_avg_ns={} tail_avg_ns={} epoch hit/miss/classic={}/{}/{} "
              "slots copy/skip/overflow={}/{}/{}",
-             pipelined_draws, deferred_writes_total,
-             static_cast<double>(deferred_bytes_total) / 1048576.0,
+             pipelined_draws,
              resolver->diag_resolve_calls
                  ? resolver->diag_resolve_ns.count() / resolver->diag_resolve_calls
                  : 0,
@@ -499,9 +457,7 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
         });
         return;
     }
-    if (gpu_thread_id == std::thread::id{}) {
-        gpu_thread_id = std::this_thread::get_id();
-    }
+    draw_owner = this;
     EnsureResolver();
 
     // Commit the previous token draw, keeping draw order.
@@ -540,7 +496,6 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
                 VideoCommon::tls_engine_snapshot = nullptr;
                 VideoCommon::tls_uniform_epoch = nullptr;
             }
-            ApplyDeferredInlineWrites();
             resolver->FinishJob(*maxwell3d);
             gpu.TickWork();
             ++pipelined_draws;
@@ -549,27 +504,14 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
             }
             return;
         }
+        // Resolve may call back into the rasterizer while synchronizing guest
+        // memory. Publish only after it returns, otherwise a callback tries to
+        // commit this still-resolving job and waits for itself.
+        resolver->ExecuteResolve();
         pending_commit.store(true, std::memory_order_release);
         ++pipelined_draws;
         if (pipelined_draws % 2000 == 0) {
             LogTokenDiag();
-        }
-        if (token_mode == TokenMode::SyncWorker) {
-            // Hand the resolve to the VulkanWorker and drain it: exercises
-            // the worker-side execution path with zero concurrency.
-            scheduler.Record([this](vk::CommandBuffer) { resolver->ExecuteResolve(); });
-            scheduler.DispatchWork();
-            scheduler.WaitWorker();
-        } else if (token_mode == TokenMode::Async) {
-            // (local-only) milestone (b): dispatch without draining. The
-            // worker resolves (incl. epoch capture) while the GPU thread
-            // parses ahead; the next draw's CommitPendingDraw -> WaitResolved
-            // is the only rendezvous. One job in flight, same envelope as
-            // the deferred inline mode.
-            scheduler.Record([this](vk::CommandBuffer) { resolver->ExecuteResolve(); });
-            scheduler.DispatchWork();
-        } else {
-            resolver->ExecuteResolve();
         }
         return;
     }
@@ -976,7 +918,6 @@ void Vulkan::RasterizerVulkan::DisableGraphicsUniformBuffer(size_t stage, u32 in
 void RasterizerVulkan::FlushAll() {}
 
 void RasterizerVulkan::FlushRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
-    FlushPendingDraw();
     FlushPendingDraw();
     if (addr == 0 || size == 0) {
         return;
@@ -2286,6 +2227,10 @@ void RasterizerVulkan::InitializeChannel(Tegra::Control::ChannelState& channel) 
 void RasterizerVulkan::BindChannel(Tegra::Control::ChannelState& channel) {
     FlushPendingDraw();
     const s32 channel_id = channel.bind_id;
+    if (maxwell3d != &channel.payload->maxwell_3d) {
+        // The resolver owns a reference to its source channel's memory manager.
+        resolver.reset();
+    }
     BindToChannel(channel_id);
     {
         std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
@@ -2300,6 +2245,7 @@ void RasterizerVulkan::BindChannel(Tegra::Control::ChannelState& channel) {
 
 void RasterizerVulkan::ReleaseChannel(s32 channel_id) {
     FlushPendingDraw();
+    resolver.reset();
     EraseChannel(channel_id);
     {
         std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};

@@ -367,15 +367,6 @@ bool GraphicsPipeline::ConfigureImpl(DrawContext& ctx, bool is_indexed,
 
         texture_cache.SynchronizeDescriptors(false);
 
-        // (local-only) P2 async: the uniform layout install is channel-state
-        // mutation -- skipped here so the worker resolve never races the GPU
-        // thread. The serial path (phase All) installs in place; the token
-        // path installs on the GPU thread at snapshot time.
-        if (phase != ConfigurePhase::Resolve) {
-            buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks,
-                                                &uniform_buffer_sizes);
-        }
-
         const bool via_header_index{
             regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding};
         const auto config_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
@@ -558,6 +549,8 @@ bool GraphicsPipeline::ConfigureImpl(DrawContext& ctx, bool is_indexed,
         bind_stage_storage(4);
     }
 
+    // Every caller (serial, fallback, and token) installs the layout before uploads.
+    buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks, &uniform_buffer_sizes);
     buffer_cache.UpdateGraphicsBuffers(is_indexed);
     buffer_cache.BindHostGeometryBuffers(is_indexed);
 

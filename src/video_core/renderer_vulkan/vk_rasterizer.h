@@ -173,11 +173,9 @@ private:
     // (deferred and TAIL_IMM; the immediate branch returns before the
     // inline log site, so both call this helper instead).
     void LogTokenDiag();
-    void ApplyDeferredInlineWrites();
     void FinishDrawLocked(Tegra::Engines::Maxwell3D& engine, GraphicsPipeline& pipeline,
                           DrawContext& ctx, bool is_indexed, u32 instance_count);
     void RecordDraw(Tegra::Engines::Maxwell3D& engine, bool is_indexed, u32 instance_count);
-    bool TryDeferInlineWrite(GPUVAddr addr, std::span<const u8> data) override;
     void WaitForDrawResolve() override;
 
     void UpdateDynamicStates(Tegra::Engines::Maxwell3D& engine);
@@ -261,31 +259,14 @@ private:
     // on the GPU thread at the next rasterizer rendezvous.
     enum class TokenMode : u8 {
         Off,
-        Inline,    // resolve executes immediately on the GPU thread
-        SyncWorker,// resolve executes on the VulkanWorker; GPU thread drains
-        Async      // resolve dispatched to the VulkanWorker without draining;
-                   // the next draw's commit waits. Same one-job envelope as
-                   // Inline, but resolve + epoch capture overlap GPU parsing.
+        Inline,
     };
     TokenMode token_mode{TokenMode::Off};
     bool token_check_enabled{false};
     // (local-only) bisect switches for the right-edge HUD divergence.
-    bool token_nodefer{false};       // writes never deferred
     bool token_tail_immediate{false};// commit runs inside Draw, not deferred
     std::unique_ptr<DrawResolver> resolver;
     std::atomic<bool> pending_commit{false};
-    std::thread::id gpu_thread_id{};
-    // Guest writes deferred while a token job is in flight; a flat arena
-    // avoids a heap allocation per deferred push (CB data between draws).
-    struct DeferredWrite {
-        GPUVAddr addr;
-        u32 offset;
-        u32 size;
-    };
-    std::vector<u8> deferred_arena;
-    std::vector<DeferredWrite> deferred_records;
-    u64 deferred_writes_total{};
-    u64 deferred_bytes_total{};
     u64 pipelined_draws{};
     u64 fallback_draws{};
     // (local-only) per-draw timing diag (band-immune regression attribution)

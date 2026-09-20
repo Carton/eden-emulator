@@ -107,12 +107,6 @@ bool DrawResolver::SnapshotAndEnqueue(Tegra::Engines::Maxwell3D& engine,
     job.is_indexed = is_indexed;
     job.instance_count = instance_count;
     job.ctx.Reset(shadow.get(), &gpu_memory);
-    // (local-only) P2 async: install the pipeline's uniform layout here, on
-    // the GPU thread. The resolve phase no longer writes this channel state
-    // (async races), and the previous draw's tail has already consumed the
-    // old layout -- CommitPendingDraw runs before the snapshot.
-    buffer_cache.SetUniformBuffersState(pipeline->UniformBufferMasks(),
-                                        &pipeline->UniformBufferSizeTable());
     job_phase.store(Phase::Resolving, std::memory_order_release);
     if (++diag_kicks % 2000 == 0) {
         LOG_INFO(Render_Vulkan,

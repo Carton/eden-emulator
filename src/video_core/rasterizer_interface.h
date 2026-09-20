@@ -113,19 +113,9 @@ public:
 
     virtual bool OnCPUWrite(PAddr addr, u64 size) = 0;
 
-    /// (local-only) P2: block until an in-flight parallel draw resolve
-    /// finished. Called by the GPU memory manager before page-table
-    /// mutations (map/unmap), which the resolver's guest reads must not
-    /// race with. Default: no-op.
+    /// Complete a pending draw before GPU-thread memory writes or page-table
+    /// changes. Other backends submit draws synchronously and need no barrier.
     virtual void WaitForDrawResolve() {}
-
-    /// (local-only) P2: given a GPU-thread inline write to guest memory,
-    /// returns true when the write was deferred because a parallel draw
-    /// resolve is reading guest memory; it is applied once the resolver goes
-    /// idle. Default: never defer.
-    virtual bool TryDeferInlineWrite(GPUVAddr addr, std::span<const u8> data) {
-        return false;
-    }
 
     /// Sync memory between guest and host.
     virtual void InvalidateGPUCache() = 0;

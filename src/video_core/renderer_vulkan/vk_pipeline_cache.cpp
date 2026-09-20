@@ -552,16 +552,11 @@ PipelineCache::~PipelineCache() {
 
 GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
 
-    // (local-only) No register value changed since the key was last built:
-    // stages, fixed state and therefore the resulting pipeline are identical.
-    const u64 generation{maxwell3d->ChangeGeneration()};
-    if (generation == key_build_gen) [[likely]] {
-        return current_pipeline ? BuiltPipeline(current_pipeline) : nullptr;
-    }
-
+    // Shader invalidation, HLE writes, topology and channel changes are not
+    // all represented by Maxwell3D's register generation. Refresh the key
+    // before using the existing transition cache.
     if (!RefreshStages(graphics_key.unique_hashes)) {
         current_pipeline = nullptr;
-        key_build_gen = generation;
         return nullptr;
     }
     graphics_key.state.Refresh(*maxwell3d, dynamic_features);
@@ -570,13 +565,10 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
         GraphicsPipeline* const next{current_pipeline->Next(graphics_key)};
         if (next) {
             current_pipeline = next;
-            key_build_gen = generation;
             return BuiltPipeline(current_pipeline);
         }
     }
-    GraphicsPipeline* const pipeline{CurrentGraphicsPipelineSlowPath()};
-    key_build_gen = generation;
-    return pipeline;
+    return CurrentGraphicsPipelineSlowPath();
 }
 
 ComputePipeline* PipelineCache::CurrentComputePipeline() {
