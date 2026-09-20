@@ -3105,3 +3105,56 @@ SecurityServicesRunning={0}，HVCI/CredentialGuard 均未运行），而是 **WS
 `bcdedit /set hypervisorlaunchtype off` + 重启（代价 WSL2 暂不可用，反向切回），
 比关内存完整性/BIOS SVM 都更精准。届时按手册 §6 直接跑，分析目标=页保护 churn/
 描述符读/连续性遍历/hash-memcmp 的 miss 份额归因，与 codex 提案切口互相校准。
+
+### 28.22 IBS 解锁首采：旋转窗逐函数访存归因 + codex 交叉校准（2026-09-20 深夜二）
+
+**解锁**：用户执行 `bcdedit /set hypervisorlaunchtype off` + 重启 →
+HypervisorPresent=False，IBS 探针 rc=0（§28.21 手册 §6 流程一次通过）。
+
+**采集**：重启后 warmup 一轮（rot_warm，8 窗全过）→ 正式轮 rot5：
+`collect --config ibs --pid <eden> -d 160`（第一窗起挂，覆盖全部 8 旋转窗），
+603MB rawdata → `report --detail -s event=ibs-op`（31s）→ report.csv。
+分析存档 `F:\prof\ibs_rot5_analysis.md`，数据 `F:\prof\uprof\ibs-rot5\`。
+
+**核心结论（ETW/WPR 看不到的那一半）**：
+1. **GPU 线程（554,816 ops）load L1 DC miss 延迟仅占周期 2.33%**，分支误预测
+   0.40%，DTLB refill 0.40%——串行路径是纯执行吞吐瓶颈，**不是访存/分支停顿**；
+   §27.1 时代"散布成本可能是 cache miss"的假设**被否证**。数据布局/预取类优化
+   天花板 ~2-3% 周期，不值得立项。
+2. **函数排名与 ETW 完全一致**（跨工具交叉验证 ✓）：CallMethod 26,948 /
+   ProcessCommands 24,015 / **GpuToCpuAddress 14,554（#3，cache-light 0.20%）**
+   / BindHostGraphicsUniformBuffer 13,875 / ProcessDirtyRegisters 11,778 /
+   ConsumeSinkImpl 10,094 / VisitImageView 9,780 / ConfigureImpl 9,763 /
+   Event::WaitFor 9,545 / FixedPipelineState::Refresh 9,211。所有 top 函数
+   miss-lat ≤2.3%、misp ≤1.2%。
+3. IBS 模块份额：eden.exe 67.8% / NVIDIA 用户态驱动 17.5% / ntdll 8.7%。
+   **ntoskrnl 不在模块表 → IBS 实际只归因用户态**；页保护等内核成本仍只有
+   ETW 能看（提案⑨维持"归因候选"）。
+4. 小线程 24296/26364 cache 恶劣（load miss 率 41%/17%，miss-lat 周期
+   13.7%/12.7%）但合计仅 ~1.7% 进程 ops——不追。
+
+**codex 交叉校准**（resume 01a0bf4d-6108，存档
+`F:\prof\codex_ibs_crosscheck_20260920.md`）：
+- 9 项复核：**#1（描述符单页读省第二次翻译）升级**（与 GpuToCpuAddress
+  执行重、cache 轻的证据吻合）；**#8（memcmp 前置不等判断）降级**（差异位置
+  无数据支持，新增检查本身也是执行成本）；其余维持（收益叙事统一改为
+  "省指令"而非"省 cache miss"）。
+- **新增第 10 项：调用点内同页翻译复用**——只读源码确认 `StorageBufferBinding`
+  （buffer_cache.h:2076）存在明确成对翻译（aligned/unaligned 两地址 + 相邻
+  qword 双读），read_handle（vk_graphics_pipeline.cpp:375）有 CB 页内 handle
+  复用机会；边界=只缓存翻译不缓存内容、跨页走原路、映射失效须覆盖。
+  保守收益 0.2-0.6%（与 #1 分开计）。
+- **实施顺序：#1 → #10（先 SSBO 成对消除）→ #2**；整批现实预期
+  **0.5-2% 帧时**（38fps 下 +0.2-0.8fps），2-3% 算超预期；单项大概率在
+  ±2% 带内 → 局部指标定去留 + 组合 A/B 收官。
+- 方法论提醒：优化构建的源码行归因覆盖内联/指令调度，不能把行 hits 直接
+  当该行成本（regs.sampler_binding 判断其实已外提）。
+
+**工具/规则变化**：
+- **LosslessScaling 新规（2026-09-20 用户定）**：preflight 直接 taskkill 终止、
+  无需确认（杀不掉才 FAIL）——check_config.py 已实现，78 测试全过；
+  README 同步。
+- 哨兵 PM 进程名问题本轮未触碰（未用哨兵）。
+
+**串行线路的最终画像**：执行吞吐瓶颈、无内存墙、无分支墙；指令级减负全做
+~0.5-2%；大头（A 解析 22% + B 绑定 11%）只有并行化（tail-on-worker 线）能动。

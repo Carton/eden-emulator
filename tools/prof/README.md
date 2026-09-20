@@ -47,7 +47,8 @@ F:\Switch\Yuzu 及其解析后子路径禁止写入/作为运行目录。
 同一数据目录的 automation.lock 防止并发自动化；异常断电遗留锁须确认旧任务结束后手动删除。
 不同数据目录不构成机器级并发隔离，不能同时运行两个自动化任务。
 
-NVIDIA Overlay 只 WARN，不阻止、不关闭。LosslessScaling 仍使 preflight 失败。
+NVIDIA Overlay 只 WARN，不阻止、不关闭。LosslessScaling 会在 preflight 直接
+终止（2026-09-20 用户定规：无需确认，杀不掉才 FAIL）。
 自动化期间用户键鼠活动会使当前测量作废；窗口消息投递成功只代表消息入队，
 不证明游戏已经接收，因此仍须检查截图和场景。
 重启后先 warmup；图像验收和背靠背 A/B 纪律见根目录 AGENTS.md。

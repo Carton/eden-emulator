@@ -1,6 +1,8 @@
 """Validate the pond profiling configuration. NVIDIA Overlay only warns."""
 
 import argparse
+import subprocess
+import time
 from pathlib import Path
 
 from config_diff import parse
@@ -68,7 +70,18 @@ def main(argv=None):
     failures = validate(parse(args.ini))
     processes = process_names()
     if "losslessscaling.exe" in processes:
-        failures.append("LosslessScaling is running")
+        # User rule (2026-09-20): terminate on sight during profiling preflight,
+        # no confirmation. It composites the presented frames and corrupts
+        # timing/frame capture; auto-killing restores the old watchdog behavior.
+        subprocess.run(
+            ["taskkill", "/F", "/IM", "LosslessScaling.exe"],
+            capture_output=True, text=True, timeout=20,
+        )
+        time.sleep(2)
+        if "losslessscaling.exe" in process_names():
+            failures.append("LosslessScaling survived taskkill")
+        else:
+            print("WARN LosslessScaling was terminated by preflight (user rule 2026-09-20)")
     if "nvidia overlay.exe" in processes:
         print("WARN NVIDIA Overlay is running (allowed)")
     for failure in failures:
