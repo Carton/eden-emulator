@@ -2274,3 +2274,14 @@ Added full mocked benchmark success/failure/archive tests and cleanup fallback
 when taskkill itself fails. Poe explicitly uses the local uv-created virtualenv;
 the sandbox's cache ACL required RUFF_NO_CACHE=true and a workspace mypy cache for
 validation. No tools were elevated for runtime testing and no game was launched.
+
+Final validation at 8dc6d3e7d9: all 78 pytest cases passed (including complete
+mocked benchmark runs), Ruff format/check and strict prof_common mypy passed.
+uv lock --check --offline passed; git diff --check passed. The imported branch
+is an ancestor of HEAD through merge 60c5f1a812 (parents 4251c9e7de, 06c1ebe118).
+No emulator src/ code changed in this tools pass; native build validation is the
+sym.cpp compile/link above, not a new complete Eden build.
+
+Remaining acceptance boundary: real PostMessage input delivery, PrintWindow pixel
+content, PresentMon session compatibility and WPR/UAC lifecycle require a later
+authorized idle-machine integration run. No live image/performance claim is made.
