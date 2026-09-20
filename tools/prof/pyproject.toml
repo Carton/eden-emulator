@@ -1,0 +1,43 @@
+[project]
+name = "eden-prof"
+version = "0.1.0"
+description = "Local Eden profiling and regression tools"
+requires-python = ">=3.12"
+dependencies = ["pillow>=12.1"]
+
+[dependency-groups]
+dev = ["ruff>=0.11", "pytest>=8", "pytest-cov>=6", "poethepoet>=0.32", "mypy>=1.15"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP", "ARG", "SIM", "TC", "PTH", "RUF"]
+ignore = ["E501", "B008", "ARG001", "RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*.py" = ["ARG005"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra --strict-markers"
+
+[tool.poe.tasks]
+format = "ruff format ."
+lint = "ruff check ."
+format-check = "ruff format --check ."
+check = ["format-check", "lint"]
+test = "pytest"
+types = "mypy prof_common.py"
+check-full = ["check", "types", "test"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true

@@ -14,6 +14,9 @@ description: Eden 模拟器（TOTK）性能基准与 profiling 工作流——VS
 - 工作基线：`F:\devel\opensource\eden-emulator`，分支以 AGENTS.md 当前基线为准
   （P2 draw-resolver 阶段在 `test/p2-draw-resolver`），构建目录 `build-vs22`
   （v0.2.1 worktree 已冻结，勿改）
+- **脚本集：`tools/prof/`**（清单/淘汰名单/路径约定见 `tools/prof/README.md`；
+  数据归档 `EDEN_PROF_DATA` 默认 `F:\prof`——bench_results.csv / shots / diag /
+  trace 都在那，**新脚本不再放 F:\prof**）
 - 游戏硬链接：`F:\prof\TOTK.nsp`；数据目录：`build-vs22\bin\user\`（portable）
 - **一切 AI 生成内容仅限本地，严禁 push 上游 / 提 issue / PR**（推自己 fork 允许）
 
@@ -32,10 +35,21 @@ cmake.exe --build build-vs22 2>&1 | tee /f/prof/build_last.log | tail -15
 ## FPS 基准（单局 ~4 分钟；A/B 结论用交错对）
 
 ```bash
-python F:/prof/bench_run.py <LABEL> --measure 90          # 单局
-python F:/prof/bench_ab.py --pairs 3 --a golden --b LABEL \
+python tools/prof/bench_run.py <LABEL> --measure 90       # 单局
+python tools/prof/bench_ab.py --pairs 3 --a golden --b LABEL \
     --benv "EDEN_XXX=1,EDEN_YYY=1"                        # A/B 结论只认这个
 ```
+
+**无人值守轮（用户可能在机器旁时）**：写 sequence 文件（模板
+`tools/prof/quiet_seq_example.py`：RUNS 列表 + 可选 PAIRS 比值汇总），分离启动
+静置看门狗——等空闲（默认 180s 无输入）自动跑，用户回来自动静默：
+```bash
+powershell.exe -NoProfile -Command "Start-Process -WindowStyle Hidden -FilePath 'python' -ArgumentList 'tools/prof/quiet_watch.py','tools/prof/myseq.py' -RedirectStandardOutput 'F:/prof/myseq.log' -RedirectStandardError 'F:/prof/myseq.err'"
+```
+（sequence 文件是每轮实验的脚本，放仓库 `tools/prof/` 下、不必提交；日志/结果照旧
+进 F:\prof。）sequence 里的 cmd（如局间构建）必须用完整路径 Git Bash（裸 `bash`
+会解析到 WSL，/f/ 路径必失败——§28.16 实坑）。**重启后首个 bench 局只作 warmup
+丢弃**（AGENTS 规则）。
 
 自动完成：杀残留 → 启动 eden → 自动 A 键进游戏（~110s）→ 静置测量 90s（窗内每
 15s 截 QA 图）→ 优雅关闭（WM_CLOSE）→ 解析逐帧 CSV → 追加
@@ -58,15 +72,15 @@ python F:/prof/bench_ab.py --pairs 3 --a golden --b LABEL \
 
 1. **hold 模式起游戏**（进游戏后保持不关，供采集窗口用）：
    ```bash
-   cd /f/prof && python bench_run.py wpr-hold --hold 260   # 后台跑
+   cd /f/devel/opensource/eden-emulator && python tools/prof/bench_run.py wpr-hold --hold 260   # 后台跑
    ```
 2. **等进游戏 + 帧率稳定再采样**：进游戏约在 t+110s，**再等 ≥30s**（帧率从爬升到稳态）
    后才触发采集——直接 `sleep 145` 再执行下一步。
 3. 触发提权一体化采集（100s，起停必须在同一脚本里）：
    ```bash
-   powershell.exe -NoProfile -Command "Start-Process -Verb RunAs -WindowStyle Minimized -FilePath 'F:\prof\wpr_run.cmd'"
+   powershell.exe -NoProfile -Command "Start-Process -Verb RunAs -WindowStyle Minimized -FilePath 'tools/prof/wpr_run.cmd'"
    ```
-   产物 `F:\prof\totk_cpugpu.etl`（~6GB；**会覆盖**，先 `mv` 保住旧 trace）。
+   产物 `F:\prof\totk_t3.etl`（CPU+GPU，体积大；**会覆盖**，先 `mv` 保住旧 trace）。
 4. 轮询 `F:\prof\wpr_run.log` 出现 `WPR_DONE`。
 
 ### 分析（本会话 ETW MCP，30s 超时但后台继续）
@@ -92,7 +106,7 @@ mcp__etw__process_trace(filePath="F:\\prof\\totk_cpugpu.etl",
 - bench 测量窗自动截 6 张到 `F:\prof\shots\<LABEL>\`（PrintWindow 抓 "Form" 渲染窗，
   遮挡免疫）；**每局确认截图内容是游戏画面**——内容=桌面/其他应用 ⇒ 该局作废
   （用户占机铁证）。截不到=游戏窗不可用，查 tap 日志。
-- 对比：`python F:/prof/shot_compare.py DIR_A DIR_B`（PASS/WARN/FAIL+坏点%）；
+- 对比：`python tools/prof/shot_compare.py DIR_A DIR_B`（PASS/WARN/FAIL+坏点%）；
   先跑 golden vs golden 校准噪声地板；参照局与测试局**背靠背**。
 - 水塘干净局 luma 60–61（CSV 有列），离带=档位不同或污染。
 - 加载画面只比右侧/右下（左侧每次加载随机）；细节问题用 load_capture.py 放大窗口。
@@ -112,7 +126,7 @@ mcp__etw__process_trace(filePath="F:\\prof\\totk_cpugpu.etl",
 ## 已知纪律
 
 - master 是现役基线（TOTK 已验收）；v0.2.1 worktree 冻结只作历史对照
-- 采集/基准前 `python F:\prof\check_config.py`（LosslessScaling 等会被拦；
+- 采集/基准前 `python tools/prof/check_config.py`（LosslessScaling 等会被拦；
   **NVIDIA Overlay 一律不杀不拦**，2026-09-19 用户定规，med 实测无扰）
 - 缓存归因（"成本摊匀在所有函数"类）：AMD uProf @ `D:\Program Files\AMD\AMDuProf`
   （IBS 按函数归因 L2/L3 miss），share 采样看不见这类
