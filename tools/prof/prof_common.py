@@ -110,14 +110,20 @@ def write_json(path: Path, value: object) -> None:
 
 
 def process_names() -> set[str]:
+    # Capture BYTES and decode with replacement: on zh-CN Windows tasklist
+    # emits GBK (a non-ASCII process/window title makes the stream non-UTF-8),
+    # and a text=True reader thread that hits a decode error silently leaves
+    # stdout=None (seen live: killed two quiet_watch sequences mid-poll).
+    # The CSV first column (image name) is ASCII, so replacement chars in
+    # later columns never affect the result.
     proc = subprocess.run(
         ["tasklist", "/FO", "CSV", "/NH"],
         capture_output=True,
-        text=True,
         check=True,
         timeout=20,
     )
-    return {row[0].casefold() for row in csv.reader(proc.stdout.splitlines()) if row}
+    stdout = proc.stdout.decode("utf-8", errors="replace")
+    return {row[0].casefold() for row in csv.reader(stdout.splitlines()) if row}
 
 
 def require_no_eden() -> None:

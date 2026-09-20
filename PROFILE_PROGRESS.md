@@ -2964,3 +2964,50 @@ checker reference copying, journaling and spin costs remain; dirty propagation
 requires render QA for conditional/disabled state and rare runtime invalidation.
 Bridge paths still have zero observed runtime requests. No claim of reaching
 +/-2% or recovering the resolve/epoch ceiling is made before measurement.
+
+#### 28.20.2 Stage 2A refinement acceptance: -42.5% -> -14.3%, stop-loss engaged (2026-09-20 21:00)
+
+Refinement build `ac9ff9d5b2` (per-slot register baselines + catch-up journals,
+copy-then-clear dirty deltas, residual-flag propagation). exe 20:08:55.
+
+Sequence hiccups (both tooling, not the game):
+- One pipe-check VOIDed on "menu/loading signature": input automation never
+  entered the save that attempt (black + 60fps overlay shots). The game itself
+  ran the full session in pipeline mode (log: 1,254,484 pipelined, 0 fallback,
+  snapshot avg 617ns during load, mismatches=0). Retried fine.
+- quiet_watch died twice mid-poll in process_names(): tasklist on zh-CN
+  Windows emits GBK; a text=True reader thread hitting a non-UTF-8 byte
+  silently leaves proc.stdout=None (kills the whole sequence). Fixed in
+  prof_common.py: capture bytes + decode(errors="replace") — image-name CSV
+  column is ASCII, unaffected. Root cause of the earlier "transient" too.
+
+Results (all valid, med 25.83-25.84 off-arms / luma 56.7-56.8, same tier):
+
+| arm | fps | med ms |
+|---|---|---|
+| pipe-check (checker) | 24.14 | 40.83 |
+| pipe-on1 / on2 | 31.99 / 33.22 | 30.8 / 30.0 |
+| pipe-off1 / off2 | 38.36 / 37.78 | 25.8 / 25.8 |
+
+Pairs: on1/off1=0.8339, off2/on2=1.1372 → **on/off median 0.857 (-14.3%)**.
+Progression: 1B rendezvous -74% → 2A full-copy -42.5% → refined -14.3%.
+
+Component attribution (perf arms): snapshot_avg 130ns, tail_avg 1614-1648
+(INLINE 1448-1463, +0.17), resolve 566 (+0.07) ⇒ **measured adds ≈0.37µs/draw**;
+observed gap 1.2µs/draw ⇒ **~0.8µs = wait/spin residue + queue bookkeeping**.
+The residue is structural: PreparePipelineEnqueue + backpressure serialize
+each draw's cache/pipeline prep behind the previous resolve (the B/T+bridge
+deadlock safety margin), and guest invalidation drains (FlushCaching,
+map/unmap) consume the FIFO almost immediately — max_inflight stays 1, so the
+async machinery cannot run ahead of tails. Checker 0 mismatch over 14.1M
+snapshots; GPU spin wins 97.4-97.7%; worker parks 2%; resyncs=1; image QA
+on2-vs-off2 bad% 4.2-5.9 ≈ same-mode floor 3.3-4.7 (arms closer now).
+
+Verdict: refinement did its job (all component costs ≈ INLINE), but the
+remaining -14.3% is the tail-gated/serial-consumption structure itself.
+Closing it requires the 2B shared-cache-binding split (resolve N+1 while
+tail N pending) — a separate, larger design. Per the stop-loss clause:
+**INLINE stays the default; EDEN_TOKEN_PIPELINE=1 archived as validated
+experimental opt-in.** Ceiling reminder: journal snapshot is GPU-thread
+inherent; full parity was never the prize — the resolve+epoch share of the
+-12.4% INLINE gap (~8-11%) was, and only 2B can reach for it.
