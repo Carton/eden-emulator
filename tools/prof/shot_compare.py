@@ -15,14 +15,14 @@ PAIR_WARN_PCT = 5.0
 
 def load_small(path):
     with Image.open(path) as image:
-        return image.convert("RGB").resize(SMALL, Image.Resampling.LANCZOS)
+        return list(image.convert("RGB").resize(SMALL, Image.Resampling.LANCZOS).getdata())
 
 
 def pair_stats(a, b):
     pa, pb = load_small(a), load_small(b)
     deltas = [
         sum(abs(x - y) for x, y in zip(ca, cb, strict=True)) / 3
-        for ca, cb in zip(pa.get_flattened_data(), pb.get_flattened_data(), strict=True)
+        for ca, cb in zip(pa, pb, strict=True)
     ]
     return (
         sum(deltas) / len(deltas),
