@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <climits>
+#include <cstdio>
 #include <cstdlib>
 #include <regex>
 #include <thread>
@@ -412,6 +413,27 @@ void Stop() {
     if (logging_instance)
         logging_instance->ForEachBackend([](Backend& backend) { backend.Flush(); });
 }
+
+#ifdef _WIN32
+// This branch has synchronous logging, not an asynchronous queue to drain.
+// Flush CRT streams on a worker: fflush can wait indefinitely for a FILE lock
+// or filesystem. Do not capture logging_instance: it can be destroyed after a
+// timed-out atexit callback. CRT owns/synchronizes the streams independently.
+// Only the opt-in forensics atexit callback invokes this function. A timeout
+// bounds this call, not subsequent CRT teardown or storage-device I/O.
+unsigned long ForensicsFlushLogging() noexcept {
+    HANDLE worker = CreateThread(nullptr, 0, [](void*) -> DWORD {
+        return _flushall() < 0 ? 2UL : 0UL;
+    }, nullptr, 0, nullptr);
+    if (!worker) return 2;
+    const DWORD wait = WaitForSingleObject(worker, 1900);
+    DWORD result = 2;
+    if (wait == WAIT_OBJECT_0) GetExitCodeThread(worker, &result);
+    else if (wait == WAIT_TIMEOUT) result = 1;
+    CloseHandle(worker);
+    return result;
+}
+#endif
 
 void SetGlobalFilter(const Filter& filter) {
     if (logging_instance)

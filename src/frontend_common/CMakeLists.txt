@@ -5,6 +5,8 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 add_library(frontend_common STATIC
+    windows_forensics.cpp
+    windows_forensics.h
     config.cpp
     config.h
     content_manager.h

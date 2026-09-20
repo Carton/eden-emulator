@@ -3,6 +3,7 @@
 
 #include <QApplication>
 #include "startup_checks.h"
+#include "frontend_common/windows_forensics.h"
 
 #if YUZU_ROOM
 #include <cstring>
@@ -77,7 +78,7 @@ static Qt::HighDpiScaleFactorRoundingPolicy GetHighDpiRoundingPolicy() {
 #endif
 }
 
-int main(int argc, char* argv[]) {
+static int RunFrontend(int argc, char* argv[]) {
 #if YUZU_ROOM
     bool launch_room = false;
     for (int i = 1; i < argc; i++) {
@@ -206,4 +207,11 @@ int main(int argc, char* argv[]) {
 
     app.connect(&app, &QGuiApplication::applicationStateChanged, &main_window, &MainWindow::OnAppFocusStateChanged);
     return app.exec();
+}
+
+int main(int argc, char* argv[]) {
+    const bool forensics = FrontendCommon::InitWindowForensics();
+    const int result = RunFrontend(argc, argv);
+    if (forensics) FrontendCommon::ForensicsMainReturn();
+    return result;
 }

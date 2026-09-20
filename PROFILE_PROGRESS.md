@@ -2285,3 +2285,55 @@ sym.cpp compile/link above, not a new complete Eden build.
 Remaining acceptance boundary: real PostMessage input delivery, PrintWindow pixel
 content, PresentMon session compatibility and WPR/UAC lifecycle require a later
 authorized idle-machine integration run. No live image/performance claim is made.
+
+## 2026-09-20: Windows death forensics, phase 1 (local-only, uncommitted)
+
+User explicitly requested implementation on test/p2-draw-resolver without a
+commit or game launch. Added frontend_common/windows_forensics.{h,cpp}, CMake
+registration and main-entry/normal-return integration. The requested historical
+common/logging/backend.cpp does not exist here: this branch uses synchronous
+common/logging.cpp, with no asynchronous queue to drain. Its exported bounded
+flush runs CRT _flushall on a worker and waits 1900 ms; no logger-object pointer
+is retained by that worker. Timeout bounds the call, not later CRT teardown or
+storage I/O. This also flushes other streams belonging to the same CRT.
+
+EDEN_FORENSICS=1 reads the gate once at entry. Disabled mode creates no sessions,
+loads no DbgHelp and installs no handlers. EDEN_PROF_DATA defaults to F:\prof;
+an unusable destination falls back to GetTempPathW. Each dumps/UTC-PID session
+preopens emergency.log, context.bin and crash.dmp. Fixed-buffer Win32 writes
+flush each emergency record. First capture wins; subsequent hook events do not
+overwrite its context/dump. context.bin contains native CONTEXT then
+EXCEPTION_RECORD (1384 bytes on this x64 build); dump includes modules, threads,
+exception context and thread information, not full process memory.
+
+Hooks: UEF, narrowly filtered VEH, terminate, invalid parameter, new-handler,
+SIGABRT and atexit. No detours/helper/watchdog/Vulkan instrumentation. Native
+fastfail, _exit, quick_exit and TerminateProcess remain explicit holes; later
+handler replacement and per-thread/separate-CRT handlers also limit coverage.
+DbgHelp/DbgCore are preloaded, but in-process dump deadlock remains possible.
+Only main receives a stack guarantee. stderr is duplicated only when it is a
+disk handle, avoiding a blocking pipe in a fault handler. All emergency handles
+and loaded diagnostic DLLs intentionally live until process termination.
+
+Validation: built and linked build-vs22/bin/eden.exe + eden.pdb with MSVC 19.44;
+modified translation units compiled under existing /W4 without warnings. Initial
+CMake regeneration needed network access to existing dependency checksum files.
+An initial unrelated scm_rev BUILD_ID warning and existing linker configuration
+warnings were seen; final incremental build was clean. No git commit performed.
+
+Ran only EDEN_FORENSICS=selftest=N (before Qt/game initialization). Final six
+tests: 1 AV -> c0000005; 2 abort, 3 terminate, 4 invalid parameter -> c0000409;
+5 _exit -> 5; 6 another thread's TerminateProcess -> 6. Modes 1-4 produced
+valid ~56-61 KB dumps and raw stacks/contexts; modes 5-6 correctly had only
+startup/selftest records and zero-length preopened dump/context files. Retail
+UCRT lacks the five-argument _invalid_parameter export; selftest 4 uses its
+equivalent _invalid_parameter_noinfo dispatcher. Selftest-only error mode
+suppresses WER UI (an earlier AV already wrote its dump but waited in reporting).
+
+A standalone harness linked the actual frontend_common/common libraries:
+normal exit recorded MAIN_RETURN -> EXIT_BEGIN -> EXIT_FLUSH_DONE; a deliberately
+locked CRT stream returned timeout in 1906 ms, then was released safely. Disabled
+mode created no session. Dump stream directories were checked for ThreadList,
+ModuleList, Exception and ThreadInfo. Artifacts/scripts are under ignored
+build-vs22/forensics-selftest and build-vs22/forensics-*. No game, graphical QA or
+performance benchmark was run; no files in F:\Switch\Yuzu were written.
