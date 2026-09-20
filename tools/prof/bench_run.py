@@ -102,8 +102,12 @@ def main(argv: list[str] | None = None) -> int:
             path = fresh_csv(eden_dir() / "user/log", before)
             # Frame CSV has no absolute timestamps. These remain tail estimates;
             # reject long closes which could shift the measured window materially.
-            if record["close_seconds"] > 5:
-                raise RuntimeError("Close took >5s; cannot align untimestamped frame CSV")
+            # 25s bar (2026-09-20): TOTK teardown of a ~16GB session measured
+            # 15.9-16.5s on the fix lineage (runs fix-check-c654/096e), so 5s
+            # voided 100% of real runs; 25s still catches the pathological
+            # 60s-close known issue. Close seconds are recorded per-run.
+            if record["close_seconds"] > 25:
+                raise RuntimeError("Close took >25s; cannot align untimestamped frame CSV")
             window = tail_window(read_frames(path), duration)
             summary = frame_summary(window)
             if summary["fps"] > 52 or summary["median"] < 20:
