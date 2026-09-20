@@ -19,20 +19,24 @@ class MemoryManager;
 namespace Vulkan {
 
 class Scheduler;
+class StateTracker;
 
 // (local-only) P2 Step 2: draw tokens.
 //
 // The GPU thread snapshots a draw into the shadow engine and executes the
 // resolve phase inline, or on its own worker with an immediate GPU rendezvous
-// (stage 1B). Overlapped/async resolve remains disabled. The commit phase (uploads +
-// scheduler records) always runs on the GPU thread, in draw order, at the
-// next rasterizer rendezvous. Exactly one job is in flight at any time.
+// (stage 1B). Stage 2A queues private snapshots and overlaps parser work.
+// The commit phase (uploads + scheduler records) runs on the GPU thread,
+// in draw order, at the
+// next rasterizer rendezvous. Only the FIFO head may resolve; its tail must
+// finish before the next head is armed (shared cache bindings).
 //
 // Snapshot modes:
 //  - FullCopy: copy regs/state every draw (depth-1 behaviour, known-good).
 //  - Journal:  maintain the shadow incrementally by replaying the engine's
 //              register-write journal; full copy only on (re)sync events
 //              (first use, channel switch, journal overflow).
+// Stage 2A uses private full copies regardless of the legacy snapshot setting.
 class DrawResolver {
 public:
     enum class SnapshotMode : u8 {
@@ -61,15 +65,19 @@ public:
     };
 
     DrawResolver(Tegra::MemoryManager& gpu_memory_, BufferCache& buffer_cache_,
-                 TextureCache& texture_cache_);
+                 TextureCache& texture_cache_, StateTracker& state_tracker_);
     ~DrawResolver();
 
     DrawResolver(const DrawResolver&) = delete;
     DrawResolver& operator=(const DrawResolver&) = delete;
 
-    bool ResolveInFlight() const {
-        return job_phase.load(std::memory_order_relaxed) != Phase::Idle;
-    }
+    bool ResolveInFlight() const;
+    bool PipelineFull() const;
+    void PollResolveSync();
+    // Wait only an already armed head before GPU cache/scheduler preparation.
+    void PreparePipelineEnqueue();
+    // Rasterizer destruction only, after the ordinary GPU producer has stopped.
+    void BeginPipelineTeardown();
 
     // GPU thread: block until the current job finished resolving (returns
     // immediately when none is running).
@@ -81,20 +89,17 @@ public:
                             bool is_indexed, u32 instance_count);
 
     // GPU entry. Stage 1B signals the private worker and immediately waits,
-    // servicing synchronization requests. Both modes splice before returning.
+    // servicing synchronization requests. Stage 2A only kicks; WaitResolved
+    // services requests and splices at consumption.
     void ExecuteResolve(Scheduler& scheduler);
 
     // GPU thread: after WaitResolved(), the finished job.
-    Job& TakeJob() {
-        return job;
-    }
+    Job& TakeJob();
 
-    Tegra::Engines::Maxwell3D& SnapshotEngine() const {
-        return *shadow;
-    }
+    Tegra::Engines::Maxwell3D& SnapshotEngine() const;
 
-    // GPU thread: merge snapshot dirty flags back into the live engine and
-    // release the job slot.
+    // GPU thread: release the job slot after the tail. Legacy modes merge
+    // dirty flags; 2A snapshots conservatively invalidate all state instead.
     void FinishJob(Tegra::Engines::Maxwell3D& engine);
 
     // GPU thread, debug: verify the shadow converged to the live registers.
@@ -106,7 +111,11 @@ public:
     SnapshotMode snapshot_mode{SnapshotMode::Journal};
     bool check_enabled{false};
     bool batch_enabled{false}; // EDEN_TOKEN_BATCH=1; never enables worker resolve
-    bool worker_enabled{false}; // EDEN_TOKEN_WORKER=1; implies batch, no overlap
+    bool worker_enabled{false}; // EDEN_TOKEN_WORKER=1 alone: batch + immediate wait
+    bool pipeline_enabled{false}; // EDEN_TOKEN_PIPELINE=1; queue + consumer-side wait
+    static constexpr u32 MaxPipelineDepth = 4;
+    u32 pipeline_depth{1};
+    u32 spin_us{20}; // pipeline only; zero retains pure parking
     // (local-only) EDEN_TOKEN_EPOCH=0 disables the uniform epoch capture
     // (A/B switch; the tail then keeps the old direct-guest fast path).
     bool epoch_enabled{true};
@@ -127,6 +136,13 @@ public:
     u64 diag_splice_count{};    // nonempty prefix publications (Finish may split a batch)
     u64 diag_worker_resolves{};
     u64 diag_worker_sync_requests{};
+    u64 diag_pipeline_resolves{};
+    u64 diag_pipeline_max_inflight{};
+    u64 diag_pipeline_spin_wins{};
+    u64 diag_pipeline_parks{};
+    u64 diag_pipeline_backpressure{};
+    std::atomic<u64> diag_pipeline_worker_spin_wins{};
+    std::atomic<u64> diag_pipeline_worker_parks{};
     std::chrono::nanoseconds diag_resolve_ns{};
     std::chrono::nanoseconds diag_replay_ns{};
 
@@ -144,6 +160,7 @@ private:
     Tegra::MemoryManager& gpu_memory;
     BufferCache& buffer_cache;
     TextureCache& texture_cache;
+    StateTracker& state_tracker;
     std::unique_ptr<Tegra::Engines::Maxwell3D> shadow;
 
     Job job;
@@ -161,6 +178,8 @@ private:
     bool shadow_in_sync{};
     // Lazily allocated only for 1B. Joined before any job/cache references die.
     std::unique_ptr<WorkerState> worker;
+    struct PipelineState;
+    std::unique_ptr<PipelineState> pipeline_state;
 };
 
 } // namespace Vulkan

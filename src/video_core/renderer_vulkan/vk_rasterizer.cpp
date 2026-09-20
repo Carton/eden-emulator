@@ -6,6 +6,9 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <mutex>
 
@@ -257,6 +260,14 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
 }
 
 RasterizerVulkan::~RasterizerVulkan() {
+    if (resolver && resolver->pipeline_enabled) {
+        // Destruction is quiescent with respect to the ordinary GPU producer.
+        // Finish pending tails even when teardown runs on a different thread.
+        resolver->BeginPipelineTeardown();
+        while (pending_commit.load(std::memory_order_acquire)) {
+            CommitPendingDraw();
+        }
+    }
     if (resolver) {
         resolver->WaitResolved();
     }
@@ -321,7 +332,8 @@ void RasterizerVulkan::EnsureResolver() {
     if (resolver) {
         return;
     }
-    resolver = std::make_unique<DrawResolver>(*gpu_memory, buffer_cache, texture_cache);
+    resolver = std::make_unique<DrawResolver>(*gpu_memory, buffer_cache, texture_cache,
+                                               state_tracker);
     const char* snapshot{std::getenv("EDEN_TOKEN_SNAPSHOT")};
     resolver->snapshot_mode = (snapshot && (*snapshot == 'f' || *snapshot == 'F'))
                                   ? DrawResolver::SnapshotMode::FullCopy
@@ -331,6 +343,32 @@ void RasterizerVulkan::EnsureResolver() {
     resolver->batch_enabled = batch && batch[0] == '1' && batch[1] == '\0';
     const char* worker{std::getenv("EDEN_TOKEN_WORKER")};
     resolver->worker_enabled = worker && worker[0] == '1' && worker[1] == '\0';
+    const char* token_pipeline{std::getenv("EDEN_TOKEN_PIPELINE")};
+    resolver->pipeline_enabled =
+        token_pipeline && token_pipeline[0] == '1' && token_pipeline[1] == '\0';
+    if (resolver->pipeline_enabled) {
+        const auto bounded_env = [](const char* name, u32 fallback, u32 low, u32 high) {
+            const char* value = std::getenv(name);
+            if (!value) {
+                return fallback;
+            }
+            u32 parsed{};
+            const auto end = value + std::strlen(value);
+            const auto result = std::from_chars(value, end, parsed);
+            if (result.ec != std::errc{} || result.ptr != end || parsed < low || parsed > high) {
+                LOG_WARNING(Render_Vulkan, "Invalid {}={}, using {}", name, value, fallback);
+                return fallback;
+            }
+            return parsed;
+        };
+        resolver->pipeline_depth = bounded_env("EDEN_TOKEN_PIPELINE_DEPTH", 1, 1,
+                                               DrawResolver::MaxPipelineDepth);
+        resolver->spin_us = bounded_env("EDEN_TOKEN_SPIN_US", 20, 0, 1000);
+        resolver->worker_enabled = true;
+        LOG_INFO(Render_Vulkan,
+                 "DrawToken pipeline: depth={} spin_us={} snapshot=full tail-gated resolves",
+                 resolver->pipeline_depth, resolver->spin_us);
+    }
     resolver->batch_enabled |= resolver->worker_enabled;
     // (local-only) EDEN_TOKEN_EPOCH=0 turns the uniform epoch capture off
     // (A/B switch: tail keeps reading guest memory directly).
@@ -348,12 +386,22 @@ void RasterizerVulkan::CommitPendingDraw() {
         return;
     }
     resolver->WaitResolved();
+    if (resolver->pipeline_enabled && !resolver->ResolveInFlight()) {
+        return; // a failed head already poisoned and discarded the queue
+    }
     if (token_check_enabled) {
         resolver->VerifySnapshot(*maxwell3d);
     }
     DrawResolver::Job& job{resolver->TakeJob()};
     Tegra::Engines::Maxwell3D& shadow{resolver->SnapshotEngine()};
     {
+        const auto previous_query_snapshot = VideoCommon::tls_pipeline_engine_snapshot;
+        if (resolver->pipeline_enabled) {
+            VideoCommon::tls_pipeline_engine_snapshot = &shadow;
+        }
+        SCOPE_EXIT {
+            VideoCommon::tls_pipeline_engine_snapshot = previous_query_snapshot;
+        };
         // Cache code inside the commit reads the snapshot engine.
         VideoCommon::tls_engine_snapshot = &shadow;
         // Uniform uploads read the resolve-time epoch copy, never the guest
@@ -373,14 +421,17 @@ void RasterizerVulkan::CommitPendingDraw() {
         VideoCommon::tls_uniform_epoch = nullptr;
     }
     resolver->FinishJob(*maxwell3d);
+    if (resolver->pipeline_enabled) {
+        pending_commit.store(resolver->ResolveInFlight(), std::memory_order_release);
+    }
     gpu.TickWork();
 }
 
 void RasterizerVulkan::FlushPendingDraw() {
-    // The GPU either resolves inline or parks at the 1B rendezvous. Foreign
+    // Only the GPU producer consumes tails (including the entire 2A FIFO). Foreign
     // invalidation and resolver callbacks have no draw_owner TLS: they use
     // cache mutexes and must not read/reset/wait on the GPU-owned pending draw.
-    if (draw_owner == this && pending_commit.load(std::memory_order_acquire)) {
+    while (draw_owner == this && pending_commit.load(std::memory_order_acquire)) {
         CommitPendingDraw();
     }
 }
@@ -463,6 +514,62 @@ void RasterizerVulkan::LogTokenDiag() {
                  "DrawToken diag: diag_worker_resolves={} diag_worker_sync_requests={}",
                  resolver->diag_worker_resolves, resolver->diag_worker_sync_requests);
     }
+    if (resolver->pipeline_enabled) {
+        LOG_INFO(Render_Vulkan,
+                 "DrawToken diag: diag_pipeline_resolves={} diag_pipeline_max_inflight={} "
+                 "diag_pipeline_spin_wins={} diag_pipeline_parks={} diag_pipeline_backpressure={} "
+                 "worker_spin_wins={} worker_parks={} mismatches={}",
+                 resolver->diag_pipeline_resolves, resolver->diag_pipeline_max_inflight,
+                 resolver->diag_pipeline_spin_wins, resolver->diag_pipeline_parks,
+                 resolver->diag_pipeline_backpressure,
+                 resolver->diag_pipeline_worker_spin_wins.load(std::memory_order_relaxed),
+                 resolver->diag_pipeline_worker_parks.load(std::memory_order_relaxed),
+                 resolver->diag_snapshot_mismatches);
+    }
+}
+
+void RasterizerVulkan::DrawPipelined(bool is_indexed, u32 instance_count) {
+    resolver->PollResolveSync();
+    if (resolver->PipelineFull()) {
+        ++resolver->diag_pipeline_backpressure;
+        CommitPendingDraw(); // retire exactly the oldest tail, before enqueue
+    }
+    // Pipeline selection can synchronize guest memory/cache state. It cannot
+    // run against a resolver holding B/T and waiting for GPU bridge service.
+    // Younger queued snapshots are NOT armed until the final Kick below.
+    resolver->PreparePipelineEnqueue();
+#ifdef __ANDROID__
+    constexpr u32 flush_interval = 512;
+#else
+    constexpr u32 flush_interval = 4096;
+#endif
+    if (draw_counter >= flush_interval - 1) {
+        FlushPendingDraw(); // a submit must follow every older queued tail
+    }
+    FlushWork(); // preserve ordinary periodic DispatchWork; worker is quiescent
+    gpu_memory->FlushCaching(); // invalidation callback drains ALL queued tails
+    GraphicsPipeline* const pipeline = pipeline_cache.CurrentGraphicsPipeline();
+    if (!pipeline) {
+        return;
+    }
+    if (!resolver->SnapshotAndEnqueue(*maxwell3d, pipeline, is_indexed, instance_count)) {
+        ++fallback_draws;
+        ++resolver->diag_fallbacks;
+        // PrepareDraw drains the queue and reselects after any barrier effects.
+        PrepareDraw(is_indexed, [this, is_indexed, instance_count] {
+            RecordDraw(*maxwell3d, is_indexed, instance_count);
+        });
+        return;
+    }
+    resolver->ExecuteResolve(scheduler); // Kick only; normal consumption is later
+    pending_commit.store(true, std::memory_order_release);
+    ++pipelined_draws;
+    if (token_tail_immediate) {
+        FlushPendingDraw(); // diagnostic mode explicitly requests immediate tails
+    }
+    if (pipelined_draws % 2000 == 0) {
+        LogTokenDiag(); // pipeline aggregates are GPU-owned; no worker data race
+    }
 }
 
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
@@ -474,6 +581,10 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
     }
     draw_owner = this;
     EnsureResolver();
+    if (resolver->pipeline_enabled) {
+        DrawPipelined(is_indexed, instance_count);
+        return;
+    }
 
     // Commit the previous token draw, keeping draw order.
     CommitPendingDraw();

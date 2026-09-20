@@ -96,6 +96,9 @@ public:
     // Cross-thread splice requires ReleaseCaptured followed by a synchronized
     // rendezvous. Only the designated GPU receiver may publish that prefix.
     void SpliceCaptured(CapturedBatch& batch, u64 job_id);
+    // Quiescent teardown only: GPU producer has stopped; batch is handed off.
+    void AdoptCapturedReceiverForTeardown(CapturedBatch& batch, u64 job_id,
+                                          std::thread::id former_receiver);
     void ReleaseCaptured(CapturedBatch& batch, u64 job_id);
 
     explicit Scheduler(const Device& device, StateTracker& state_tracker);

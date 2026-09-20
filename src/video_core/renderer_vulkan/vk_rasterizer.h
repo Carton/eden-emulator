@@ -169,6 +169,7 @@ private:
     void EnsureResolver();
     void CommitPendingDraw();
     void FlushPendingDraw();
+    void DrawPipelined(bool is_indexed, u32 instance_count);
     // (local-only) 2000-draw diag dump shared by both token commit paths
     // (deferred and TAIL_IMM; the immediate branch returns before the
     // inline log site, so both call this helper instead).

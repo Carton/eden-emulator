@@ -16,6 +16,7 @@
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "common/bit_util.h"
 #include "common/common_types.h"
+#include "video_core/control/engine_override.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/query_cache/query_cache.h"
@@ -1370,7 +1371,9 @@ void QueryCacheRuntime::Bind3DEngine(Maxwell3D* maxwell3d) {
 
 template <typename Func>
 void QueryCacheRuntime::View3DRegs(Func&& func) {
-    if (impl->maxwell3d) {
+    if (VideoCommon::tls_pipeline_engine_snapshot) {
+        func(*VideoCommon::tls_pipeline_engine_snapshot);
+    } else if (impl->maxwell3d) {
         func(*impl->maxwell3d);
     }
 }

@@ -2733,3 +2733,109 @@ draw、按序合并）+ 短自旋后再驻泊，把延迟摊进流水；这是�
 
 **28.20 入口**：① 2A：多作业流水 + spin-then-park（codex，设计稿 §1.1/§7）；② 同步桥
 实战验证（构造 Finish-期间-resolve 的场景）；③ 待用户：wuauserv/nvoglv64 机器层。
+
+
+### 28.20 Stage 2A source implementation: bounded snapshot FIFO + spin/park (2026-09-20)
+
+Status: source/static review only, NOT compiled or run. User owns compilation,
+checker/image QA and interleaved A/B. No game, build, commit, or binary changes.
+Input baseline supplied by user: 05fb490a51, clean 1B acceptance; 5.3M resolves,
+0 bridge requests; worker-on 9.68/9.87 vs off 38.39/38.58 fps, approximately
+37 us/draw rendezvous versus 0.6-1.1 us resolve. These are 1B results, NOT 2A data.
+
+Configuration (inside the existing EDEN_DRAW_TOKEN token opt-in):
+- EDEN_TOKEN_PIPELINE must equal exactly "1"; implies batch + private worker.
+  Unset/off retains inline/default and the separately selectable 1B behavior.
+  EDEN_DRAW_TOKEN=async remains the legacy disabled/warn-and-fallback selector.
+- EDEN_TOKEN_PIPELINE_DEPTH: default 1, accepted 1..4.
+- EDEN_TOKEN_SPIN_US: default 20, accepted 0..1000; 0 bypasses spinning on BOTH
+  sides. Invalid/empty/overflow/trailing-junk numbers warn and use defaults.
+  20 us is an initial bounded budget covering short parser/tail intervals and
+  staying below the measured 37 us roundtrip, not an empirically tuned optimum.
+
+Important conservative deviation from independently resolved multi-job runahead:
+- FIFO holds multiple private snapshots, but ONLY ITS HEAD resolves. Shared
+  texture-buffer/cache bindings and scheduler producer state still require
+  tail(N) before resolve(N+1). Per-job epochs alone do not remove that hazard.
+- Every slot owns Job, engine, DrawContext, fixed epoch storage, batch, sequence,
+  exception and atomic completion state. No slot is recycled before its tail.
+  Head/tail indices belong exclusively to the GPU receiver; mutex J publishes
+  the executable head and bridge requests. Worker execution remains serial.
+- Kick returns without waiting. GPU parser/register work may overlap resolve.
+  Capacity pressure consumes exactly the oldest tail. Before GPU cache/pipeline
+  selection, PreparePipelineEnqueue waits an already armed head, but does NOT
+  prematurely arm a younger snapshot. Retirement also does not arm: TickWork and
+  producer preparation must finish first. The next Kick/consumer Wait arms it.
+- Default depth 1 preserves the existing one-draw tail window. Depth >1 is an
+  experimental snapshot queue, NOT permission to resolve ahead of older tails.
+  GPU guest writes/map/unmap and existing rasterizer barriers drain ALL queued
+  tails. No read-set filtering is introduced. Foreign invalidation callbacks
+  retain cache mutex/TLS isolation and never inspect the private queue.
+- 2A uses full regs/state copies and all-dirty snapshot flags, without merging
+  an old job into live flags_since_snapshot. This can substantially increase
+  CPU/tail work and is a correctness-first cost, not a claimed optimization.
+  CHECK compares each resolved engine to that job's enqueue-time register copy;
+  it detects snapshot corruption but does not validate resource/command order.
+- Worker temporarily targets StateTracker flags and query-runtime engine reads
+  at the private snapshot; tail query reads also use that job's snapshot.
+  These overrides are 2A-only. They avoid racing parser-owned live flags/regs.
+
+Synchronization/ownership audit:
+- GPU enqueue/arm: J only; release J before cache/scheduler operations. Wake
+  sequence release/acquire publishes the chosen slot. Worker selects under J,
+  releases J, then takes B/T together via the existing std::scoped_lock.
+- Worker resolve: B/T -> brief J for Request, then cv.wait releases J while B/T
+  may remain held. GPU services requests BEFORE waiting for job completion.
+- GPU Poll/Wait: J -> copy request -> UNLOCK J -> splice/dispatch/worker wait/
+  semaphore wait -> J acknowledgement. Service never takes B/T or runs a tail.
+  No J -> B/T edge; no scheduler queue lock held during J waits.
+- Completion is stored release AFTER capture handover, cache unlock and TLS/
+  StateTracker restoration. Consumer acquire precedes batch/epoch/stats reads.
+  GPU tail takes B/T only after Wait returns. Splice remains FIFO and uses the
+  existing scheduler queue/reserve locking; captures never use main reserve.
+- Both spin predicates read atomics only (completion/request/wake/stop), use a
+  CPU pause and steady-clock deadline; no J or B/T access until spin exits.
+  Parking rechecks predicates under J to avoid lost wakeups. Waiting warnings
+  every 5 seconds identify job id and FIFO head/tail.
+- Bridge Publish/WaitWorker/WaitTick retains 1B semantics. Poll occurs before
+  Kick and inside Wait. Worker waiting for an acknowledgement holds no J.
+- Final splice or worker failure poisons the queue, discards unexecuted younger
+  snapshots and propagates the exception. No inline replay of submitted prefixes.
+- Rasterizer teardown drains tails before scheduler/cache destruction. If the
+  ordinary GPU producer has already stopped on another thread, a narrowly scoped
+  scheduler receiver-adoption API accepts only handed-off, noncapturing batches
+  with the expected former receiver. This is NOT a concurrent ownership steal.
+  Channel changes drain before recreating the per-memory-manager resolver.
+  Pipeline destructor asserts queue empty and joins its own jthread.
+
+Diagnostics: existing capture/worker counters preserved. Added
+  diag_pipeline_resolves, diag_pipeline_max_inflight, diag_pipeline_spin_wins,
+  diag_pipeline_parks, diag_pipeline_backpressure;
+plus worker_spin_wins/worker_parks and per-job mismatch/failure/wait logs.
+GPU spin_wins counts completion observed inside a spin; parks counts actual
+condition-variable wait attempts. Backpressure counts full-capacity retirement,
+even if the head was already complete. Worker idle counters are relaxed atomics;
+all other pipeline aggregates are accumulated by the GPU after acquire.
+
+Changed files: vk_draw_resolver.h/.cpp, vk_rasterizer.h/.cpp,
+vk_scheduler.h/.cpp, vk_state_tracker.h, vk_query_cache.cpp,
+video_core/control/engine_override.h, and this record. MemoryManager and cache
+invalidation implementations are unchanged; their existing drains are reused.
+
+Static checks: git diff --check passed. Exact-source comparisons verified the
+legacy WorkerState, ExecuteResolveImpl, old Draw body except the 2A gate,
+FlushWork, RecordResolverCommandAbiV2/capture/splice, and the rest of Scheduler
+remain unchanged. Includes, constructor callsite, declarations/definitions,
+ring reuse, release/acquire publication, request acknowledgement, FIFO tail
+order and lock edges reviewed. No compiler validation: MSVC/C++20 compilation
+of stop-token cv waits, RAII flag-target exchange and new constructor/API
+signatures remains to be confirmed by the user's build; headers must rebuild
+all consumers (the ABI-v2 guard is retained).
+
+Remaining acceptance: depth 1 and >1, spin 0 and nonzero, checker + image QA,
+guest-write/channel/flush/shutdown drains, forced resolve Finish/WaitWorker/
+WaitTick and exceptional-prefix scenarios. Rare bridge paths had zero hits in
+1B and have NOT gained runtime coverage here. Full-copy/all-dirty overhead,
+conservative cache ownership waits and CPU spinning may outweigh hidden work;
+no performance claim is made. Independently resolving several queued jobs
+before older tails would require another shared-binding/scheduler-state split.

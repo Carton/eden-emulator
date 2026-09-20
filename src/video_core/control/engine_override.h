@@ -22,6 +22,9 @@ namespace VideoCommon {
 // the live engine.
 inline thread_local Tegra::Engines::Maxwell3D* tls_engine_snapshot = nullptr;
 
+// 2A query runtime override only: leave the validated 1A/1B paths unchanged.
+inline thread_local Tegra::Engines::Maxwell3D* tls_pipeline_engine_snapshot = nullptr;
+
 // (local-only) P2 uniform epoch slots. The token pipeline delays a draw's
 // tail (uploads) by one draw; uniforms uploaded there used to be memcpy'd
 // straight from guest memory, so a game-CPU rewrite inside that window fed
@@ -49,8 +52,9 @@ struct UniformEpochSnapshot {
 // the tail of job N always runs before the capture of job N+1 (CommitPending
 //Draw precedes SnapshotAndEnqueue in every enabled mode), so a tail never
 // observes a slot mid-rewrite. NOT safe under a concurrent resolve (async
-// mode) without slot versioning -- entries reuse already carries that
-// invariant, which is why async is disabled.
+// mode) without slot versioning. Stage 2A therefore gives each queue slot
+// its own table, reused only after that slot's tail is consumed. Legacy async
+// remains disabled.
 struct UniformEpochTable {
     static constexpr size_t kSlots = 64;
     static constexpr size_t kSlotBytes = 2048;

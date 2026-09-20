@@ -297,6 +297,13 @@ public:
     // for the duration of a commit, so consumption is visible to the dirty
     // merge instead of hitting the live engine's aliased set. Restore to
     // the live engine's flags afterwards.
+    // 2A producer ownership is exclusive; restore before publishing completion.
+    auto* ExchangeFlags(Tegra::Engines::Maxwell3D::DirtyState::Flags* target) {
+        auto* previous = flags;
+        flags = target;
+        return previous;
+    }
+
     void RetargetFlags(Tegra::Engines::Maxwell3D::DirtyState::Flags& target) {
         flags = &target;
     }

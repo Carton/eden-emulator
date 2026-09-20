@@ -166,6 +166,20 @@ void Scheduler::SpliceCaptured(CapturedBatch& batch, u64 job_id) {
     event_cv.notify_all();
 }
 
+void Scheduler::AdoptCapturedReceiverForTeardown(CapturedBatch& batch, u64 job_id,
+                                                 std::thread::id former_receiver) {
+    const auto receiver = std::this_thread::get_id();
+    const bool valid = active_capture == nullptr && resolver_record_owner == nullptr &&
+                       batch.owner == this && batch.job_id == job_id &&
+                       !batch.capturing && batch.handed_off && batch.producer != receiver &&
+                       (batch.receiver == former_receiver || batch.receiver == receiver);
+    ASSERT_MSG(valid, "DrawToken teardown requires exclusive handed-off batch ownership");
+    if (!valid) {
+        throw std::logic_error("DrawToken invalid teardown receiver transfer");
+    }
+    batch.receiver = receiver;
+}
+
 void Scheduler::ReleaseCaptured(CapturedBatch& batch, u64 job_id) {
     ASSERT(active_capture == nullptr && !batch.capturing && !batch.handed_off);
     ASSERT(batch.owner == this && batch.job_id == job_id);
