@@ -127,6 +127,9 @@ WPR 子进程有超时；如果系统级 WPR 自身挂起，检查日志和系�
 
 ## AMD uProf（缓存归因；本机暂被 VBS 拦截）
 
+完整参数手册与本机实测记录见 `docs/local/uprof-cli.md`（含解锁后的重试配方）；
+本节只留最小要点。
+
 CLI：`D:\Program Files\AMD\AMDuProf\bin\AMDuProfCLI.exe`（5.3.521）。
 `collect -h` 在本机挂起且无输出，选项表由错误驱动探针摸出；调研全文与
 来源 URL 存 `F:\prof\codex_uprof_cli_research.md`。

@@ -3094,3 +3094,9 @@ VisitImageView/RefreshContents、不做全局 GpuToCpuAddress memo、宏参数 v
 验证纪律沿既有三层法；±2% 带内=宏观未分辨，亚百分比切口靠局部指标
 （ns/draw、次数/draw、分配字节/draw）定去留。**现实预期：这批全做也就
 ~1% 级别，串行路径已近榨干——与 §27 修正结论一致（干净池在 B，需要并行化）。**
+
+**收尾（2026-09-20）**：uProf CLI 参数与本机实测整理成正式手册
+`docs/local/uprof-cli.md`（含 collect 选项表、IBS/报告语法、VBS 检查命令、
+解锁后水塘场景 IBS 重试配方）；**用户计划后续关闭内存完整性（VBS）以重试
+IBS**——届时按手册 §6 直接跑，分析目标=页保护 churn/描述符读/连续性遍历/
+hash-memcmp 的 miss 份额归因，与 codex 提案切口互相校准。
