@@ -2525,3 +2525,107 @@ filesystem_error→LOG_ERROR+false，成功路径逐字节不变。**注意：�
 on/off 比值带内 + 图像 QA）；② 1B（worker 执行不重叠）按设计推进；③ 待办：
 validate-memcmp 那类"内容重复→免读"探索已证伪（§28.16），epoch 成本归宿=异步；
 ④ 机器层（wuauserv crash-loop、今早 nvoglv64 簇）仍待用户处理。
+
+
+## 32. P2 batched handoff stage 1B (2026-09-20, local-only, source-only)
+
+Input acceptance reported by the user: 1A checker 0 mismatch; on/off ratios
+1.001 / 0.995 (within noise); in the 19M-draw run only 0.77% of resolves emitted
+scheduler commands, with mean capture 16 B/draw. These are supplied 1A results,
+not measurements performed in this implementation turn.
+
+Scope: dedicated DrawResolver jthread, immediate GPU rendezvous, no overlap.
+EDEN_TOKEN_WORKER=1 (exact value) implies batch, but does not enable draw tokens
+by itself. Use EDEN_DRAW_TOKEN=inline with EDEN_TOKEN_WORKER=1. Default worker
+off retains inline behavior (and optional 1A batching). The old sync/async mode
+selection and warning remain unchanged; no VulkanWorker resolve dispatch returns.
+No build/compiler, game, benchmark or git commit was run, as explicitly requested.
+
+Files: vk_draw_resolver.h/.cpp, vk_scheduler.h/.cpp, vk_rasterizer.cpp,
+vk_graphics_pipeline.h (thread-contract comments only), and this progress record.
+
+Execution/ownership:
+- WorkerState is lazily allocated only on the first worker-enabled resolve. It
+  owns a jthread, single-job mailbox and that job's private CapturedBatch. Kick
+  publishes snapshot/job/scheduler reference under the mailbox mutex; GPU calls
+  WaitResolved immediately and cannot proceed to tail/decoding/next draw.
+- Worker installs its own snapshot TLS and CaptureScope inside the unchanged
+  dual-cache scoped_lock. Resolve, epoch capture and scheduler producer-state
+  updates run with the GPU parked. No separate scheduler-state snapshot yet.
+- ReleaseCaptured seals chunks and marks producer ownership relinquished.
+  SpliceCaptured checks scheduler/job identity, designated receiver thread, and
+  handoff state for cross-thread publication. A plain producer-thread assertion
+  was NOT merely removed. Mailbox request/completion and acknowledgement establish
+  the happens-before edges for batch/state access without batch atomics.
+- Normal completion ends capture, unlocks B/T, releases batch ownership and posts
+  done. GPU acquires done, splices, aggregates stats and publishes Phase::Resolved
+  before returning. pending_commit is still published only after that return.
+- Each prefix is consumed once. Worker regains capture ownership only after GPU
+  acknowledgement; no producer writes occur while GPU accesses the prefix.
+
+Minimal synchronization bridge:
+- Operations are Publish, WaitWorker and WaitTick. SubmitExecution still builds
+  EndPendingOperations/query/render-pass commands under resolver snapshot TLS,
+  marks the PRIVATE submit chunk, then delegates its prefix publication to GPU.
+- Finish uses that publication followed by a WaitTick request. A single Finish
+  therefore normally counts as two bridge requests, not one. Flush publishes
+  without a device-completion wait. WaitWorker hands off even an empty prefix;
+  GPU WaitWorker still dispatches main predecessor work before waiting.
+- Scheduler::Wait performs any needed Flush on the resolver, then delegates the
+  already-submitted tick wait. GPU calls MasterSemaphore::Wait directly, avoiding
+  Flush/EndPendingOperations without the worker's snapshot TLS or under its locks.
+- GPU service is restricted to splice/dispatch/worker wait/submitted-tick wait.
+  It never enters cache, tail or rasterizer callbacks. Resolver stays suspended
+  during service; GPU does not call the ordinary Finish implementation itself.
+- Service exceptions are acknowledged to the worker, which unwinds capture/cache
+  locks and publishes failure. GPU rethrows after completion and destroys only
+  unconsumed private commands. Already submitted prefixes are never replayed.
+  Worker-creation failure also clears Resolving so teardown cannot spin forever.
+
+Lock ordering / no self-wait:
+- J = new mailbox mutex, instantiated only with WorkerState. Kick/notification
+  and completion use J briefly. Worker drops J before acquiring B/T; GPU drops J
+  before every scheduler operation. No J -> cache/scheduler acquisition exists.
+- B/T retain existing std::scoped_lock deadlock avoidance. A worker sync request
+  may acquire J while holding B/T; condition-variable wait releases J. GPU service
+  never acquires B/T, so there is no reverse edge. No external invalidation reads
+  WorkerState or waits for the job; its existing cache-mutex protocol remains.
+- GPU publication uses reserve_mutex then releases it before queue_mutex. Existing
+  VulkanWorker queue_mutex -> execution_mutex handoff, execution -> submit_mutex,
+  and post-execution reserve recycling remain unchanged. Private chunks continue
+  to skip main reserve recycling. GPU waits hold neither J nor B/T nor queue_mutex
+  (condition-variable queue wait releases its lock as before).
+- Resolver thread has no draw_owner TLS: resolve-internal memory callbacks cannot
+  recursively commit/wait for their own job. Guest write/map/unmap behavior and
+  external callback code are unchanged. Fixed epoch slots remain safe because
+  tail(N) still precedes capture(N+1); this is NOT an async/2A safety claim.
+
+Lifecycle: channel reset destroys the resolver before rebinding MemoryManager.
+A completed worker is stopped/notified/joined before job/shadow references die.
+Quiescent destruction can occur on another thread after the GPU producer joins;
+only active service requires the designated GPU thread. Snapshot TLS and capture
+handoff flags restore on exceptions. No early cancellation of an active request:
+completion/error is drained before stopping the worker.
+
+Diagnostics: worker-enabled DrawToken adds diag_worker_resolves and
+ diag_worker_sync_requests (cumulative per resolver lifetime). Existing batch
+counts include final GPU splice and all serviced prefixes. Worker resolve counts
+only successful completed/spliced jobs, including empty batches. No throughput
+benefit is claimed; per-draw thread wake/rendezvous overhead is expected.
+
+Static checks completed: git diff --check; declaration/definition/call-site and
+include-path inspection; manual empty/multiple-prefix, repeated Finish, failure
+and shutdown state walkthrough. Source comparison against HEAD confirms serial
+PrepareDraw, CommitPendingDraw/tail, async-disable selection and channel lifecycle
+blocks unchanged. Project include paths in all six changed source files exist.
+No compilation or runtime proof is implied. MSVC follow-up should cover nested
+WorkerState/Phase access, the virtual bridge passed through optional::emplace,
+stop-token condition_variable_any overload and TLS symbols (existing scheduler
+already uses the same stop-token wait API).
+
+Pending ZCode acceptance: compile/link; EDEN_TOKEN_CHECK=1 with worker on/off;
+DrawToken count closure and image QA; exercise rare Finish/Flush/WaitWorker and
+empty/multi-chunk paths, channel changes, shutdown and service-error propagation.
+Natural scene runs with zero sync requests do NOT validate the bridge. Because
+scheduler producer state is only exclusively borrowed here, removing the GPU
+rendezvous is prohibited until 2A state/guest-dependency work is implemented.

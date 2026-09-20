@@ -29,14 +29,18 @@ namespace Vulkan {
 
 thread_local Scheduler::ResolverCaptureContext* Scheduler::active_capture = nullptr;
 
-Scheduler::CaptureScope::CaptureScope(Scheduler& scheduler, CapturedBatch& batch, u64 job_id)
-    : context{scheduler, batch, job_id} {
+Scheduler::CaptureScope::CaptureScope(Scheduler& scheduler, CapturedBatch& batch, u64 job_id,
+                                     CaptureSyncBridge* bridge, std::thread::id receiver)
+    : context{scheduler, batch, job_id, bridge} {
     ASSERT(active_capture == nullptr); // No nested captures, even across schedulers.
     ASSERT(batch.owner == nullptr && job_id != 0);
     ASSERT(std::this_thread::get_id() != scheduler.worker_thread.get_id());
     batch.owner = &scheduler;
     batch.job_id = job_id;
     batch.producer = std::this_thread::get_id();
+    batch.receiver = bridge ? receiver : batch.producer;
+    ASSERT(batch.receiver != std::thread::id{});
+    ASSERT(!bridge || batch.receiver != batch.producer);
     batch.capturing = true;
     active_capture = &context;
 }
@@ -56,6 +60,7 @@ Scheduler::ResolverCaptureContext* Scheduler::ActiveCapture() {
         ASSERT(active_capture->batch.owner == this);
         ASSERT(active_capture->batch.job_id == active_capture->job_id);
         ASSERT(active_capture->batch.capturing);
+        ASSERT(!active_capture->batch.handed_off);
         ASSERT(active_capture->batch.producer == std::this_thread::get_id());
     }
     return active_capture;
@@ -88,7 +93,8 @@ void Scheduler::CapturedBatch::SealChunk() {
 void Scheduler::SpliceCaptured(CapturedBatch& batch, u64 job_id) {
     ASSERT(active_capture == nullptr && !batch.capturing);
     ASSERT(batch.owner == this && batch.job_id == job_id);
-    ASSERT(batch.producer == std::this_thread::get_id());
+    ASSERT(batch.receiver == std::this_thread::get_id());
+    ASSERT(batch.producer == batch.receiver || batch.handed_off);
     batch.SealChunk();
     if (batch.sealed.empty()) {
         return;
@@ -107,7 +113,43 @@ void Scheduler::SpliceCaptured(CapturedBatch& batch, u64 job_id) {
     event_cv.notify_all();
 }
 
+void Scheduler::ReleaseCaptured(CapturedBatch& batch, u64 job_id) {
+    ASSERT(active_capture == nullptr && !batch.capturing && !batch.handed_off);
+    ASSERT(batch.owner == this && batch.job_id == job_id);
+    ASSERT(batch.producer == std::this_thread::get_id());
+    batch.SealChunk();
+    batch.handed_off = true;
+}
+
+bool Scheduler::BridgeCaptureSync(CaptureSync operation, u64 tick) {
+    auto* capture = ActiveCapture();
+    if (!capture || !capture->bridge) {
+        return false;
+    }
+    // The bridge parks this producer until the GPU has finished with its
+    // prefix. Restore capture ownership on both success and exception paths.
+    struct RestoreCapture {
+        ResolverCaptureContext*& tls;
+        ResolverCaptureContext* saved;
+        bool& capturing;
+        bool& handed_off;
+        ~RestoreCapture() {
+            handed_off = false;
+            capturing = true;
+            tls = saved;
+        }
+    } restore{active_capture, capture, capture->batch.capturing, capture->batch.handed_off};
+    capture->batch.capturing = false;
+    active_capture = nullptr;
+    ReleaseCaptured(capture->batch, capture->job_id);
+    capture->bridge->Request(capture->batch, capture->job_id, operation, tick);
+    return true;
+}
+
 void Scheduler::DrainCapturePrefix() {
+    if (BridgeCaptureSync(CaptureSync::Publish)) {
+        return;
+    }
     auto* capture = ActiveCapture();
     if (!capture) {
         return;
@@ -175,6 +217,9 @@ void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore)
 }
 
 void Scheduler::WaitWorker() {
+    if (BridgeCaptureSync(CaptureSync::WaitWorker)) {
+        return;
+    }
     // DispatchWork alone only seals a private chunk during capture.
     DrainCapturePrefix();
     DispatchWork();

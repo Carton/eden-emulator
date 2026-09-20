@@ -100,7 +100,7 @@ class GraphicsPipeline {
 
 public:
     enum class ConfigurePhase : u8 {
-        Resolve, // binding resolution (GPU thread: may invoke texture runtime)
+        Resolve, // GPU thread or exclusive 1B resolver: may invoke texture runtime
         Tail,    // uploads + scheduler records (GPU thread only)
         All,     // resolve + tail back to back (synchronous path)
     };
@@ -143,8 +143,9 @@ public:
         return configure_func(this, ctx, is_indexed, ConfigurePhase::All);
     }
 
-    // Both phases run on the GPU thread: texture resolution can itself
-    // upload/copy images and access the scheduler.
+    // Resolve may upload/copy images and access the scheduler. A dedicated
+    // 1B resolver is allowed only with capture + sync bridge and the GPU
+    // producer parked; the tail always runs on the GPU thread.
     bool ConfigureResolve(DrawContext& ctx, bool is_indexed) {
         return configure_func(this, ctx, is_indexed, ConfigurePhase::Resolve);
     }

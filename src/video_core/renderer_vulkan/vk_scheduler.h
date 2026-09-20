@@ -46,17 +46,33 @@ struct QueryCacheParams;
 /// OpenGL-like operations on Vulkan command buffers.
 class Scheduler {
 public:
-    // (local-only) Stage 1A: producer-thread-only command capture. This is NOT
-    // a worker-safe scheduler state snapshot or an asynchronous submission API.
+    // (local-only) 1A inline / 1B resolver capture. In 1B the GPU producer
+    // parks until completion, servicing only explicitly handed-off prefixes.
+    // Live scheduler state is borrowed exclusively; this is NOT async-safe.
     class CapturedBatch;
+    enum class CaptureSync {
+        Publish,
+        WaitWorker,
+        WaitTick,
+    };
+    class CaptureSyncBridge {
+    public:
+        virtual ~CaptureSyncBridge() = default;
+        // Blocking rendezvous: batch ownership is already released. Must
+        // propagate service errors back to the producer, never strand it.
+        virtual void Request(CapturedBatch& batch, u64 job_id, CaptureSync operation,
+                             u64 tick) = 0;
+    };
     struct ResolverCaptureContext {
         Scheduler& scheduler;
         CapturedBatch& batch;
         u64 job_id;
+        CaptureSyncBridge* bridge{};
     };
     class CaptureScope {
     public:
-        CaptureScope(Scheduler& scheduler, CapturedBatch& batch, u64 job_id);
+        CaptureScope(Scheduler& scheduler, CapturedBatch& batch, u64 job_id,
+                     CaptureSyncBridge* bridge = nullptr, std::thread::id receiver = {});
         ~CaptureScope();
         CaptureScope(const CaptureScope&) = delete;
         CaptureScope& operator=(const CaptureScope&) = delete;
@@ -65,9 +81,10 @@ public:
         ResolverCaptureContext context;
     };
 
-    // Consume the current private prefix, retaining batch identity/statistics
-    // for subsequent prefixes. Caller is the SAME GPU producer as capture.
+    // Cross-thread splice requires ReleaseCaptured followed by a synchronized
+    // rendezvous. Only the designated GPU receiver may publish that prefix.
     void SpliceCaptured(CapturedBatch& batch, u64 job_id);
+    void ReleaseCaptured(CapturedBatch& batch, u64 job_id);
 
     explicit Scheduler(const Device& device, StateTracker& state_tracker);
     ~Scheduler();
@@ -168,7 +185,9 @@ public:
             if (tick >= master_semaphore->CurrentTick()) {
                 Flush();
             }
-            master_semaphore->Wait(tick);
+            if (!BridgeCaptureSync(CaptureSync::WaitTick, tick)) {
+                master_semaphore->Wait(tick);
+            }
         }
         if (Settings::values.use_speed_limit.GetValue() && target_fps > 0.0) {
             auto now = std::chrono::steady_clock::now();
@@ -348,7 +367,9 @@ public:
         Scheduler* owner{};
         u64 job_id{};
         std::thread::id producer;
+        std::thread::id receiver;
         bool capturing{};
+        bool handed_off{}; // accessed only across bridge/completion rendezvous
         std::unique_ptr<CommandChunk> current;
         std::vector<std::unique_ptr<CommandChunk>> sealed;
         u64 captured_bytes{};
@@ -358,6 +379,7 @@ public:
 private:
     ResolverCaptureContext* ActiveCapture();
     void DrainCapturePrefix();
+    bool BridgeCaptureSync(CaptureSync operation, u64 tick = 0);
     static thread_local ResolverCaptureContext* active_capture;
 
     struct State {

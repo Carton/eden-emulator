@@ -329,6 +329,9 @@ void RasterizerVulkan::EnsureResolver() {
     resolver->check_enabled = token_check_enabled;
     const char* batch{std::getenv("EDEN_TOKEN_BATCH")};
     resolver->batch_enabled = batch && batch[0] == '1' && batch[1] == '\0';
+    const char* worker{std::getenv("EDEN_TOKEN_WORKER")};
+    resolver->worker_enabled = worker && worker[0] == '1' && worker[1] == '\0';
+    resolver->batch_enabled |= resolver->worker_enabled;
     // (local-only) EDEN_TOKEN_EPOCH=0 turns the uniform epoch capture off
     // (A/B switch: tail keeps reading guest memory directly).
     const char* epoch{std::getenv("EDEN_TOKEN_EPOCH")};
@@ -374,8 +377,9 @@ void RasterizerVulkan::CommitPendingDraw() {
 }
 
 void RasterizerVulkan::FlushPendingDraw() {
-    // Resolves execute inline. Foreign cache-invalidation callers synchronize
-    // via the cache mutexes; they must not read/reset the GPU-owned resolver.
+    // The GPU either resolves inline or parks at the 1B rendezvous. Foreign
+    // invalidation and resolver callbacks have no draw_owner TLS: they use
+    // cache mutexes and must not read/reset/wait on the GPU-owned pending draw.
     if (draw_owner == this && pending_commit.load(std::memory_order_acquire)) {
         CommitPendingDraw();
     }
@@ -454,6 +458,11 @@ void RasterizerVulkan::LogTokenDiag() {
                  resolver->diag_capture_batches, resolver->diag_captured_bytes,
                  resolver->diag_splice_count);
     }
+    if (resolver->worker_enabled) {
+        LOG_INFO(Render_Vulkan,
+                 "DrawToken diag: diag_worker_resolves={} diag_worker_sync_requests={}",
+                 resolver->diag_worker_resolves, resolver->diag_worker_sync_requests);
+    }
 }
 
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
@@ -510,8 +519,8 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
             return;
         }
         // Resolve may call back into the rasterizer while synchronizing guest
-        // memory. Publish only after it returns, otherwise a callback tries to
-        // commit this still-resolving job and waits for itself.
+        // memory. Publish only after it returns (including the 1B rendezvous),
+        // otherwise a callback can try to commit a still-resolving job.
         resolver->ExecuteResolve(scheduler);
         pending_commit.store(true, std::memory_order_release);
         ++pipelined_draws;

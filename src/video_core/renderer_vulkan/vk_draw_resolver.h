@@ -23,8 +23,8 @@ class Scheduler;
 // (local-only) P2 Step 2: draw tokens.
 //
 // The GPU thread snapshots a draw into the shadow engine and executes the
-// resolve phase inline (it may invoke the texture runtime). Worker resolve
-// remains disabled. The commit phase (uploads +
+// resolve phase inline, or on its own worker with an immediate GPU rendezvous
+// (stage 1B). Overlapped/async resolve remains disabled. The commit phase (uploads +
 // scheduler records) always runs on the GPU thread, in draw order, at the
 // next rasterizer rendezvous. Exactly one job is in flight at any time.
 //
@@ -80,8 +80,8 @@ public:
     bool SnapshotAndEnqueue(Tegra::Engines::Maxwell3D& engine, GraphicsPipeline* pipeline,
                             bool is_indexed, u32 instance_count);
 
-    // GPU thread only. Optional stage-1A capture is spliced before returning,
-    // so no later producer command can overtake it before the deferred tail.
+    // GPU entry. Stage 1B signals the private worker and immediately waits,
+    // servicing synchronization requests. Both modes splice before returning.
     void ExecuteResolve(Scheduler& scheduler);
 
     // GPU thread: after WaitResolved(), the finished job.
@@ -106,6 +106,7 @@ public:
     SnapshotMode snapshot_mode{SnapshotMode::Journal};
     bool check_enabled{false};
     bool batch_enabled{false}; // EDEN_TOKEN_BATCH=1; never enables worker resolve
+    bool worker_enabled{false}; // EDEN_TOKEN_WORKER=1; implies batch, no overlap
     // (local-only) EDEN_TOKEN_EPOCH=0 disables the uniform epoch capture
     // (A/B switch; the tail then keeps the old direct-guest fast path).
     bool epoch_enabled{true};
@@ -124,6 +125,8 @@ public:
     u64 diag_capture_batches{}; // successful capture scopes, including empty ones
     u64 diag_captured_bytes{};  // command arena bytes, including successful alignment
     u64 diag_splice_count{};    // nonempty prefix publications (Finish may split a batch)
+    u64 diag_worker_resolves{};
+    u64 diag_worker_sync_requests{};
     std::chrono::nanoseconds diag_resolve_ns{};
     std::chrono::nanoseconds diag_replay_ns{};
 
@@ -135,6 +138,8 @@ private:
     };
 
     void CopyDynamicState(Tegra::Engines::Maxwell3D& engine);
+    struct WorkerState;
+    void ExecuteResolveImpl(Scheduler& scheduler, WorkerState* worker_state);
 
     Tegra::MemoryManager& gpu_memory;
     BufferCache& buffer_cache;
@@ -154,6 +159,8 @@ private:
     // switches swap Maxwell3D objects; a different source forces a resync).
     const Tegra::Engines::Maxwell3D* shadow_source{};
     bool shadow_in_sync{};
+    // Lazily allocated only for 1B. Joined before any job/cache references die.
+    std::unique_ptr<WorkerState> worker;
 };
 
 } // namespace Vulkan
