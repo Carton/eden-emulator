@@ -3158,3 +3158,35 @@ HypervisorPresent=False，IBS 探针 rc=0（§28.21 手册 §6 流程一次通�
 
 **串行线路的最终画像**：执行吞吐瓶颈、无内存墙、无分支墙；指令级减负全做
 ~0.5-2%；大头（A 解析 22% + B 绑定 11%）只有并行化（tail-on-worker 线）能动。
+
+### 28.23 serialcuts2 三切口实施+验收 + 头文件依赖大坑（2026-09-21 凌晨）
+
+**实施（codex resume 01a0bf4d，三 commit）**：
+- #1（e7c1484690）descriptor_table.h：单设备页算术判断替代第二次 GetPointer 翻译；
+- #10-SSBO（e43f875f75）buffer_cache.h：双 qword 同页单次翻译 + aligned/unaligned
+  成对翻译的仿射推导（read_handle CB 页缓存未做，留待命中率数据）；
+- #2（814f80c107）memory_tracker_base.h+word_manager.h：IsRegionGpuModified
+  tracker 级单词直查 top_tier + manager 级单词 mask 直查（只动查询路径）。
+- 每项带 SerialCuts 诊断计数（thread_local，每 65536 次一行 INFO）。
+
+**验收（serialcuts2-5330fa514c9d，快档）**：fps 43.80 / med 22.50 / luma
+56.78±0.17 / close 15.3s，帧形正常、无断言无 storage 报错；截图与 9-20 已验收
+的 pipe-off2 对照同貌（黑底+叠加层=PrintWindow 小窗常态，见 §28.11 注）。
+**局部指标（决定性证据，~195s 局）**：
+- descriptor 快路径 **84,279,296/84,279,296 = 100%**（省 ~84M 次翻译）；
+- SSBO qword 复用与地址对推导 **各 7,798,784/7,798,784 = 100%**（再省 ~15.6M 次）；
+- GPU 脏查询单词快路径 **92.8%**（137.1M/147.7M）。
+宏观未做交错 A/B（旧 exe 已被覆盖；单项按 codex 预期在 ±2% 带内，局部指标
+已证明冗余消除成立）。快档 43.8 在历史带内，无回归信号。
+
+**头文件依赖大坑（本夜踩破）**：只改 .h 后 `cmake --build build-vs22` 报
+"ninja: no work to do"——build.ninja 里 **0 个 msvc_deps_prefix、仅 3 条 deps
+边**，且 cl 输出的是本地化（GBK"注意: 包含文件:"）的 /showIncludes，ninja
+无法解析 ⇒ **头文件依赖从未进 .ninja_deps**（历史没暴露因为每次改动都带 .cpp）。
+**规程：改 .h 一律用反向 include 闭包 touch 受影响 .cpp（本次 63 文件/38 TU），
+构建后必须核对 eden.exe mtime 真的变了**（AGENTS 已同步）。附带教训：写 include
+闭包脚本时注意传播方向是"包含者"方向不是"依赖"方向（第一版方向反了）。
+
+**遗留**：#10 的 read_handle CB 页缓存待做（需先看 handle 同页率数据）；
+可选：旧/新 exe 交错 A/B（要重编旧 commit 一份）定量宏收益；codex 提案
+#3-#7、#9 未实施（预期合计仍在 ~1% 级）。

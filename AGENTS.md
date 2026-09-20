@@ -50,6 +50,10 @@ cmake.exe --build build-vs22     # RelWithDebInfo，产物在 build-vs22/bin/
 - `/usr/bin/link.exe` 会遮挡 MSVC 链接器，务必保持 MSVC bin 目录在 PATH 前面（上面的 export 已处理）。
 - RelWithDebInfo = `/O2 /Ob1 /Zi /MD` + `/DEBUG /OPT:REF /OPT:ICF`，性能版带调试符号，正是 profile 用的配置。
 - 构建命令不要接 `| tail` 等管道（吃掉退出码和错误行）；构建后必须验证产物时间戳。
+- **头文件陷阱（2026-09-21 实锤）**：build-vs22 的 ninja 没有头文件依赖追踪
+  （无 msvc_deps_prefix，cl 的 /showIncludes 是 GBK 本地化输出）——**只改 .h 时
+  ninja 会说 "no work to do" 而不重编**。改 .h 必须先用反向 include 闭包把受影响
+  的 .cpp 全部 touch（或删对应 obj 目录），再构建，并核对 eden.exe mtime 确实更新。
 
 ## 产物
 
