@@ -1,0 +1,19 @@
+# Catch silent process exits / aborts in eden (tools/prof, local-only).
+# Usage (bash, repo root):
+#   cd build-vs22/bin && EDEN_DRAW_TOKEN=1 ../..//tools/prof/run_lldb_exit_trace.sh
+# Taps must be driven externally at t+52..t+76 (focus_test.ps1 -ProcessId <pid>).
+settings set target.env-vars EDEN_DRAW_TOKEN=1
+settings set target.process.stop-on-exec false
+process handle --all true
+breakpoint set -n ExitProcess
+breakpoint set -n TerminateProcess
+breakpoint set -n RtlExitUserProcess
+breakpoint set -n abort
+breakpoint set -n _invoke_watson
+breakpoint set -n quick_exit
+run
+echo === stopped or exited: backtraces follow ===
+bt all
+echo === exit code ===
+process status
+quit
