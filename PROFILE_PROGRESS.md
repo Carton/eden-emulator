@@ -3071,3 +3071,26 @@ inherent; full parity was never the prize — the resolve+epoch share of the
 损失（教训 3），待用户 hands-off 窗口用 rot_capture+修复后哨兵重采；codex 串行
 路径分析（新会话，非 01a0bd33 线）已派——输入=§27.1 池+本轮 GPU 线程排名+
 §27.4 已归因未做清单，输出=风险可控的优先级优化提案（分析 only，不动代码）。
+
+**codex 串行路径提案已收**（thread 01a0bf4d-6108-7cb0-bb0d-9900b90695ee，
+全文 `F:\prof\codex_serialpath_proposals_20260920.md`，续做实施走 resume）。
+要点：9 项提案全部亚百分比级（各 0.05-0.4%），按优先级——
+① DescriptorTable::Read 单页省第二次地址翻译（descriptor_table.h:37）；
+② IsRegionGpuModified 单 word 快路径（memory_tracker_base.h:60，已有遇脏即停，
+省的是通用遍历开销）；
+③ kind 区间"最近区间"memo（range_map.h:44 + memory_manager.cpp:547，
+缓存区间端点不持 iterator，kind 更新即失效）；
+④ IsContinuousRange 已映射单页直返（memory_manager.cpp:598，与③拆开做）；
+⑤ CounterReport 延迟构造 std::function（query_cache.h:232，多数分支不用回调；
+注意 MSVC std::function 有 SBO，旧"必然堆分配"说法需按捕获集大小修正）；
+⑥ CommitAsyncFlushesHigh 的 normalized_copies 按 downloads.size() 预留
+（buffer_cache.h:671）；
+⑦ Sampler::HandleFor 最近 key→VkSampler memo（vk_texture_cache.cpp:2945）；
+⑧ 描述符 memcmp 去重前加廉价"不相等"拒绝（vk_graphics_pipeline.cpp:602）；
+⑨ 页保护 churn 条件性立项（先证冗余再动，0% 起评）。
+"不建议做"名单同样有价值：不按排名重写 DmaPusher 分派、不整体 memo
+VisitImageView/RefreshContents、不做全局 GpuToCpuAddress memo、宏参数 vector
+需先复核旧归因（未见 SamplerKey 类型）、不用 hash 替 memcmp、不延迟/合并页保护。
+验证纪律沿既有三层法；±2% 带内=宏观未分辨，亚百分比切口靠局部指标
+（ns/draw、次数/draw、分配字节/draw）定去留。**现实预期：这批全做也就
+~1% 级别，串行路径已近榨干——与 §27 修正结论一致（干净池在 B，需要并行化）。**
