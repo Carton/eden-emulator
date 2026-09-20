@@ -26,8 +26,8 @@ description: Eden 模拟器（TOTK）性能基准与 profiling 工作流——VS
 cd /f/devel/opensource/eden-emulator
 source /f/devel/opensource/eden-emulator/tools/windows/load-msvc-env.sh
 export PATH="/g/Tools/glslang/bin:$(dirname "$(command -v cl.exe)"):/d/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin:/d/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja:$PATH"
-cmake.exe --build build-vs22 2>&1 | tee /f/prof/build_last.log | tail -15
-# 注意：退出码看 tee 的日志或直接看产物时间戳，别只信管道尾（AGENTS 规则）
+cmake.exe --build build-vs22
+# 直接检查退出码与产物时间戳，不接吞掉失败状态的管道
 ```
 
 产物 `build-vs22/bin/eden.exe`。**勿用 eden-cli 跑 TOTK（shader 段必崩）**。
@@ -51,10 +51,10 @@ powershell.exe -NoProfile -Command "Start-Process -WindowStyle Hidden -FilePath 
 会解析到 WSL，/f/ 路径必失败——§28.16 实坑）。**重启后首个 bench 局只作 warmup
 丢弃**（AGENTS 规则）。
 
-自动完成：杀残留 → 启动 eden → 自动 A 键进游戏（~110s）→ 静置测量 90s（窗内每
-15s 截 QA 图）→ 优雅关闭（WM_CLOSE）→ 解析逐帧 CSV → 追加
-`F:\prof\bench_results.csv`（含 luma 亮度列），stdout 打 `RESULT <label>: ...`
-+ 逐 draw diag 行（自动留档 `F:\prof\diag\<label>.txt`）。
+自动完成：检查没有其他 Eden → 启动指定 portable exe → 自动 A 键进游戏 → 静置测量与截图 → 按 PID 优雅关闭 → 校验新 CSV → 独立目录留档。
+新局归档位于 F:\prof\runs\<label>-<id>\，含 result.json、frames.csv、shots/、diag.txt。
+实际 exe SHA-256 与源码 HEAD 分开记录；旧 bench_results.csv 不改写。
+失败退出非零；机器读取成功数据用 RESULT_JSON。整对失败须重试整对；quiet sequence 的 PAIRS 使用完整标签。
 
 - 前提：qt-config.ini 已设 `record_frame_times=true`、`confirmStop=2`（都已配好）
 - **跑基准期间用户不能碰键盘/鼠标**（前台锁吃掉注入按键；测试时段有人=数据作废）
@@ -68,20 +68,11 @@ powershell.exe -NoProfile -Command "Start-Process -WindowStyle Hidden -FilePath 
 
 ## 微 profile（wpr 采集 + ETW MCP 分析）——小收益优化的判定手段
 
-### 采集（~6 分钟）
+### 采集
 
-1. **hold 模式起游戏**（进游戏后保持不关，供采集窗口用）：
-   ```bash
-   cd /f/devel/opensource/eden-emulator && python tools/prof/bench_run.py wpr-hold --hold 260   # 后台跑
-   ```
-2. **等进游戏 + 帧率稳定再采样**：进游戏约在 t+110s，**再等 ≥30s**（帧率从爬升到稳态）
-   后才触发采集——直接 `sleep 145` 再执行下一步。
-3. 触发提权一体化采集（100s，起停必须在同一脚本里）：
-   ```bash
-   powershell.exe -NoProfile -Command "Start-Process -Verb RunAs -WindowStyle Minimized -FilePath 'tools/prof/wpr_run.cmd'"
-   ```
-   产物 `F:\prof\totk_t3.etl`（CPU+GPU，体积大；**会覆盖**，先 `mv` 保住旧 trace）。
-4. 轮询 `F:\prof\wpr_run.log` 出现 `WPR_DONE`。
+优先运行 python tools/prof/tailimm_ab.py --seconds 40：一次 UAC，阶段进入游戏后发布原子 JSON 请求，唯一目录隔离旧请求，不取消其他 WPR 会话。
+独立采集在提权终端运行 python tools/prof/wpr_capture.py OUTPUT_DIRECTORY --name capture --seconds 100 --with-gpu；拒绝覆盖已有 ETL，校验退出码与非空产物。
+不再依赖 WPR_DONE 字符串或数据目录中的可执行 cmd。命令参数与迁移见 tools/prof/README.md。
 
 ### 分析（本会话 ETW MCP，30s 超时但后台继续）
 
@@ -103,12 +94,12 @@ mcp__etw__process_trace(filePath="F:\\prof\\totk_cpugpu.etl",
 
 ## 图像 QA（改渲染/图形路径的必做验收；完整规程见 AGENTS.md）
 
-- bench 测量窗自动截 6 张到 `F:\prof\shots\<LABEL>\`（PrintWindow 抓 "Form" 渲染窗，
+- bench 测量窗自动截 6 张到 `F:\prof\runs\<LABEL>-<id>\shots\`（PrintWindow 抓 "Form" 渲染窗，
   遮挡免疫）；**每局确认截图内容是游戏画面**——内容=桌面/其他应用 ⇒ 该局作废
   （用户占机铁证）。截不到=游戏窗不可用，查 tap 日志。
 - 对比：`python tools/prof/shot_compare.py DIR_A DIR_B`（PASS/WARN/FAIL+坏点%）；
   先跑 golden vs golden 校准噪声地板；参照局与测试局**背靠背**。
-- 水塘干净局 luma 60–61（CSV 有列），离带=档位不同或污染。
+- 水塘干净局 luma 60–61（result.json 有字段），离带=档位不同或污染。
 - 加载画面只比右侧/右下（左侧每次加载随机）；细节问题用 load_capture.py 放大窗口。
 
 ## 渲染正确性检查（改了状态跟踪类代码后必做）

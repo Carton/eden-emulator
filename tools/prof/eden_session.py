@@ -123,13 +123,14 @@ class EdenSession:
     def close(self) -> None:
         if self.process is None or self.process.poll() is not None:
             return
-        subprocess.run(["taskkill", "/PID", str(self.pid)], capture_output=True, timeout=15)
         try:
+            subprocess.run(["taskkill", "/PID", str(self.pid)], capture_output=True, timeout=15)
             self.process.wait(timeout=60)
-        except subprocess.TimeoutExpired:
+        except (OSError, subprocess.SubprocessError):
             self.forced = True
-            self.process.kill()
-            self.process.wait(timeout=15)
+            if self.process.poll() is None:
+                self.process.kill()
+                self.process.wait(timeout=15)
 
     def __exit__(self, exc_type, exc, traceback):
         self.close()

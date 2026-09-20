@@ -43,8 +43,9 @@ def validate(values: dict[str, str]) -> list[str]:
         value, flag = get(key), get(key + r"\default")
         if value != expected:
             failures.append(f"{key}={value!r}; want {expected!r}")
-        # Missing flags are accepted for legacy Qt INIs; true explicitly overrides the value.
-        if flag is not None and flag.lower() != "false":
+        # ReadSettingGeneric defaults a missing flag to true. record_frame_times
+        # is explicitly read outside that mechanism in ReadDebuggingValues.
+        if key != "record_frame_times" and flag != "false":
             failures.append(f"{key}: default flag ignores required value")
     for key in MUST_DEFAULT:
         if get(key) is not None and get(key + r"\default") != "true":

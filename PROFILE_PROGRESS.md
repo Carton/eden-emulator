@@ -2260,3 +2260,17 @@ GDI lifetime, WPR ownership/quota, process cleanup, idle gating and safe --help.
 Validation pending at this commit: unified quality checks, PowerShell parse and
 helper compilation, and MSVC compilation of sym.cpp. No game, WPR capture, input
 injection, daily-install writes, FPS claims or live graphical acceptance performed.
+
+First validation of 60c5f1a812: Ruff format/lint, strict core mypy and 71 pytest
+cases passed. PowerShell files parsed; the shared C# input helper compiled without
+calling its input APIs. sym.cpp compiled and linked with MSVC 19.44 /utf-8 /W4 /WX,
+and invalid-RVA/symbol lookup smoke checks ran against its own test binary.
+Artifact: build-vs22/review-check/sym.exe (2026-09-20 10:36:48 local time).
+
+Follow-up review checks the actual Config::ReadSettingGeneric implementation:
+missing default flags mean true for ordinary settings, but record_frame_times
+deliberately bypasses that logic. The guard and tests now reflect this distinction.
+Added full mocked benchmark success/failure/archive tests and cleanup fallback
+when taskkill itself fails. Poe explicitly uses the local uv-created virtualenv;
+the sandbox's cache ACL required RUFF_NO_CACHE=true and a workspace mypy cache for
+validation. No tools were elevated for runtime testing and no game was launched.

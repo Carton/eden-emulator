@@ -38,6 +38,10 @@ test = "pytest"
 types = "mypy prof_common.py"
 check-full = ["check", "types", "test"]
 
+[tool.poe.executor]
+type = "virtualenv"
+location = ".venv"
+
 [tool.mypy]
 python_version = "3.12"
 strict = true

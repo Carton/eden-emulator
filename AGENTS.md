@@ -79,8 +79,8 @@ cmake.exe --build build-vs22     # RelWithDebInfo，产物在 build-vs22/bin/
 5. **profile 一律用 GUI 的 eden.exe**（CLI + TOTK 会崩）；分析阶段不开 PGO；计时采集前关后台干扰
    （LosslessScaling 等，check_config.py 会拦截；**NVIDIA Overlay 一律不杀、不拦、不用管**——
    2026-09-19 用户定规，med 实测无扰，check_config 对它只 WARN）。
-6. **测试按键自动化**：`python tools/prof/patch_input.py`（自动备份到 `.bak-autotest`，测完
-   `--restore` 还原用户手柄配置）；focus_ok=True 不代表游戏收到按键，测前 grep
+6. **测试按键自动化**：`python tools/prof/patch_input.py`（测试键备份到 `.autotest.json`，测完
+   `--restore` 只还原这些键；旧 `.bak-autotest` 须人工比对）；input_ok=True 不代表游戏收到按键，测前 grep
    `player_0_button_a` 确认是 keyboard,code:88。
 7. **A/B 纪律**：宏观结论只认 `tools/prof/bench_ab.py` 交错对（AB/BA 背靠背，报逐对比值
    中位数；单局绝对 fps 只在机器静置时有效，干净带内残余 ±2-4%）；med 落在 tick
@@ -127,7 +127,7 @@ cmake.exe --build build-vs22     # RelWithDebInfo，产物在 build-vs22/bin/
 ## 图形验收与性能评估规程（2026-09-19 固化；案例与推导见 PROFILE §28.3/28.10/28.11）
 
 ### 图像 QA（改渲染/图形路径的必做验收）
-- **采集**：bench_run.py 测量窗内每 15s 自动截 6 张到 `F:\prof\shots\<label>\`
+- **采集**：bench_run.py 默认 90s 测量窗内每 15s 自动截 6 张到 `F:\prof\runs\<label>-<id>\shots\`
   （PrintWindow(PW_RENDERFULLCONTENT) 抓 "Form" 渲染窗，遮挡免疫——注意该路径
   2026-09-19 才真正修好，此前截图全来自屏幕抓取兜底，历史结论属性见 PROFILE §28.11）。
   **每局必须确认 shots 存在且内容是游戏画面**：截图内容=桌面/其他应用 ⇒ 该局作废
@@ -138,14 +138,14 @@ cmake.exe --build build-vs22     # RelWithDebInfo，产物在 build-vs22/bin/
 - **配对纪律**：golden 参照局与测试局**背靠背**（跨小时对比作废）；按索引配对；
   异常定位用分辨率网格 bad% 热图；MCP 复核路径 = Read（**正斜杠**路径）→ CDN URL →
   analyze_image（反斜杠 URL 会 1210 失败）。
-- **luma 协变量**：每局自动算截图平均亮度入 bench_results.csv（干净水塘 60–61、
+- **luma 协变量**：每局自动算截图平均亮度入该局 result.json（干净水塘 60–61、
   窗内 std≈0.2）；离带 = 场景档位不同或截图污染，该对比无效。
 - 加载画面对比只看右侧/右下（固定元素），左侧每次加载随机；225×250 小窗会掩盖
   小 UI 问题，需要时用 load_capture.py 放大到 1280×720 再截。
 
 ### 性能评估三层法（宏观结论只出自第 2/3 层，归因出自第 1 层）
 1. **局部归因 = 自插桩逐 draw 均值**：SerialDraw/DrawToken diag（每 5000/2000 draw
-   打点，ns/draw 级），bench 自动留档 `F:\prof\diag\<label>.txt`；对场景档位免疫，
+   打点，ns/draw 级），bench 自动留档 `F:\prof\runs\<label>-<id>\diag.txt`；对场景档位免疫，
    回答"贵在哪"。
 2. **宏观速率 = 交错对中位比值**：`python tools/prof/bench_ab.py --pairs 3 --a golden
    --b LABEL --benv "K=V,K=V"`（AB/BA 交替消慢漂移）；**只报逐对比值的中位数**，
@@ -168,6 +168,6 @@ cmake.exe --build build-vs22     # RelWithDebInfo，产物在 build-vs22/bin/
   `F:\prof`，新脚本一律放仓库）
 - 基准历史：`F:\prof\bench_results.csv`（含 luma 列）；交错 A/B：`tools/prof/bench_ab.py`；
   静置自动轮：`tools/prof/quiet_watch.py`+sequence 文件；图像 QA：`tools/prof/shot_compare.py`；
-  逐 draw diag 留档：`F:\prof\diag\<label>.txt`
+  新局结果与 diag 留档：`F:\prof\runs\<label>-<id>\`（历史 bench_results.csv 不再改写）
 - trace 存档与脚本清单：PROFILE_PROGRESS.md §7
 - 测试存档（水塘场景）在 build-vs22/bin/user/nand；同步自 F:\Switch\Yuzu（只读源）

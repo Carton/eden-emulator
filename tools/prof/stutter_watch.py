@@ -200,7 +200,7 @@ def main(argv=None):
                         pm.kill()
                         pm.wait(timeout=5)
                 if reader is not None:
-                    reader.join(timeout=5)
+                    reader.join()
                 if pm.stdout is not None:
                     pm.stdout.close()
             # Serialize with the in-flight stop. WPR subprocesses have bounded timeouts.

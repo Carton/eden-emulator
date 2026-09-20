@@ -48,7 +48,14 @@ def test_key_match_does_not_modify_prefixed_name():
 def baseline():
     values = {f"Section/{key}": value for key, value in MUST_MATCH.items()}
     values.update(
-        {f"Controls/{key}": value for key, value in PATCH.items() if key not in MUST_MATCH}
+        {f"Section/{key}\\default": "false" for key in MUST_MATCH if key != "record_frame_times"}
+    )
+    values.update(
+        {
+            f"Controls/{key}": value
+            for key, value in PATCH.items()
+            if key.split("\\")[0] not in MUST_MATCH
+        }
     )
     return values
 
@@ -57,10 +64,16 @@ def test_default_flags_and_a_mapping():
     values = baseline()
     assert validate(values) == []
     values[r"Section/record_frame_times\default"] = "true"
-    assert any("record_frame_times" in fail for fail in validate(values))
+    assert validate(values) == []  # This setting is deliberately read without the default flag.
     del values[r"Section/record_frame_times\default"]
     values["Controls/player_0_button_a"] = "engine:keyboard,code:99"
     assert any("button_a" in fail for fail in validate(values))
+
+
+def test_missing_default_flag_means_compiled_default():
+    values = baseline()
+    del values[r"Section/cpu_accuracy\default"]
+    assert any("cpu_accuracy" in fail for fail in validate(values))
 
 
 def test_ambiguous_setting_rejected():

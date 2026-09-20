@@ -5,6 +5,7 @@ import json
 import re
 from pathlib import Path
 
+from eden_session import session_lock
 from prof_common import atomic_text, eden_dir, require_no_eden, writable_target, write_json
 
 PATCH = {
@@ -66,8 +67,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--restore", action="store_true")
     args = parser.parse_args(argv)
-    require_no_eden()
-    patch_config(args.ini, restore=args.restore)
+    with session_lock():
+        require_no_eden()
+        patch_config(args.ini, restore=args.restore)
     print("restored" if args.restore else "patched", args.ini)
     return 0
 
