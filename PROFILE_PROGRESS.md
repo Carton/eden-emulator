@@ -3096,7 +3096,12 @@ VisitImageView/RefreshContents、不做全局 GpuToCpuAddress memo、宏参数 v
 ~1% 级别，串行路径已近榨干——与 §27 修正结论一致（干净池在 B，需要并行化）。**
 
 **收尾（2026-09-20）**：uProf CLI 参数与本机实测整理成正式手册
-`docs/local/uprof-cli.md`（含 collect 选项表、IBS/报告语法、VBS 检查命令、
-解锁后水塘场景 IBS 重试配方）；**用户计划后续关闭内存完整性（VBS）以重试
-IBS**——届时按手册 §6 直接跑，分析目标=页保护 churn/描述符读/连续性遍历/
-hash-memcmp 的 miss 份额归因，与 codex 提案切口互相校准。
+`docs/local/uprof-cli.md`（含 collect 选项表、IBS/报告语法、hypervisor 检查命令、
+解锁后水塘场景 IBS 重试配方）；**解锁 IBS 待用户切换 hypervisor 后重试**。
+**更正（用户质疑后复核）**：拦截源**不是**"内核隔离→内存完整性"（实测
+SecurityServicesRunning={0}，HVCI/CredentialGuard 均未运行），而是 **WSL2 的
+虚拟机平台**（VirtualMachinePlatform + WSL 功能均 Enabled）把 hypervisor 常驻
+拉起——IBS 挡在 HypervisorPresent=True 这一层。解锁=管理员执行
+`bcdedit /set hypervisorlaunchtype off` + 重启（代价 WSL2 暂不可用，反向切回），
+比关内存完整性/BIOS SVM 都更精准。届时按手册 §6 直接跑，分析目标=页保护 churn/
+描述符读/连续性遍历/hash-memcmp 的 miss 份额归因，与 codex 提案切口互相校准。

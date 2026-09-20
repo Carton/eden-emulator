@@ -12,18 +12,30 @@
 - **普通采样不需要管理员**（TBS 定时采样本机非提权实测 rc=0，IBS 文档同样不要求）。
   仅 thread-concurrency 等附加功能明确要求管理员；`AMDProfilerService` 只是远程
   profiling 的服务，本机采集不需要。
-- **VBS/Hyper-V 拦截（当前状态）**：本机 HypervisorPresent=True 且 VBS running
-  （Windows"内存完整性"开着）时，uProf 的 **EBP/IBS（PMU 硬件计数器采样）被禁用**，
-  实测报 `ERROR: IBS counters are not available`；TBS 不受影响。状态检查：
+- **hypervisor 常驻拦截（当前状态，2026-09-20 复核实证）**：本机
+  `HypervisorPresent=True` 时，uProf 的 **EBP/IBS（PMU 硬件计数器采样）被禁用**，
+  实测报 `ERROR: IBS counters are not available`；TBS 不受影响。
+  **注意拦截源不是"内核隔离→内存完整性"**——本机实测 `SecurityServicesRunning
+  = {0}`（HVCI/Credential Guard 均未运行）、DeviceGuard 注册表未启用，而
+  `VirtualMachinePlatform` 与 `Microsoft-Windows-Subsystem-Linux` 可选功能均为
+  Enabled（1）——**是 WSL2 的虚拟机平台把 hypervisor 常驻拉起来的**。
+  状态检查：
 
   ```powershell
   (Get-CimInstance Win32_ComputerSystem).HypervisorPresent   # 应为 False
-  Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\Microsoft\Windows\DeviceGuard |
-    Select-Object -ExpandProperty VirtualizationBasedSecurityStatus   # 0=off
   ```
 
-  解锁 = Windows 安全中心关闭"内核隔离→内存完整性"+ 重启（用户决策；
-  用户已计划后续关闭以重试 IBS，见 §6 重试配方）。
+  解锁选项（任选其一，均需重启，代价都是 **WSL2 暂不可用**，切回时反向操作再重启）：
+
+  ```powershell
+  # 方案 A（推荐，最精准的启动开关；管理员终端）：
+  bcdedit /set hypervisorlaunchtype off    # 切回： bcdedit /set hypervisorlaunchtype auto
+  # 方案 B（动功能开关）：
+  dism /online /disable-feature /featurename:VirtualMachinePlatform
+  ```
+
+  （BIOS 关 SVM 也可以但不必要——那会影响一切虚拟化用途。Hyper-V 完整功能与
+  沙盒本机本来就是 Disabled，不用管。）
 
 ## 2. 命令速查
 
@@ -126,7 +138,8 @@ AMDuProfCLI.exe report -i <会话目录> --detail -s event=ibs-op
 
 ## 6. 解锁后的重试配方（水塘场景 IBS 归因）
 
-1. 确认 VBS 已关（§1 两条 powershell；HypervisorPresent 应为 False）。
+1. 确认 hypervisor 未加载（§1 的检查命令；`HypervisorPresent` 应为 False——
+   判断标准是它，不是安全中心任何开关）。
 2. 照常起 bench/rot（`python tools/prof/bench_run.py LABEL` 或 rot_capture），
    游戏进场景后拿 eden.exe PID。
 3. 采集（IBS 有采样开销，**该局帧时只做参考，不进宏观 A/B 结论**）：
