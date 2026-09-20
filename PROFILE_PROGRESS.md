@@ -3011,3 +3011,63 @@ tail N pending) — a separate, larger design. Per the stop-loss clause:
 experimental opt-in.** Ceiling reminder: journal snapshot is GPU-thread
 inherent; full parity was never the prize — the resolve+epoch share of the
 -12.4% INLINE gap (~8-11%) was, and only 2B can reach for it.
+
+### 28.21 串行路径再挖掘轮：uProf 被 VBS 拦 + 旋转掉帧取证 + 哨兵联调翻车实录（2026-09-20 深夜）
+
+用户指令：tail-on-worker 决策前，先在串行路径（flags 全关=现状默认）上再挖一轮
+风险可控的优化机会；水塘场景 uProf 归因 + 角色原地旋转触发掉帧取证。
+
+**uProf（5.3.521，此前 4 次"下轮做"从未真正跑通的谜底）**：
+- CLI 语法两路合围摸清：本机错误驱动探针（`collect -h` 本机挂起且无输出，选项表
+  靠非法参数报错逐个挖出：`-a`全系统/`-p/--pid`附加/`-d`时长/`-o`输出/`-e`事件/
+  `-t`采样间隔/`-f`报告格式）+ codex-research（gpt-5.6-luna）官方 5.3 文档调研，
+  全文+来源 URL 存 `F:\prof\codex_uprof_cli_research.md`。要点：IBS=
+  `collect --config ibs --pid <PID> -d N -o DIR`（等价 `-e event=ibs-op,interval=...`）；
+  报告 `report -i <会话目录> --detail -s event=ibs-op`（函数级归因需 PDB，我们有）；
+  Zen3 无 ibsop-l3miss（Zen4 专属），看 IBS_LD_L2_MISS/IBS_L1_DC_MISS_LAT 族。
+- **TBS（默认定时采样）非提权实测可用**（全系统与 --pid 附加都 rc=0）。
+- **IBS/EBS 实测被拦**：`ERROR: IBS counters are not available` ——本机
+  HypervisorPresent=True 且 VBS running（Windows 内存完整性开着），uProf 文档明确
+  此状态禁用 EBP/IBS。**解锁=用户关闭内存完整性+重启，属用户决策，未做**。
+  命令精华已录 tools/prof README「AMD uProf」节。
+
+**旋转掉帧取证（9-16 手动轮 3 个 ETL，最小 167MB=2.9s ring，52-53ms 帧取证）**：
+- 整窗（24.2s，eden 86,348 样本≈3.6 核均忙）：**GPU 线程 21,712（25%）居首**，
+  CPUCore_1/0/2 各 18.6-18.9%，VulkanWorker 7,559（8.8%），CPUCore_3 空闲
+  （该场景 3 guest 核活跃）。"转圈掉帧在 GPU 线程"数据成立。
+- **掉帧瞬间（末 200ms，871 样本）分布与整窗同构**（GPU 20%，三核 ~19%，无线程
+  消失/暴增）⇒ 掉帧=串行路径负载尖峰（当帧工作量变大），**不是锁等待或卡死**。
+- GPU 线程热点（drop 窗口，eden.exe 14,403 样本，前几名）：DmaPusher::
+  ProcessCommands 787 / PushImageDescriptors 356 / VisitImageView 253 /
+  BindHostGraphicsUniformBuffer 257 / IterateWords(SynchronizeBuffer) 231 /
+  PrepareImageView 224 / ConfigureImpl 两模板合计 411 / RefreshContents 210 /
+  FindBuffer 200 / GetPointer(DMM) 138 / GetSamplerId 127——与 §27.1 A/B/C/D 池
+  结构一致，无新面孔。内核+驱动占 GPU 线程样本 ~34%（ntoskrnl 2,368+nvlddmkm
+  1,838，含 ETW 栈行走自身开销）；`Common::HostMemory::Impl::Protect` 59 样本
+  （页保护 churn 是散布成本嫌疑，uProf IBS 解锁后可归因）。
+- 注意：此为 9-16 构建（serialcuts 前），形态参考价值大于精确数值。
+
+**旋转自动化战役实录（教训清单，下轮 hands-off 窗口照此避坑）**：
+1. 优雅关闭超时今晚 2/3 局命中（比 ~1/3 既往更密），rot_test 连续两局全窗口跑完
+   但 CSV 对齐被拒——新增 `tools/prof/rot_capture.py`：窗口墙钟标记逐窗落盘、
+   不依赖 eden 帧 CSV、容忍慢关闭（哨兵外部计时才是真数据源）。
+2. 用户输入 VOID 2 局（用户在机器前打字/操作）——自动化时段需用户明确 hands-off。
+3. **tasklist 看不见提权 PM/pythonw**（判活被误导两次：误判 sentinel1 过期→
+   sentinel2 撞 WPR duplicate；误判无会话→cleanup `wpr -cancel` 误杀 sentinel3
+   的活 ring，rot3 旋转窗 CPU 数据被我自己取消）。**判活一律 powershell
+   Get-Process 或看文件（wpr.log/pm_live.csv mtime）；非提权 `wpr -status`
+   对提权会话不可信，不能作为取消依据**。
+4. PresentMon 2.5.1 `--process_name eden` 对 eden.exe **0 行输出**（PM 存活无报错、
+   BOM-only stderr；9-16 老轮用的是另一套老脚本不能作证）。疑需 `eden.exe`
+   （PM 帮助原文"specified exe name"），**未验证**——stutter_watch 默认值待
+   下轮联测后修（tools/prof/stutter_watch.py:68 `--process-name` default）。
+5. 提权哨兵两次启动方式：pythonw+`start ""`+重定向（无窗口防误关）——sentinel4
+   存活全程，sentinel3 ~15s 内静默死亡（watch.log 无 traceback，死因未明）→
+   该模式**不稳定**，下轮起后 +60s 必须验证存活；回退方案=可见窗口+提示用户勿关。
+6. 提权哨兵到期会写 ~1.3GB idle manual.etl（finally 的 no_manual_flush 路径），
+   无用但占盘，事后清理（rotcap1 的 manual.etl 已删；rotcap4 到期后同样处理）。
+
+**当前状态**：9-16 历史 ETL 的掉帧取证完成（上节）；当前构建的旋转窗 CPU 数据
+损失（教训 3），待用户 hands-off 窗口用 rot_capture+修复后哨兵重采；codex 串行
+路径分析（新会话，非 01a0bd33 线）已派——输入=§27.1 池+本轮 GPU 线程排名+
+§27.4 已归因未做清单，输出=风险可控的优先级优化提案（分析 only，不动代码）。

@@ -124,3 +124,23 @@ helper 仅接受 name/seconds，不执行数据目录中的 cmd；唯一 session
 队列溢出、缺帧、采集失败返回失败；不会悄悄给出完整采集成功的结论。
 WPR 子进程有超时；如果系统级 WPR 自身挂起，检查日志和系统会话后人工恢复。
 历史一次性脚本保留在 F:\prof 存档，后续维护只改本目录。
+
+## AMD uProf（缓存归因；本机暂被 VBS 拦截）
+
+CLI：`D:\Program Files\AMD\AMDuProf\bin\AMDuProfCLI.exe`（5.3.521）。
+`collect -h` 在本机挂起且无输出，选项表由错误驱动探针摸出；调研全文与
+来源 URL 存 `F:\prof\codex_uprof_cli_research.md`。
+
+- TBS 定时采样（默认，非提权实测可用）：`collect -a -d 60 -o DIR`（全系统）
+  或 `--pid <PID>` 附加本用户原生进程；产物在 `cpu\CpuProfile_*.prd`。
+- IBS 指令采样：`collect --config ibs --pid <PID> -d 60 -o DIR`，等价
+  `-e event=ibs-op,interval=250000,user=1,os=1`（可再叠 `-e event=ibs-fetch,...`）。
+  Zen 3 无 `ibsop-l3miss` 过滤（Zen 4 专属），逐函数缓存归因看报表的
+  IBS_LD_L2_MISS / IBS_L1_DC_MISS_LAT 族指标。IBS 实际按系统级采样，
+  `--pid` 只是过滤，官方建议加 `--cpu` 控制数据量。
+- 报告：`report -i <会话目录> --detail -s event=ibs-op` 生成 report.csv；
+  函数级归因要求目标带 PDB（eden RelWithDebInfo 构建即满足）。
+- **本机现状（2026-09-20 实测）**：`ERROR: IBS counters are not available`
+  ——HypervisorPresent=True、VBS running（Windows 内存完整性）时 EBP/IBS
+  被禁用，TBS 不受影响。要做 IBS 须先关内存完整性并重启，属用户决策，
+  不要擅自改系统虚拟化配置。`AMDProfilerService` 仅远程 profiling 需要。
