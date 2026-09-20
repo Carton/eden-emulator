@@ -2464,3 +2464,25 @@ Then run batch off/on with EDEN_TOKEN_CHECK=1 (0 mismatches), DrawToken counts,
 back-to-back image QA with golden self-noise calibration; cover empty/multi-chunk,
 Finish/Flush/WaitWorker, channel switches and shutdown. This is correctness-only
 1A, not async acceptance; allocation/queue overhead has not been measured.
+
+## 2026-09-20: settings filesystem exception containment (local-only)
+
+User-provided forensic stack identified the loading-time termination chain:
+TimeWorker::ThreadFunc -> SetNetworkSystemClockContext -> SetSaveNeeded ->
+StoreSettings -> StoreSettingsFile<ApplnSettings> -> filesystem::rename ->
+uncaught filesystem_error -> terminate/abort (0xC0000409). User also observed
+settings.dat and residual settings.tmp together in save 8000000000000054.
+The exact competing handle/race is not addressed by this containment patch.
+
+StoreSettingsFile and LoadSettingsFile now use function try blocks catching
+const std::filesystem::filesystem_error&, log the directory and e.what(), and
+return false. Audited this file's explicit std::filesystem calls: exists and
+file_size in LoadSettingsFile, rename in StoreSettingsFile; no copy/remove
+calls were found. Existing function bodies, serialization bytes, I/O ordering,
+stream failure returns and caller behavior are unchanged. In particular,
+SetupSettings' existing handling of a false load result remains unchanged.
+No lock, retry, tmp cleanup, or persistence policy change was added.
+
+Validation is static only: reviewed the diff and git diff --check passed.
+Per user instruction, no compilation, game execution or git commit was done;
+the existing binary is unchanged and does not contain this source patch yet.
