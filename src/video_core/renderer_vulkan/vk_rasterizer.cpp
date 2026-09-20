@@ -327,6 +327,8 @@ void RasterizerVulkan::EnsureResolver() {
                                   ? DrawResolver::SnapshotMode::FullCopy
                                   : DrawResolver::SnapshotMode::Journal;
     resolver->check_enabled = token_check_enabled;
+    const char* batch{std::getenv("EDEN_TOKEN_BATCH")};
+    resolver->batch_enabled = batch && batch[0] == '1' && batch[1] == '\0';
     // (local-only) EDEN_TOKEN_EPOCH=0 turns the uniform epoch capture off
     // (A/B switch: tail keeps reading guest memory directly).
     const char* epoch{std::getenv("EDEN_TOKEN_EPOCH")};
@@ -446,6 +448,12 @@ void RasterizerVulkan::LogTokenDiag() {
              buffer_cache.diag_epoch_hits, buffer_cache.diag_epoch_misses,
              buffer_cache.diag_epoch_classic, resolver->epoch_table.diag_copies,
              resolver->epoch_table.diag_skips, resolver->epoch_table.diag_overflows);
+    if (resolver->batch_enabled) {
+        LOG_INFO(Render_Vulkan,
+                 "DrawToken diag: capture_batches={} captured_bytes={} splice_count={}",
+                 resolver->diag_capture_batches, resolver->diag_captured_bytes,
+                 resolver->diag_splice_count);
+    }
 }
 
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
@@ -473,7 +481,7 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
         if (token_tail_immediate) {
             // Bisect mode: snapshot + resolve + commit all inside Draw(),
             // structurally identical to the serial path plus the shadow.
-            resolver->ExecuteResolve();
+            resolver->ExecuteResolve(scheduler);
             DrawResolver::Job& job{resolver->TakeJob()};
             Tegra::Engines::Maxwell3D& shadow{resolver->SnapshotEngine()};
             {
@@ -504,7 +512,7 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
         // Resolve may call back into the rasterizer while synchronizing guest
         // memory. Publish only after it returns, otherwise a callback tries to
         // commit this still-resolving job and waits for itself.
-        resolver->ExecuteResolve();
+        resolver->ExecuteResolve(scheduler);
         pending_commit.store(true, std::memory_order_release);
         ++pipelined_draws;
         if (pipelined_draws % 2000 == 0) {

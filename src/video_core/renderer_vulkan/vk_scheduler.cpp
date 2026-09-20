@@ -27,6 +27,111 @@
 
 namespace Vulkan {
 
+thread_local Scheduler::ResolverCaptureContext* Scheduler::active_capture = nullptr;
+
+Scheduler::CaptureScope::CaptureScope(Scheduler& scheduler, CapturedBatch& batch, u64 job_id)
+    : context{scheduler, batch, job_id} {
+    ASSERT(active_capture == nullptr); // No nested captures, even across schedulers.
+    ASSERT(batch.owner == nullptr && job_id != 0);
+    ASSERT(std::this_thread::get_id() != scheduler.worker_thread.get_id());
+    batch.owner = &scheduler;
+    batch.job_id = job_id;
+    batch.producer = std::this_thread::get_id();
+    batch.capturing = true;
+    active_capture = &context;
+}
+
+Scheduler::CaptureScope::~CaptureScope() {
+    ASSERT(active_capture == &context);
+    ASSERT(context.batch.owner == &context.scheduler);
+    ASSERT(context.batch.job_id == context.job_id);
+    ASSERT(context.batch.producer == std::this_thread::get_id());
+    context.batch.capturing = false;
+    active_capture = nullptr;
+}
+
+Scheduler::ResolverCaptureContext* Scheduler::ActiveCapture() {
+    if (active_capture) {
+        ASSERT(&active_capture->scheduler == this);
+        ASSERT(active_capture->batch.owner == this);
+        ASSERT(active_capture->batch.job_id == active_capture->job_id);
+        ASSERT(active_capture->batch.capturing);
+        ASSERT(active_capture->batch.producer == std::this_thread::get_id());
+    }
+    return active_capture;
+}
+
+void Scheduler::CommandChunk::DiscardAll() noexcept {
+    while (first) {
+        auto* next = first->GetNext();
+        first->~Command();
+        first = next;
+    }
+    last = nullptr;
+    command_offset = 0;
+    submit = false;
+}
+
+Scheduler::CapturedBatch::~CapturedBatch() {
+    ASSERT(!capturing);
+    // Private CommandChunk destructors release unexecuted captures, including
+    // chunks still queued when the scheduler shuts down. Executed chunks have
+    // an empty command list; no lambda is destroyed twice.
+}
+
+void Scheduler::CapturedBatch::SealChunk() {
+    if (current && !current->Empty()) {
+        sealed.emplace_back(std::move(current));
+    }
+}
+
+void Scheduler::SpliceCaptured(CapturedBatch& batch, u64 job_id) {
+    ASSERT(active_capture == nullptr && !batch.capturing);
+    ASSERT(batch.owner == this && batch.job_id == job_id);
+    ASSERT(batch.producer == std::this_thread::get_id());
+    batch.SealChunk();
+    if (batch.sealed.empty()) {
+        return;
+    }
+    // Publish pre-capture commands first. DispatchWork installs a replacement
+    // before publication; captured chunks never enter the producer's arena.
+    DispatchWork();
+    {
+        std::scoped_lock ql{queue_mutex};
+        for (auto& entry : batch.sealed) {
+            work_queue.push(std::move(entry));
+        }
+    }
+    batch.sealed.clear();
+    ++batch.splice_count;
+    event_cv.notify_all();
+}
+
+void Scheduler::DrainCapturePrefix() {
+    auto* capture = ActiveCapture();
+    if (!capture) {
+        return;
+    }
+    // Stage 1A only: we already ARE the GPU producer, so a synchronous API
+    // can hand off its prefix directly. No GPU callback, new lock, or wait
+    // bridge. Restore TLS even if allocation/queue publication throws.
+    struct SuspendCapture {
+        ResolverCaptureContext* context;
+        SuspendCapture(ResolverCaptureContext* context_) : context{context_} {
+            context->batch.capturing = false;
+            active_capture = nullptr;
+        }
+        ~SuspendCapture() {
+            active_capture = context;
+            context->batch.capturing = true;
+        }
+    } suspend{capture};
+    SpliceCaptured(capture->batch, capture->job_id);
+    // WaitWorker must publish pre-capture work even when this private prefix
+    // is empty. Outside capture an empty Splice intentionally does nothing.
+    DispatchWork();
+}
+
 void Scheduler::CommandChunk::ExecuteAll(vk::CommandBuffer cmdbuf,
                                          vk::CommandBuffer upload_cmdbuf) {
     auto command = first;
@@ -70,6 +175,8 @@ void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore)
 }
 
 void Scheduler::WaitWorker() {
+    // DispatchWork alone only seals a private chunk during capture.
+    DrainCapturePrefix();
     DispatchWork();
 
     // Ensure the queue is drained.
@@ -83,13 +190,18 @@ void Scheduler::WaitWorker() {
 }
 
 void Scheduler::DispatchWork() {
+    if (auto* capture = ActiveCapture()) {
+        capture->batch.SealChunk();
+        return;
+    }
     if (chunk && !chunk->Empty()) {
+        auto work = std::move(chunk);
+        AcquireNewChunk();
         {
             std::scoped_lock ql{queue_mutex};
-            work_queue.push(std::move(chunk));
+            work_queue.push(std::move(work));
         }
         event_cv.notify_all();
-        AcquireNewChunk();
     }
 }
 
@@ -313,10 +425,12 @@ void Scheduler::WorkerThread(std::stop_token stop_token) {
             }
         }
 
-        {
+        if (!work->IsCaptured()) {
             std::scoped_lock rl{reserve_mutex};
 
-            // Recycle the chunk back to the reserve.
+            // Private capture chunks are destroyed after execution. Feeding
+            // freshly allocated per-draw chunks into the main reserve would
+            // grow it without bound; capture never borrows from that reserve.
             chunk_reserve.emplace_back(std::move(work));
         }
     }
@@ -379,8 +493,17 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
             break;
         }
     });
-    chunk->MarkSubmit();
-    DispatchWork();
+    if (auto* capture = ActiveCapture()) {
+        // Submit must terminate this private chunk: the worker allocates its
+        // next command buffers after executing a chunk carrying HasSubmit.
+        ASSERT(capture->batch.current != nullptr);
+        capture->batch.current->MarkSubmit();
+        capture->batch.SealChunk();
+        DrainCapturePrefix();
+    } else {
+        chunk->MarkSubmit();
+        DispatchWork();
+    }
     return signal_value;
 }
 

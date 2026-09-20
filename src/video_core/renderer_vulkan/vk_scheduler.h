@@ -6,15 +6,21 @@
 
 #pragma once
 
+#include <array>
 #include <condition_variable>
 #include <cstddef>
 #include <functional>
 #include <memory>
-#include <thread>
-#include <utility>
+#include <mutex>
+#include <new>
 #include <queue>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 #include "common/alignment.h"
+#include "common/assert.h"
 #include "common/common_types.h"
 #include "common/polyfill_thread.h"
 #include "common/settings.h"
@@ -40,6 +46,29 @@ struct QueryCacheParams;
 /// OpenGL-like operations on Vulkan command buffers.
 class Scheduler {
 public:
+    // (local-only) Stage 1A: producer-thread-only command capture. This is NOT
+    // a worker-safe scheduler state snapshot or an asynchronous submission API.
+    class CapturedBatch;
+    struct ResolverCaptureContext {
+        Scheduler& scheduler;
+        CapturedBatch& batch;
+        u64 job_id;
+    };
+    class CaptureScope {
+    public:
+        CaptureScope(Scheduler& scheduler, CapturedBatch& batch, u64 job_id);
+        ~CaptureScope();
+        CaptureScope(const CaptureScope&) = delete;
+        CaptureScope& operator=(const CaptureScope&) = delete;
+
+    private:
+        ResolverCaptureContext context;
+    };
+
+    // Consume the current private prefix, retaining batch identity/statistics
+    // for subsequent prefixes. Caller is the SAME GPU producer as capture.
+    void SpliceCaptured(CapturedBatch& batch, u64 job_id);
+
     explicit Scheduler(const Device& device, StateTracker& state_tracker);
     ~Scheduler();
 
@@ -103,6 +132,10 @@ public:
     template <typename T>
         requires std::is_invocable_v<T, vk::CommandBuffer, vk::CommandBuffer>
     void RecordWithUploadBuffer(T&& command) {
+        if (active_capture) {
+            ActiveCapture()->batch.Record(command);
+            return;
+        }
         if (chunk->Record(command)) {
             return;
         }
@@ -210,6 +243,13 @@ private:
 
     class CommandChunk final {
     public:
+        explicit CommandChunk(bool captured_ = false) : captured{captured_} {}
+        ~CommandChunk() {
+            if (captured) {
+                DiscardAll();
+            }
+        }
+
         void ExecuteAll(vk::CommandBuffer cmdbuf, vk::CommandBuffer upload_cmdbuf);
 
         template <typename T>
@@ -245,14 +285,80 @@ private:
             return submit;
         }
 
+        size_t UsedBytes() const {
+            return command_offset;
+        }
+
+        bool IsCaptured() const {
+            return captured;
+        }
+
+        // Only for private commands abandoned before publication. Never execute
+        // them from a destructor (lambda captures may own resources).
+        void DiscardAll() noexcept;
+
     private:
         Command* first = nullptr;
         Command* last = nullptr;
 
         size_t command_offset = 0;
         bool submit = false;
+        const bool captured;
         alignas(std::max_align_t) std::array<u8, 0x8000> data{};
     };
+
+public:
+    class CapturedBatch {
+    public:
+        CapturedBatch() = default;
+        ~CapturedBatch();
+        CapturedBatch(const CapturedBatch&) = delete;
+        CapturedBatch& operator=(const CapturedBatch&) = delete;
+
+        u64 CapturedBytes() const {
+            return captured_bytes;
+        }
+
+        u64 SpliceCount() const {
+            return splice_count;
+        }
+
+    private:
+        friend class Scheduler;
+        friend class CaptureScope;
+
+        template <typename T>
+        void Record(T& command) {
+            if (!current) {
+                current = std::make_unique<CommandChunk>(true);
+            }
+            const size_t before = current->UsedBytes();
+            if (current->Record(command)) {
+                captured_bytes += current->UsedBytes() - before;
+                return;
+            }
+            SealChunk();
+            current = std::make_unique<CommandChunk>(true);
+            const bool recorded = current->Record(command);
+            ASSERT(recorded);
+            captured_bytes += current->UsedBytes();
+        }
+
+        void SealChunk();
+        Scheduler* owner{};
+        u64 job_id{};
+        std::thread::id producer;
+        bool capturing{};
+        std::unique_ptr<CommandChunk> current;
+        std::vector<std::unique_ptr<CommandChunk>> sealed;
+        u64 captured_bytes{};
+        u64 splice_count{};
+    };
+
+private:
+    ResolverCaptureContext* ActiveCapture();
+    void DrainCapturePrefix();
+    static thread_local ResolverCaptureContext* active_capture;
 
     struct State {
         VkRenderPass renderpass{};

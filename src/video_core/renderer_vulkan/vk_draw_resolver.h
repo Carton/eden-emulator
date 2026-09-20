@@ -18,11 +18,13 @@ class MemoryManager;
 
 namespace Vulkan {
 
+class Scheduler;
+
 // (local-only) P2 Step 2: draw tokens.
 //
-// The GPU thread snapshots a draw into the shadow engine and hands the
-// resolve phase (binding lookups) to the VulkanWorker through a scheduler
-// command, or runs it inline for validation. The commit phase (uploads +
+// The GPU thread snapshots a draw into the shadow engine and executes the
+// resolve phase inline (it may invoke the texture runtime). Worker resolve
+// remains disabled. The commit phase (uploads +
 // scheduler records) always runs on the GPU thread, in draw order, at the
 // next rasterizer rendezvous. Exactly one job is in flight at any time.
 //
@@ -78,10 +80,9 @@ public:
     bool SnapshotAndEnqueue(Tegra::Engines::Maxwell3D& engine, GraphicsPipeline* pipeline,
                             bool is_indexed, u32 instance_count);
 
-    // Execute the resolve phase. Runs on the VulkanWorker (token mode) or
-    // inline on the GPU thread (validation mode); the caller guarantees the
-    // job was enqueued and is not concurrently executed.
-    void ExecuteResolve();
+    // GPU thread only. Optional stage-1A capture is spliced before returning,
+    // so no later producer command can overtake it before the deferred tail.
+    void ExecuteResolve(Scheduler& scheduler);
 
     // GPU thread: after WaitResolved(), the finished job.
     Job& TakeJob() {
@@ -104,6 +105,7 @@ public:
 
     SnapshotMode snapshot_mode{SnapshotMode::Journal};
     bool check_enabled{false};
+    bool batch_enabled{false}; // EDEN_TOKEN_BATCH=1; never enables worker resolve
     // (local-only) EDEN_TOKEN_EPOCH=0 disables the uniform epoch capture
     // (A/B switch; the tail then keeps the old direct-guest fast path).
     bool epoch_enabled{true};
@@ -119,6 +121,9 @@ public:
     u64 diag_journal_entries{};// total journal entries replayed
     u64 diag_resolve_calls{};
     u64 diag_snapshot_mismatches{};
+    u64 diag_capture_batches{}; // successful capture scopes, including empty ones
+    u64 diag_captured_bytes{};  // command arena bytes, including successful alignment
+    u64 diag_splice_count{};    // nonempty prefix publications (Finish may split a batch)
     std::chrono::nanoseconds diag_resolve_ns{};
     std::chrono::nanoseconds diag_replay_ns{};
 

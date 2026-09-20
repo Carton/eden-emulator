@@ -6,12 +6,14 @@
 #include <chrono>
 #include <cstring>
 #include <mutex>
+#include <optional>
 #include <thread>
 
 #include "common/logging.h"
 #include "video_core/control/engine_override.h"
 #include "video_core/memory_manager.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
+#include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 
 namespace Vulkan {
@@ -123,11 +125,19 @@ bool DrawResolver::SnapshotAndEnqueue(Tegra::Engines::Maxwell3D& engine,
     return true;
 }
 
-void DrawResolver::ExecuteResolve() {
-    // Runs on the VulkanWorker (token mode) or inline (validation mode).
+void DrawResolver::ExecuteResolve(Scheduler& scheduler) {
+    // Stage 1A remains inline; live scheduler state is owned by this thread.
+    std::optional<Scheduler::CapturedBatch> batch;
+    if (batch_enabled) {
+        batch.emplace();
+    }
     tls_engine_snapshot = shadow.get();
     {
         std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
+        std::optional<Scheduler::CaptureScope> capture;
+        if (batch) {
+            capture.emplace(scheduler, *batch, diag_kicks);
+        }
         const auto replay_start{Clock::now()};
         if (slot_journal_size != 0) {
             shadow->ReplayJournal(slot_journal, slot_journal_size);
@@ -153,6 +163,15 @@ void DrawResolver::ExecuteResolve() {
         }
     }
     tls_engine_snapshot = nullptr;
+    if (batch) {
+        // Capture scope and both cache locks have ended. Merge immediately:
+        // deferring this to CommitPendingDraw would let intervening records
+        // overtake resolve commands. Both tail modes run after this point.
+        scheduler.SpliceCaptured(*batch, diag_kicks);
+        ++diag_capture_batches;
+        diag_captured_bytes += batch->CapturedBytes();
+        diag_splice_count += batch->SpliceCount();
+    }
     ++diag_resolve_calls;
     job_phase.store(Phase::Resolved, std::memory_order_release);
 }

@@ -2377,3 +2377,90 @@ commit 66053ee8a8）：resolver 私有命令批次 + GPU 线程唯一合并点 +
 fix-g/fix-t ABBA 对 + 图像 QA——今晨序列被 13:04 崩溃打断后一直未完成）；② 伴生第二实例
 谜团（低成本：forensics 日志已会记录每个实例）；③ 批量子交接 1A 实施（codex）；④ 13:04 式
 崩溃若复发直接有 dump；⑤ 机器层（wuauserv/nvoglv64）交用户决策。
+
+## 31. P2 batched handoff stage 1A implementation (2026-09-20, local-only)
+
+User authorized source implementation only: no commit, compiler/build command,
+game launch or benchmark. Work stays on the existing test/p2-draw-resolver branch.
+ZCode owns subsequent compilation and runtime validation. No performance result.
+
+Gate: EDEN_DRAW_TOKEN=inline plus exactly EDEN_TOKEN_BATCH=1 enables private
+capture. Batch defaults off; setting it alone does not enable draw tokens.
+EDEN_DRAW_TOKEN=sync/async still warns and falls back to inline. Serial/fallback
+ConfigureResolve and tail code are unchanged; default token epoch, guest-memory
+barriers, pending publication and channel handling are unchanged.
+
+Files: vk_scheduler.h/.cpp, vk_draw_resolver.h/.cpp, vk_rasterizer.cpp.
+Scheduler owns a TLS ResolverCaptureContext and noncopyable RAII CaptureScope,
+checking scheduler identity, job id (resolver kick sequence) and producer thread.
+Installing on VulkanWorker or nesting captures is rejected. RecordWithUploadBuffer
+routes to lazy private 32 KiB chunks; Record and explicit DispatchWork within
+capture never use the main current chunk or reserve. Explicit DispatchWork only
+seals the private current chunk. No new mutex, worker, atomics or background task.
+Captured chunks are freed after execution, not fed to the main reserve (which
+would otherwise grow with per-draw fresh allocations). Their destructors destroy
+unexecuted command objects on unwinding/shutdown without executing them.
+
+Merge placement: ExecuteResolve installs capture inside the existing dual-cache
+scoped_lock, covering ConfigureResolve and epoch capture. Scope ends before cache
+unlock; after unlock the private batch is immediately spliced, before ExecuteResolve
+returns or pending_commit is published. This is earlier than deferred
+CommitPendingDraw/FinishDrawLocked, deliberately preventing intervening producer
+records from overtaking resolve. Immediate-tail mode uses the same path.
+Scheduler state remains live and GPU-thread-owned; no extra render-pass boundary
+or private state replica is needed for zero-overlap 1A.
+
+Synchronous APIs: SubmitExecution records its submit command in the private
+chunk, marks THAT chunk HasSubmit, seals it and synchronously publishes the
+prefix on this same GPU producer. Finish then performs its original timeline
+wait; Flush preserves its non-waiting submit semantics. WaitWorker also drains
+the prefix first, including publishing main pre-capture work when the private
+prefix is empty. Capture is suspended with RAII only during handoff, then resumes
+into a fresh private chunk. Repeated Finish calls cannot replay old prefixes.
+There is no worker/GPU request bridge yet; this API is explicitly not worker-safe.
+
+Ownership/order: SpliceCaptured publishes main predecessor commands first, then
+private chunks in FIFO order under one queue lock. Later main records use the
+empty replacement chunk. Main DispatchWork now installs the replacement BEFORE
+publishing the detached old chunk; empty chunks are not published. This requested
+global fix also applies with batch off. Consequently literal binary/timing
+identity of disabled mode is NOT claimed: command payload/order is preserved,
+but TLS checks and the requested chunk replacement timing differ.
+
+Lock review (existing locks only):
+- Normal capture takes B/T together using the existing std::scoped_lock deadlock
+  avoidance, NOT a new fixed B-then-T acquisition rule; private Record takes no
+  scheduler mutex. Normal final splice runs after releasing both cache mutexes.
+- Main replacement takes reserve_mutex, releases it, then takes queue_mutex to
+  publish. Batch queue publication takes queue_mutex without reserve_mutex.
+- Finish/WaitWorker reached under B/T retain the existing inline synchronous
+  wait topology: suspended capture hands off via reserve/queue locks, releases
+  these before any wait, and does not invoke the resolver/tail recursively.
+- Existing consumer queue_mutex -> execution_mutex overlap is intentionally
+  preserved: removing that overlap would break WaitWorker's empty-queue/execution
+  handoff. Execution releases execution_mutex before main reserve recycling;
+  captured chunks skip reserve_mutex entirely. Submit retains execution_mutex ->
+  submit_mutex. No scheduler path newly acquires either cache mutex.
+
+Diagnostics: existing DrawToken lines unchanged. Batch-on adds a new line with
+capture_batches (completed scopes including empty ones), captured_bytes (recorded
+command object bytes plus successful alignment), splice_count (nonempty prefix
+publications; may be zero for empty jobs or exceed batches with multiple Finish).
+Counters aggregate within the resolver lifetime, resetting on its recreation.
+
+Static validation: reviewed Record/RecordWithUploadBuffer, all direct main-chunk
+accesses in Scheduler, overflow/seal, submit marker, empty-prefix WaitWorker,
+repeated prefix drain, private destruction, both ExecuteResolve call sites,
+environment gate and unchanged async-disable branch. Explicit standard includes
+cover optional, array/vector, mutex, placement-new and type traits; TLS definition
+is in vk_scheduler.cpp. git diff --check passed. No C++ compilation, link, checker,
+DrawToken runtime counts or image QA has been performed.
+
+ZCode follow-up: compile/link scheduler, resolver and rasterizer plus consumers
+of vk_scheduler.h. Template-sensitive points to verify with MSVC are the nested
+CapturedBatch Record instantiations, optional::emplace of nonmovable RAII types,
+and TLS/RAII access definitions; no confirmed compile error was found statically.
+Then run batch off/on with EDEN_TOKEN_CHECK=1 (0 mismatches), DrawToken counts,
+back-to-back image QA with golden self-noise calibration; cover empty/multi-chunk,
+Finish/Flush/WaitWorker, channel switches and shutdown. This is correctness-only
+1A, not async acceptance; allocation/queue overhead has not been measured.
