@@ -2697,3 +2697,39 @@ intentional evidence of stale objects, not a reason to restore the old overload.
 Then repeat worker/check/forensics plus 1A/default regression and rare sync-path
 acceptance. This repairs the confirmed crash mechanism; it does not claim that
 all other 1B paths have now been runtime-validated.
+
+### 28.19 §28.19 批量子交接 1A/1B 验收 + 陈旧目标文件混编案（2026-09-20 晚，493696a5b7+ABI 修复）
+
+**1A（inline 捕获/拼接，eeebd2c806）验收全过**：checker **0 mismatch**；on/off 对
+1.001/0.995（带内，捕获机制零成本）；新洞察——**仅 0.77% 的 resolve 产生调度器命令**
+（splice 146k/19M），平均捕获量 16B/draw：resolve 碰调度器是罕见路径，私有批次方案
+的可行性由此坐实。
+
+**1B 首验崩溃 → 陈旧目标文件混编（非逻辑 bug）**：17:31 增量构建只重编了 7 个目标，
+16:25 编的 texture/present 系 .obj（按 1A 的 CapturedBatch 布局）被链进 1B 的
+scheduler——旧内联模板从 +0x18 读 `current`，1B 布局把它挪到 +0x20，+0x18 现在是
+`capturing=true` → 指针=1 → **读 [1+0x10]=0x11**，与 dump 故障地址精确吻合（也解释了
+崩溃栈里混入的假 SGSR 帧——sgsr.obj 正是陈旧文件之一）。修复（codex）：resolver 上的
+Record 改走 out-of-line `RecordResolverCommandAbiV2` thunk（消费方 TU 不再内嵌批次
+字段偏移）+ 故意缺失旧符号做链接屏障 + ResolverThreadScope 全程标记（无作用域的
+Record 软断言并抛异常，不再落回主 chunk）。屏障立即生效（LNK2001 ×17 文件），
+手工删除 25 个陈旧 .obj 后干净重链。**教训：增量构建依赖跟踪失灵时链接期 ABI 屏障
+是最后防线；该屏障现在是永久资产。**
+
+**1B 验收（干净构建，18:34）**：
+| 项 | 结果 |
+|---|---|
+| 正确性 | **checker 0 mismatch**、5.3M worker resolves、无崩溃、优雅关闭 |
+| 同步桥 | diag_worker_sync_requests=0（罕见路径未被游戏触发——桥的逻辑仍未实战验证，待构造场景） |
+| **交接成本** | worker-on 9.68/9.87 vs off 38.39/38.58 → **比值 ~0.25**；折算 **每 draw 往返 ≈37µs**（帧时 26→100ms） |
+
+**对"-12.4% 能否改进"的量化回答（§28.18 用户之问）**：resolve 工作本身只有
+0.6-1.1µs/draw（隐藏它最多回收 ~8-11%），但 1B 实测的**唤醒往返 37µs/draw 比工作大
+一个数量级**——2A 若只是"开启重叠"，GPU 线程在两次 draw 之间只有几 µs 可做，
+仍要等 ~35µs/draw，得不偿失。**2A 的正确形态 = 多作业流水深度**（一次 Kick 多个
+draw、按序合并）+ 短自旋后再驻泊，把延迟摊进流水；这是设计稿 2A' 的真身，
+也是下一步（codex）的输入。若流水化后仍 >2% 带内差距收不回，则按设计稿的
+止损条款保留 INLINE 为默认并封档。
+
+**28.20 入口**：① 2A：多作业流水 + spin-then-park（codex，设计稿 §1.1/§7）；② 同步桥
+实战验证（构造 Finish-期间-resolve 的场景）；③ 待用户：wuauserv/nvoglv64 机器层。
