@@ -2839,3 +2839,49 @@ WaitTick and exceptional-prefix scenarios. Rare bridge paths had zero hits in
 conservative cache ownership waits and CPU spinning may outweigh hidden work;
 no performance claim is made. Independently resolving several queued jobs
 before older tails would require another shared-binding/scheduler-state split.
+
+#### 28.20.1 Stage 2A acceptance run: mechanism validated, conservative costs quantified (2026-09-20 20:15)
+
+Build `82a76e61ab` → eden.exe 19:36:58 (clean, exit 0, ABI barrier silent = no
+stale objects). Sequence `quiet_seq.py` (pipe-check + on/off ABAB), machine
+quiet (wuauserv stopped by user beforehand), all closes 16.3-17.1s graceful.
+
+Raw (med band identical 25.84 both arms, luma 56.7-56.8 → same scene tier):
+
+| arm | fps | med ms | note |
+|---|---|---|---|
+| pipe-check | 17.42 | 56.67 | checker+forensics; 1B checker arm was 8.77 |
+| pipe-on1 / on2 | 21.51 / 21.92 | 45.8 / 45.0 | EDEN_TOKEN_PIPELINE=1 (depth=1 spin=20µs) |
+| pipe-off1 / off2 | 37.92 / 37.61 | 25.84 / 25.84 | token INLINE (EDEN_DRAW_TOKEN=1) |
+
+Pairs: on1/off1=0.5673, off2/on2=1.7159 → **on/off median 0.575 (-42.5%)**.
+Draws/frame ≈ 3000 both arms (13.2M vs 22.4M kicks / ~195s session) → residual
+**≈6.4µs/draw** vs INLINE-token (1B was 37µs → spin bridge removed ~31µs).
+
+Handoff instrumentation (the go/no-go question):
+- GPU spin wins 96.6-96.8%, parks 0.3% (39-40k / 13M).
+- Worker spin wins ~96%, parks 2.5-3.9%.
+- diag_worker_sync_requests=0 (bridge still unexercised), max_inflight=1,
+  backpressure 23% of draws — queue is usually pre-drained by FlushCaching
+  invalidation callbacks, so depth>1 rarely engages in this scene.
+
+Attribution of the residual 6.4µs/draw:
+- tail_avg_ns 1448-1463 → 3996-4013 (**+2.55µs, the all-dirty re-emission**).
+- resolve_avg_ns 477-495 → 583-593 (+0.11µs).
+- ~3.7µs unaccounted = FullCopy snapshot (regs+state memcpy per draw, not in
+  any diag timer) + spin residue (spin "win" still burns GPU time).
+
+Checker: mismatches=0 over 10.2M pipeline draws (weaker by construction —
+expected_regs copied at the same instant; detects snapshot corruption only).
+Image QA: on-vs-off bad% 4.8-7.3 vs same-mode floor 3.3-4.7, worst values
+(132-154) match floor range (139-162) → animation-phase divergence signature
+(22 vs 38 fps arms), no corruption evidence.
+
+Verdict: **2A mechanism accepted** (cross-thread queue + tail gating + spin
+bridge correct and stable; the 37µs rendezvous is solved) — **performance not
+accepted** (-42.5% ≫ 2% band; stop-loss holds: INLINE remains the default).
+Clear refinement path, all costs mechanical: ① per-slot dirty-flag propagation
+instead of all-dirty (-2.5µs measured), ② slim/incremental snapshot instead of
+FullCopy (-2-4µs inferred). Ceiling unchanged: journal snapshot is GPU-thread
+inherent, so refined 2A ≈ recover the resolve+epoch share of the -12.4%
+INLINE gap (~8-11%).
