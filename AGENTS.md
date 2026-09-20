@@ -115,7 +115,11 @@ cmake.exe --build build-vs22     # RelWithDebInfo，产物在 build-vs22/bin/
    start/stop 必须同一提权脚本；ETW MCP process_trace 30s 超时是常态，后台会继续，`list_traces` 确认后再查。
 4. **基准**：`python F:\prof\bench_run.py LABEL`（自动进游戏+测 90s+解析帧时 CSV，支持 `EDEN_DIR` /
    `--tolerate-overlay`）；旋转测试 `rot_test.py`；启动前检查 `check_config.py`。
-5. eden 无内建插桩（Tracy/microprofile），走采样式；RelWithDebInfo 的 PDB 直接可用；
+5. **重启/冷启动后先 warmup 一轮**（2026-09-20 定规）：机器重启后第一个 bench 局只作
+   warmup，数据不进结论——pipeline cache 冷读、页面缓存与后台服务未沉淀，首局帧时系统性
+   偏低且离散；warmup 局的截图仍可用于图像 QA 内容检查。附带收益：重启清掉所有残留的
+   detached watcher 进程。
+6. eden 无内建插桩（Tracy/microprofile），走采样式；RelWithDebInfo 的 PDB 直接可用；
    `/OPT:ICF` 会折叠相同函数体，火焰图符号合并属正常噪声。
 
 ## 图形验收与性能评估规程（2026-09-19 固化；案例与推导见 PROFILE §28.3/28.10/28.11）
