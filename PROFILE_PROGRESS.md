@@ -2123,3 +2123,24 @@ and PDBs only to this worktree's build-vs22/review-check. Compile affected
 Vulkan/OpenGL/memory translation units and run the standalone epoch regression.
 The user explicitly requested no game launch: image QA and FPS validation are
 pending, with no runtime acceptance or performance claim. Results follow below.
+
+### 29.3 Final static-review pass and validation restart
+
+P1 additional finding: token tail dynamic-state helpers still read LIVE topology
+(primitive restart, depth bias) and re-query the LIVE pipeline (dynamic vertex
+input, alpha-to-coverage/one). After parsing draw N+1, draw N could use its state
+and consume shader dirty flags too early. Pass the captured engine and pipeline
+through all these helpers. Apply the AMD logic-op workaround to the emitted host
+value without mutating the journaled guest registers.
+
+Static review now covers the requested post-06c7a2a6b2 migration and later GPU
+changes through 79a2d089c0, grouped by JIT, presentation, cache/ASTC and P2 state,
+write ordering and scheduler lifetime. Runtime coverage remains a separate step.
+
+User initially stopped compilation to avoid the old v0.2.1 build configuration.
+Seven affected translation units had compiled successfully at 90ef63e00d before
+stop (vk_draw_resolver, vk_graphics_pipeline, vk_pipeline_cache, vk_rasterizer,
+vk_buffer_cache, vk_compute_pipeline, gl_rasterizer). No compiler remained after
+stop. User then authorized compilation again using ../eden-emulator as reference.
+Continue isolated object compilation; do not run the game. The final dynamic-state
+fix is newer than those seven objects and must be compiled again.

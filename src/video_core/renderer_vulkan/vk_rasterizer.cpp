@@ -229,10 +229,8 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
       wfi_event(device.GetLogical().CreateEvent()) {
     scheduler.SetQueryCache(query_cache);
     // (local-only) P2 Step 2 draw tokens. EDEN_DRAW_TOKEN selects the token
-    // pipeline: "1"/"inline" resolves on the GPU thread right after the
-    // snapshot (validation, ~baseline perf), "sync" hands the resolve to the
-    // VulkanWorker and drains per draw (worker-path validation, slower).
-    // Worker modes currently fall back to inline (scheduler re-entry).
+    // pipeline: "1"/"inline" resolves on the GPU thread after the snapshot.
+    // Worker modes "sync"/"async" fall back to inline (scheduler re-entry).
     // EDEN_TOKEN_SNAPSHOT=full forces the depth-1 whole-register copy;
     // EDEN_TOKEN_CHECK=1 verifies the shadow register state bit-exactly.
     const char* token{std::getenv("EDEN_DRAW_TOKEN")};
@@ -310,7 +308,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
         return;
     }
 
-    UpdateDynamicStates(*maxwell3d);
+    UpdateDynamicStates(*maxwell3d, pipeline);
 
     query_cache.NotifySegment(true);
     HandleTransformFeedback(*maxwell3d);
@@ -395,7 +393,7 @@ void RasterizerVulkan::FinishDrawLocked(Tegra::Engines::Maxwell3D& engine,
         return;
     }
 
-    UpdateDynamicStates(engine);
+    UpdateDynamicStates(engine, &pipeline);
 
     query_cache.NotifySegment(true);
     HandleTransformFeedback(engine);
@@ -464,8 +462,7 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
     CommitPendingDraw();
 
     FlushWork();
-    // The previous job committed above, so the resolver is idle here and the
-    // deferred-unmap execution inside FlushCaching is safe.
+    // Commit before flushing invalidations that can change draw resources.
     gpu_memory->FlushCaching();
 
     GraphicsPipeline* const pipeline{pipeline_cache.CurrentGraphicsPipeline()};
@@ -597,7 +594,7 @@ void RasterizerVulkan::DrawTexture() {
     texture_cache.SynchronizeDescriptors(false);
     texture_cache.UpdateRenderTargets(false);
 
-    UpdateDynamicStates(*maxwell3d);
+    UpdateDynamicStates(*maxwell3d, pipeline_cache.CurrentGraphicsPipeline());
 
     query_cache.NotifySegment(true);
     query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64, maxwell3d->regs.zpass_pixel_count_enable);
@@ -1329,7 +1326,8 @@ bool AccelerateDMA::BufferToImage(const Tegra::DMA::ImageCopy& copy_info,
     return DmaBufferImageCopy<true>(copy_info, buffer_operand, image_operand);
 }
 
-void RasterizerVulkan::UpdateDynamicStates(Tegra::Engines::Maxwell3D& engine) {
+void RasterizerVulkan::UpdateDynamicStates(Tegra::Engines::Maxwell3D& engine,
+                                          GraphicsPipeline* pipeline) {
     auto& regs = engine.regs;
     auto& flags = engine.dirty.flags;
     const auto topology = engine.draw_manager.draw_state.topology;
@@ -1367,9 +1365,9 @@ void RasterizerVulkan::UpdateDynamicStates(Tegra::Engines::Maxwell3D& engine) {
     }
 
     if (device.IsExtExtendedDynamicState2Supported()) {
-        UpdatePrimitiveRestartEnable(regs);
+        UpdatePrimitiveRestartEnable(engine);
         UpdateRasterizerDiscardEnable(regs);
-        UpdateDepthBiasEnable(regs);
+        UpdateDepthBiasEnable(engine);
     }
 
     if (device.IsExtExtendedDynamicState2ExtrasSupported()) {
@@ -1377,27 +1375,13 @@ void RasterizerVulkan::UpdateDynamicStates(Tegra::Engines::Maxwell3D& engine) {
     }
 
     if (device.IsExtExtendedDynamicState3EnablesSupported()) {
-        using namespace Tegra::Engines;
-        // AMD Workaround: LogicOp incompatible with float render targets
-        if (device.GetDriverID() == VkDriverIdKHR::VK_DRIVER_ID_AMD_OPEN_SOURCE ||
-            device.GetDriverID() == VkDriverIdKHR::VK_DRIVER_ID_AMD_PROPRIETARY) {
-            const auto has_float = std::any_of(
-                regs.vertex_attrib_format.begin(), regs.vertex_attrib_format.end(),
-                [](const auto& attrib) {
-                    return attrib.type == Maxwell3D::Regs::VertexAttribute::Type::Float;
-                }
-            );
-            if (regs.logic_op.enable) {
-                regs.logic_op.enable = static_cast<u32>(!has_float);
-            }
-        }
         UpdateLogicOpEnable(regs);
         UpdateDepthClampEnable(regs);
         UpdateLineRasterizationMode(regs);
         UpdateLineStippleEnable(regs);
         UpdateConservativeRasterizationMode(regs);
-        UpdateAlphaToCoverageEnable(regs);
-        UpdateAlphaToOneEnable(regs);
+        UpdateAlphaToCoverageEnable(regs, pipeline);
+        UpdateAlphaToOneEnable(regs, pipeline);
     }
 
     if (device.IsExtExtendedDynamicState3BlendingSupported()) {
@@ -1407,7 +1391,7 @@ void RasterizerVulkan::UpdateDynamicStates(Tegra::Engines::Maxwell3D& engine) {
     }
 
     if (device.IsExtVertexInputDynamicStateSupported()) {
-        if (auto* gp = pipeline_cache.CurrentGraphicsPipeline(); gp && gp->HasDynamicVertexInput()) {
+        if (pipeline && pipeline->HasDynamicVertexInput()) {
             UpdateVertexInput(engine);
         }
     }
@@ -1779,7 +1763,8 @@ void RasterizerVulkan::UpdateDepthWriteEnable(Tegra::Engines::Maxwell3D::Regs& r
     });
 }
 
-void RasterizerVulkan::UpdatePrimitiveRestartEnable(Tegra::Engines::Maxwell3D::Regs& regs) {
+void RasterizerVulkan::UpdatePrimitiveRestartEnable(Tegra::Engines::Maxwell3D& engine) {
+    const auto& regs = engine.regs;
     if (!state_tracker.TouchPrimitiveRestartEnable()) {
         return;
     }
@@ -1788,7 +1773,7 @@ void RasterizerVulkan::UpdatePrimitiveRestartEnable(Tegra::Engines::Maxwell3D::R
     if (device.IsMoltenVK()) {
         enable = true;
     } else if (enable) {
-        const auto topology = MaxwellToVK::PrimitiveTopology(device, maxwell3d->draw_manager.draw_state.topology);
+        const auto topology = MaxwellToVK::PrimitiveTopology(device, engine.draw_manager.draw_state.topology);
         enable = IsPrimitiveRestartSupported(device, topology);
     }
 
@@ -1873,7 +1858,8 @@ void RasterizerVulkan::UpdateLineRasterizationMode(Tegra::Engines::Maxwell3D::Re
     });
 }
 
-void RasterizerVulkan::UpdateDepthBiasEnable(Tegra::Engines::Maxwell3D::Regs& regs) {
+void RasterizerVulkan::UpdateDepthBiasEnable(Tegra::Engines::Maxwell3D& engine) {
+    const auto& regs = engine.regs;
     if (!state_tracker.TouchDepthBiasEnable()) {
         return;
     }
@@ -1902,7 +1888,7 @@ void RasterizerVulkan::UpdateDepthBiasEnable(Tegra::Engines::Maxwell3D::Regs& re
         regs.polygon_offset_line_enable,
         regs.polygon_offset_fill_enable,
     };
-    const u32 topology_index = u32(maxwell3d->draw_manager.draw_state.topology);
+    const u32 topology_index = u32(engine.draw_manager.draw_state.topology);
     const u32 enable = enabled_lut[POLYGON_OFFSET_ENABLE_LUT[topology_index]];
     scheduler.Record([enable](vk::CommandBuffer cmdbuf) { cmdbuf.SetDepthBiasEnableEXT(enable != 0); });
 }
@@ -1914,7 +1900,16 @@ void RasterizerVulkan::UpdateLogicOpEnable(Tegra::Engines::Maxwell3D::Regs& regs
     if (!device.SupportsDynamicState3LogicOpEnable()) {
         return;
     }
-    scheduler.Record([enable = regs.logic_op.enable](vk::CommandBuffer cmdbuf) {
+    bool enable = regs.logic_op.enable != 0;
+    if (enable && (device.GetDriverID() == VkDriverIdKHR::VK_DRIVER_ID_AMD_OPEN_SOURCE ||
+                   device.GetDriverID() == VkDriverIdKHR::VK_DRIVER_ID_AMD_PROPRIETARY)) {
+        // Do not mutate guest registers: a journaled shadow must remain exact.
+        enable = !std::any_of(regs.vertex_attrib_format.begin(), regs.vertex_attrib_format.end(),
+                             [](const auto& attrib) {
+                                 return attrib.type == Maxwell::VertexAttribute::Type::Float;
+                             });
+    }
+    scheduler.Record([enable](vk::CommandBuffer cmdbuf) {
         cmdbuf.SetLogicOpEnableEXT(enable != 0);
     });
 }
@@ -1936,14 +1931,14 @@ void RasterizerVulkan::UpdateDepthClampEnable(Tegra::Engines::Maxwell3D::Regs& r
         [is_enabled](vk::CommandBuffer cmdbuf) { cmdbuf.SetDepthClampEnableEXT(is_enabled); });
 }
 
-void RasterizerVulkan::UpdateAlphaToCoverageEnable(Tegra::Engines::Maxwell3D::Regs& regs) {
+void RasterizerVulkan::UpdateAlphaToCoverageEnable(Tegra::Engines::Maxwell3D::Regs& regs,
+                                               GraphicsPipeline* pipeline) {
     if (!state_tracker.TouchAlphaToCoverageEnable()) {
         return;
     }
     if (!device.SupportsDynamicState3AlphaToCoverageEnable()) {
         return;
     }
-    GraphicsPipeline* const pipeline = pipeline_cache.CurrentGraphicsPipeline();
     const bool enable = pipeline != nullptr && pipeline->SupportsAlphaToCoverage() &&
                         regs.anti_alias_alpha_control.alpha_to_coverage != 0;
     scheduler.Record([enable](vk::CommandBuffer cmdbuf) {
@@ -1951,7 +1946,8 @@ void RasterizerVulkan::UpdateAlphaToCoverageEnable(Tegra::Engines::Maxwell3D::Re
     });
 }
 
-void RasterizerVulkan::UpdateAlphaToOneEnable(Tegra::Engines::Maxwell3D::Regs& regs) {
+void RasterizerVulkan::UpdateAlphaToOneEnable(Tegra::Engines::Maxwell3D::Regs& regs,
+                                               GraphicsPipeline* pipeline) {
     if (!state_tracker.TouchAlphaToOneEnable()) {
         return;
     }
@@ -1963,7 +1959,6 @@ void RasterizerVulkan::UpdateAlphaToOneEnable(Tegra::Engines::Maxwell3D::Regs& r
         });
         return;
     }
-    GraphicsPipeline* const pipeline = pipeline_cache.CurrentGraphicsPipeline();
     const bool enable = pipeline != nullptr && pipeline->SupportsAlphaToOne() &&
                         regs.anti_alias_alpha_control.alpha_to_one != 0;
     scheduler.Record([enable](vk::CommandBuffer cmdbuf) {

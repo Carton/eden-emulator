@@ -178,7 +178,7 @@ private:
     void RecordDraw(Tegra::Engines::Maxwell3D& engine, bool is_indexed, u32 instance_count);
     void WaitForDrawResolve() override;
 
-    void UpdateDynamicStates(Tegra::Engines::Maxwell3D& engine);
+    void UpdateDynamicStates(Tegra::Engines::Maxwell3D& engine, GraphicsPipeline* pipeline);
 
     void HandleTransformFeedback(Tegra::Engines::Maxwell3D& engine);
 
@@ -195,17 +195,19 @@ private:
     void UpdateDepthTestEnable(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateDepthWriteEnable(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateDepthCompareOp(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdatePrimitiveRestartEnable(Tegra::Engines::Maxwell3D::Regs& regs);
+    void UpdatePrimitiveRestartEnable(Tegra::Engines::Maxwell3D& engine);
     void UpdateRasterizerDiscardEnable(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateConservativeRasterizationMode(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateLineStippleEnable(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateLineStipple(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateLineRasterizationMode(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateDepthBiasEnable(Tegra::Engines::Maxwell3D::Regs& regs);
+    void UpdateDepthBiasEnable(Tegra::Engines::Maxwell3D& engine);
     void UpdateLogicOpEnable(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateDepthClampEnable(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateAlphaToCoverageEnable(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateAlphaToOneEnable(Tegra::Engines::Maxwell3D::Regs& regs);
+    void UpdateAlphaToCoverageEnable(Tegra::Engines::Maxwell3D::Regs& regs,
+                                     GraphicsPipeline* pipeline);
+    void UpdateAlphaToOneEnable(Tegra::Engines::Maxwell3D::Regs& regs,
+                                     GraphicsPipeline* pipeline);
     void UpdateFrontFace(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateStencilOp(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateStencilTestEnable(Tegra::Engines::Maxwell3D::Regs& regs);
