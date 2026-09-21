@@ -3247,7 +3247,28 @@ region_size=256MiB/16=16MiB→shift=24；调试工具路径（40% 缩放非 pow2
 同步放大）；#10 read_handle 页缓存。分析归档：F:\prof\ibs_rot6_analysis.md、
 F:\prof\uprof\ibs-rot6\（report.csv+cpu.db）、F:\prof\runs\rot6-1ab67a3c8981\。
 
-**2026-09-21 DLB/CBPG 纯诊断插桩（未构建、未运行、未提交）**：
+**2026-09-21 三遗留项测量定案（rot7，插桩构建，全部关闭）**：
+
+先决反转：cpuid 实测本机 Zen3 `monitorx=1`/`waitpkg=0` → `Event::WaitFor` 走
+MWAITX 用户态 C1 等待分支——线程打盹期间仍被记账为运行（98.7% 假忙），核心
+几乎无指令分发（IBS 130 样本/s 佐证）、不进内核。**① HostTiming"烧一整核"
+是记账假象，无需优化，关闭。**
+
+插桩（DLB/CBPG，见下方 commit）跑 rot7 旋转（8 窗，~311s 会话）：
+- **② 同步放大否证**：两个 CPUCore 线程各 dl_calls 20.8M/18.0M（~66k/s/线程），
+  current_area 命中 79.8%/83.9%；miss 4.23M/2.94M 全部进 OnCPURead，其中
+  preemtive 4,225,016/2,942,575，**sync_flushes 各仅 4 次**（avg 12-14ms，
+  total ~50ms/5min）→ "CPU 阻塞等 GPU flush"不存在。miss 侧成本 =
+  GetFlushArea 2.35-2.93µs/次 ≈ 3% 单核；再吸收一半 miss 收益 <0.2% 整机。
+  **关闭，不做。**
+- **③ CBPG 同页率 4.7%**（graphics UBO 源翻译 215.3M 次、同页 10.05M；
+  换算 ~1M 次翻译/s）→ #10 read_handle 页缓存命中率天花板太低，收益
+  ~0.03-0.05% 单核。**关闭，不做。**
+
+插桩保留在树（与 SerialCuts 同风格；热路径仅 ++ 计数，flusharea 计时仅在
+低频 miss 路径 2×GetUptime）。**tail-on-worker 前所有低风险线已清完，无遗留。**
+
+**DLB/CBPG 纯诊断插桩明细**：
 - 用户补充确认 Zen3 `monitorx=1`，HostTiming 走 MWAITX 用户态 C1 等待；高忙碌率为
   记账假象，此调查项关闭，本轮未动 HostTiming。
 - `memory.cpp` 的 HandleRasterizerDownload 以文件作用域 TLS 累计 dl_calls、
