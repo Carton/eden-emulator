@@ -3190,3 +3190,59 @@ HypervisorPresent=False，IBS 探针 rc=0（§28.21 手册 §6 流程一次通�
 **遗留**：#10 的 read_handle CB 页缓存待做（需先看 handle 同页率数据）；
 可选：旧/新 exe 交错 A/B（要重编旧 commit 一份）定量宏收益；codex 提案
 #3-#7、#9 未实施（预期合计仍在 ~1% 级）。
+
+### 28.24 rot6 每线程 IBS + stream region 移位切口（2026-09-21 晚）
+
+**背景**：用户定调——跳过定量 A/B，本轮用 uProf 再采一次旋转场景，GPU 线程+
+三个模拟核都找"低风险低垂果实"，做完即转 tail-on-worker 大架构线。
+
+**方法升级（比 rot5 深两层，工具已入仓）**：
+- `tools/prof/ibs_capture.py`（6a5fe8442c）：编排 rot_capture + uProf IBS attach +
+  **现场线程名快照**（GetThreadDescription；坑：本机 hr=0x10000000 但字符串正常，
+  不能信 hr）+ 起止 GetThreadTimes。uProf 自己的 threadName 对 eden 为空。
+- `tools/prof/ibs_analyze.py`（ca0b655459+eab9d7c504）：**cpu.db 是 DuckDB**，
+  UnifiedSampleSeries 逐样本（threadId/functionId/moduleId/coreId+事件列），
+  事件 ID 映射已对账锁定（0xf100=op 标记/0xf101=ttr/0xf103,f104=br,misp/
+  0xf201,f202=ld,st/0xf221,f219,f21e=ld-miss,lat,st-miss/0xf225=dtlb-lat）。
+  可做 report.csv 做不到的每线程×函数聚合。
+
+**IBS 采样语义（重要，rot6 新发现）**：
+1. user=1,os=0：内核态不采；
+2. **无模块内存（dynarmic JIT 代码缓存）样本被丢弃**，不进 db/report；
+3. isResolved=false = 有模块无符号（NVIDIA 驱动、ntdll），保留。
+→ 每线程 ops share% ≠ 计算占比，必须 GetThreadTimes 校准；线程内已解析函数
+排名仍有效。参考采样率 ≈3.3-3.6k ops/忙秒。
+
+**线程全景（160s 窗）**：HostTiming **98.7%忙且~96%内核态**（Event::WaitFor
+唤醒风暴，用户态仅 130 样本/s；codex 纠正：Win x64 走 MWAITX/UMWAIT/
+NtDelayExecution 分支而非 condvar）| GPU 97.0%忙（~100% 捕获，串行路径）|
+CPUCore_1/0/2 84/76/76%忙但 ~90% 在 JIT（不可优化），host 侧仅 ~10%（三核
+合计 ~0.3 核当量）| VulkanWorker 42.9%忙、92% 样本=NVIDIA 驱动 submit 侧。
+全线程 12 核自由迁移。GPU 线程微架构与 rot5 一致（miss-lat 2.37%/misp 0.40%/
+dtlb 0.39%）→ 仍指令吞吐瓶颈。
+
+**GPU 线程切口后残余**（对照 §28.22 前值）：GpuToCpuAddress 2.6%→1.9%
+（#1/#10 生效佐证）；其余 CallMethod 4.9/ProcessCommands 4.4/UBO binding 2.5/
+ProcessDirtyRegisters 2.1/ConsumeSinkImpl 1.8/Refresh 1.7/WordManager 残余 3.1
+——全部 ≤5%，长尾确认。
+
+**codex 交叉核对**（resume 01a0bf4d，裁决存 F:\prof\codex_rot6_verdict_20260921.md）：
+1. **唯一值得做**：StagingBufferPool::Region() 运行时 64 位除法→pow2 移位
+   （0-0.3% 帧时，低风险，fallback 保除法）；
+2. HostTiming 内核 churn 独立立项"先测后改"（勿动 pacing；窄方向=ScheduleEvent
+   无条件 Set() 改条件通知，需证明无丢唤醒）；
+3. CPUCore 侧只做归因测量（current_area miss/纹理锁等待/非抢占 flush 墙钟），
+   不扩 current_area 缓存（多别名失效语义风险高）；
+4. Uniform 内容复用/FixedState memo/WordManager 多字专化：证据不足不做。
+**总裁决：无项阻挡 tail-on-worker。**
+
+**实施**：stream region 移位（8398d87199，codex 实施+我复核）：常规路径
+region_size=256MiB/16=16MiB→shift=24；调试工具路径（40% 缩放非 pow2）保留除法。
+反向闭包 21 TU touch 后重编。**验收**（streamcut-b246dfeeaf07）：bench 有效
+43.05fps/med 23.30ms（单局绝对值仅记录不作结论）/luma 56.80±0.17 与基线签名
+一致/close 15.6s；diag 确认 `region_size=16777216 pow2=true shift=24`；无新断言。
+
+**遗留**（均为可选，不阻塞架构线）：HostTiming 等待路径核实（ETW 内核栈+能力位
+分支确认）；CPU→GPU 下载阻塞分解测量（IBS 看不见等待，不能凭 host 份额小排除
+同步放大）；#10 read_handle 页缓存。分析归档：F:\prof\ibs_rot6_analysis.md、
+F:\prof\uprof\ibs-rot6\（report.csv+cpu.db）、F:\prof\runs\rot6-1ab67a3c8981\。

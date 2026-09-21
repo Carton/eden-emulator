@@ -147,4 +147,6 @@ CLI：`D:\Program Files\AMD\AMDuProf\bin\AMDuProfCLI.exe`（5.3.521）。
 - **本机现状（2026-09-20 实测）**：`ERROR: IBS counters are not available`
   ——HypervisorPresent=True、VBS running（Windows 内存完整性）时 EBP/IBS
   被禁用，TBS 不受影响。要做 IBS 须先关内存完整性并重启，属用户决策，
-  不要擅自改系统虚拟化配置。`AMDProfilerService` 仅远程 profiling 需要。
+  不要擅自改系统虚拟化配置。`AMDProfilerService` 仅远程 profiling 需要。| `ibs_capture.py` | uProf IBS 编排：rot_capture 旋转 + uProf attach + 现场线程名/GetThreadTimes 快照 + 报告生成（docs/local/uprof-cli.md §7） |
+| `ibs_analyze.py` | cpu.db(DuckDB) 每线程×函数×微架构聚合（事件 ID 映射已对账） |
+

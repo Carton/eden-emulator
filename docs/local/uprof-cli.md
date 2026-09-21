@@ -157,3 +157,21 @@ AMDuProfCLI.exe report -i <会话目录> --detail -s event=ibs-op
    优先级互相校准。
 6. 结果与脚本输出归档到 `F:\prof\runs\<label>-<id>\`（或 `F:\prof\uprof\`），
    结论写 PROFILE_PROGRESS.md。
+
+## 7. cpu.db 深挖（2026-09-21 rot6 实战，配套 tools/prof/ibs_capture.py + ibs_analyze.py）
+
+- 会话目录下 `cpu.db` 是 **DuckDB**（python `duckdb` 只读打开）：
+  `UnifiedSampleSeries` 逐样本行（threadId/functionId/moduleId/coreId +
+  ~76 个事件列）。事件 ID 对账锁定：`0xf100`=op 样本标记（行判别器）、
+  `0xf101`=tag-to-retire 周期、`0xf103/0xf104`=br/misp、`0xf201/0xf202`=ld/st、
+  `0xf221/0xf219/0xf21e`=ld-miss/ld-miss-lat/st-miss、`0xf225`=dtlb-lat、
+  `0xf110`=misp-ttr。可做 report.csv 做不到的**每线程×函数×微架构**聚合。
+- **线程名必须现场抓**：uProf 的 ProcessThread.threadName 对 eden 为空；
+  `ibs_capture.py` 用 GetThreadDescription 快照（本机坑：HRESULT=0x10000000
+  但字符串正常——判断 hr==0 会拿到 0 个名字，直接信 buf）。
+- **采样语义三条**：user=1,os=0（内核态不采）；无模块内存（dynarmic JIT
+  代码缓存）样本**被丢弃**不进库；isResolved=false 行是"有模块无符号"
+  （NVIDIA 驱动/ntdll）。因此每线程 ops 份额 ≠ 计算占比，要用 GetThreadTimes
+  忙碌率校准；线程内已解析函数排名仍有效。参考率 ≈3.3-3.6k ops/忙秒。
+- 标准流程：`python tools/prof/ibs_capture.py LABEL`（自动旋转+采集+快照+报告）
+  → `python tools/prof/ibs_analyze.py F:\prof\uprof\ibs-LABEL --label LABEL`。
