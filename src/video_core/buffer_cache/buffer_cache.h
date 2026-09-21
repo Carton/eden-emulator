@@ -1093,6 +1093,18 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
             std::memcpy(span.data(), epoch_src, size);
         } else {
             u8* const src_pointer = device_memory.GetPointer<u8>(device_addr);
+            // (local-only) Consecutive graphics UBO source pages, not a translation cache.
+            static thread_local u64 cbpg_lookups{};
+            static thread_local u64 cbpg_same_page_hits{};
+            static thread_local u64 cbpg_last_page{~u64{0}};
+            const u64 cbpg_page = device_addr >> Core::DEVICE_PAGEBITS;
+            ++cbpg_lookups;
+            cbpg_same_page_hits += cbpg_page == cbpg_last_page;
+            cbpg_last_page = cbpg_page;
+            if ((cbpg_lookups & 0xffff) == 0) [[unlikely]] {
+                LOG_INFO(HW_GPU, "CBPG diag: path=graphics cbpg_lookups={} cbpg_same_page_hits={}",
+                         cbpg_lookups, cbpg_same_page_hits);
+            }
             if (src_pointer &&
                 size <= DEVICE_PAGESIZE - (device_addr & Core::DEVICE_PAGEMASK))
                 [[likely]] {
@@ -1267,6 +1279,18 @@ void BufferCache<P>::BindHostComputeUniformBuffers() {
                 const std::span<u8> span =
                     runtime.BindMappedUniformBuffer(0, binding_index, size);
                 u8* const src_pointer = device_memory.GetPointer<u8>(binding.device_addr);
+                // (local-only) Keep compute alignment uploads separate from graphics UBOs.
+                static thread_local u64 cbpg_lookups{};
+                static thread_local u64 cbpg_same_page_hits{};
+                static thread_local u64 cbpg_last_page{~u64{0}};
+                const u64 cbpg_page = binding.device_addr >> Core::DEVICE_PAGEBITS;
+                ++cbpg_lookups;
+                cbpg_same_page_hits += cbpg_page == cbpg_last_page;
+                cbpg_last_page = cbpg_page;
+                if ((cbpg_lookups & 0xffff) == 0) [[unlikely]] {
+                    LOG_INFO(HW_GPU, "CBPG diag: path=compute_alignment cbpg_lookups={} "
+                                     "cbpg_same_page_hits={}", cbpg_lookups, cbpg_same_page_hits);
+                }
                 if (src_pointer &&
                     size <= DEVICE_PAGESIZE - (binding.device_addr & Core::DEVICE_PAGEMASK)) [[likely]] {
                     std::memcpy(span.data(), src_pointer, size);

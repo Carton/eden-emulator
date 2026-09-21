@@ -3246,3 +3246,19 @@ region_size=256MiB/16=16MiB→shift=24；调试工具路径（40% 缩放非 pow2
 分支确认）；CPU→GPU 下载阻塞分解测量（IBS 看不见等待，不能凭 host 份额小排除
 同步放大）；#10 read_handle 页缓存。分析归档：F:\prof\ibs_rot6_analysis.md、
 F:\prof\uprof\ibs-rot6\（report.csv+cpu.db）、F:\prof\runs\rot6-1ab67a3c8981\。
+
+**2026-09-21 DLB/CBPG 纯诊断插桩（未构建、未运行、未提交）**：
+- 用户补充确认 Zen3 `monitorx=1`，HostTiming 走 MWAITX 用户态 C1 等待；高忙碌率为
+  记账假象，此调查项关闭，本轮未动 HostTiming。
+- `memory.cpp` 的 HandleRasterizerDownload 以文件作用域 TLS 累计 dl_calls、
+  dl_area_hits、dl_oncpu_read，每 65536 调用由 gpu.cpp 的诊断桥统一输出 `DLB diag`。
+  多别名映射可令一次调用产生多个 hit/miss，不能将两者之和直接当作调用数。
+- `gpu.cpp` 的 OnCPURead 累计 preemtive/sync 次数，仅非 preemtive 分支用现有
+  WallClock::GetUptime（本机 FencedRDTSC）测 RequestSyncOperation 至 WaitForSyncOperation
+  返回的墙钟 ticks，日志时换算平均/累计微秒。该值含排队、GPU flush 与调度等待，非纯锁等待。
+- **待澄清**：GetFlushArea 返回前不知道 preemtive；要求测其耗时与“只允许非 preemtive
+  路径读时钟”冲突。已询问是否允许该调用前后读时钟；当前未插入 flusharea 计时，未虚报零值。
+- `buffer_cache.h` graphics UBO 上传源及 compute alignment 上传源分别累计 TLS 同页率，
+  每 65536 次输出 `CBPG diag`（path 区分）。通用 ImmediateUploadMemory 未动；该数据不直接
+  等于 read_handle CB 页缓存命中率，也未缓存地址或字节。各线程/模板实例分别累计。
+- `git diff --check` 通过；无实测收益结论。用户负责运行 touch_includers.py 重编头文件闭包及验收。

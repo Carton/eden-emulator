@@ -13,6 +13,8 @@
 #include <utility>
 
 #include "common/assert.h"
+#include "common/cpu_features.h"
+#include "common/logging.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
 #include "core/core.h"
@@ -41,6 +43,11 @@
 namespace Tegra {
 
 namespace {
+thread_local u64 ocr_preemtive_hits{};
+thread_local u64 ocr_sync_flushes{};
+thread_local u64 ocr_syncwait_cyc{};
+thread_local u64 ocr_flusharea_cyc{};
+
 constexpr u64 GpuClockMultiplier(Settings::GpuClock clock) {
     switch (clock) {
     case Settings::GpuClock::Boost:
@@ -52,6 +59,24 @@ constexpr u64 GpuClockMultiplier(Settings::GpuClock clock) {
     }
 }
 } // Anonymous namespace
+
+// Called only at the CPU download reporting interval, on the same host thread.
+void LogDownloadBlockingDiagnostics(u64 calls, u64 area_hits, u64 oncpu_reads) {
+    const double ticks_per_second = static_cast<double>(
+        Common::g_wall_clock.NsToTicks(std::chrono::seconds{1}));
+    const double syncwait_us = static_cast<double>(ocr_syncwait_cyc) * 1'000'000.0 /
+                               ticks_per_second;
+    const double flusharea_us = static_cast<double>(ocr_flusharea_cyc) * 1'000'000.0 /
+                                ticks_per_second;
+    LOG_INFO(HW_GPU, "DLB diag: dl_calls={} dl_area_hits={} dl_oncpu_read={} "
+                     "ocr_preemtive_hits={} ocr_sync_flushes={} ocr_syncwait_cyc={} "
+                     "syncwait_avg_us={} syncwait_total_us={} flusharea_avg_us={}",
+             calls, area_hits, oncpu_reads, ocr_preemtive_hits, ocr_sync_flushes,
+             ocr_syncwait_cyc, ocr_sync_flushes ? syncwait_us / ocr_sync_flushes : 0.0,
+             syncwait_us,
+             (ocr_preemtive_hits + ocr_sync_flushes) ? flusharea_us /
+                 double(ocr_preemtive_hits + ocr_sync_flushes) : 0.0);
+}
 
 struct GPU::Impl {
     explicit Impl(Core::System& system_, bool is_async_, bool use_nvdec_)
@@ -211,16 +236,23 @@ struct GPU::Impl {
     }
 
     VideoCore::RasterizerDownloadArea OnCPURead(DAddr addr, u64 size) {
+        const u64 flusharea_start = static_cast<u64>(Common::g_wall_clock.GetUptime());
         auto raster_area = renderer->ReadRasterizer()->GetFlushArea(addr, size);
+        ocr_flusharea_cyc += static_cast<u64>(Common::g_wall_clock.GetUptime()) - flusharea_start;
         if (raster_area.preemtive) {
+            ++ocr_preemtive_hits;
             return raster_area;
         }
         raster_area.preemtive = true;
+        ++ocr_sync_flushes;
+        // On this host GetUptime uses FencedRDTSC; conversion is deferred to logging.
+        const u64 syncwait_start = static_cast<u64>(Common::g_wall_clock.GetUptime());
         const u64 fence = RequestSyncOperation([this, &raster_area]() {
             renderer->ReadRasterizer()->FlushRegion(raster_area.start_address, raster_area.end_address - raster_area.start_address);
         });
         gpu_thread.TickGPU(is_async);
         WaitForSyncOperation(fence);
+        ocr_syncwait_cyc += static_cast<u64>(Common::g_wall_clock.GetUptime()) - syncwait_start;
         return raster_area;
     }
 

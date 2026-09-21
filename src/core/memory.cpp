@@ -34,7 +34,18 @@
 #include "video_core/host1x/host1x.h"
 #include "video_core/rasterizer_download_area.h"
 
+// Diagnostic bridge kept out of headers; all counters are local to the calling thread.
+namespace Tegra {
+void LogDownloadBlockingDiagnostics(u64 calls, u64 area_hits, u64 oncpu_reads);
+}
+
 namespace Core::Memory {
+
+namespace {
+thread_local u64 dl_calls{};
+thread_local u64 dl_area_hits{};
+thread_local u64 dl_oncpu_read{};
+} // namespace
 
 static inline bool AddressSpaceContains(const Common::PageTable& table, const Common::ProcessAddress addr, const std::size_t size) {
     const Common::ProcessAddress max_addr = 1ULL << table.GetAddressSpaceBits();
@@ -677,6 +688,7 @@ struct Memory::Impl {
     }
 
     void HandleRasterizerDownload(VAddr v_address, size_t size) {
+        ++dl_calls;
         const auto* p = GetPointerImpl(
             v_address, []() {}, []() {});
         if (!gpu_device_memory) [[unlikely]] {
@@ -688,10 +700,15 @@ struct Memory::Impl {
             const DAddr end_address = address + size;
             if (current_area.start_address <= address && end_address <= current_area.end_address)
                 [[likely]] {
+                ++dl_area_hits;
                 return;
             }
+            ++dl_oncpu_read;
             current_area = system.GPU().OnCPURead(address, size);
         });
+        if ((dl_calls & 0xffff) == 0) [[unlikely]] {
+            Tegra::LogDownloadBlockingDiagnostics(dl_calls, dl_area_hits, dl_oncpu_read);
+        }
     }
 
     void HandleRasterizerWrite(VAddr v_address, size_t size) {
