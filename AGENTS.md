@@ -52,8 +52,12 @@ cmake.exe --build build-vs22     # RelWithDebInfo，产物在 build-vs22/bin/
 - 构建命令不要接 `| tail` 等管道（吃掉退出码和错误行）；构建后必须验证产物时间戳。
 - **头文件陷阱（2026-09-21 实锤）**：build-vs22 的 ninja 没有头文件依赖追踪
   （无 msvc_deps_prefix，cl 的 /showIncludes 是 GBK 本地化输出）——**只改 .h 时
-  ninja 会说 "no work to do" 而不重编**。改 .h 必须先用反向 include 闭包把受影响
-  的 .cpp 全部 touch（或删对应 obj 目录），再构建，并核对 eden.exe mtime 确实更新。
+  ninja 会说 "no work to do" 而不重编**。改 .h 必须先跑 `python
+  tools/windows/touch_includers.py <改动的头文件>`（反向 include 闭包 touch，
+  或删对应 obj 目录），再构建，并核对 eden.exe mtime 确实更新。
+  **touch 一律用该脚本（python os.utime）**：bash 循环读 CRLF 列表会因行尾 
+  在 src/ 下落下 U+F03A 私用区乱码文件而真实文件没被 touch——症状是 ninja 只编
+  1 个 TU、二进制成 ABI 缝合怪（2026-09-21 streamcut 首验即栽此坑，重建后已重验）。
 
 ## 产物
 
