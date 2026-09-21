@@ -8,9 +8,11 @@ aggregates on ibs-rot5 (exact match on GPU-thread totals: ops 554816, BR
 53389508). report.csv itself cannot break functions down per thread; this
 script can.
 
-Unresolved samples (isResolved=false, anonymous exec memory = dynarmic JIT
-guest code) are reported as a separate '<JIT/anon>' bucket - for CPUCore
-threads that bucket IS the guest-code share.
+CAVEAT (rot6 findings): uProf DROPS samples in module-less memory (dynarmic
+JIT code cache) entirely, and isResolved=false rows are symbol-less MODULES
+(NVIDIA driver, ntdll) - so per-thread op "share%" is NOT compute share.
+Calibrate with GetThreadTimes busy% (ibs_capture snapshots). Within a thread,
+the resolved function ranking is a valid sample of its user-mode host code.
 
 Usage: python ibs_analyze.py F:\\prof\\uprof\\ibs-<label> [--label rot6]
 """
@@ -41,13 +43,16 @@ SEL = ", ".join(f'sum("{v}") AS {k}' for k, v in EV.items())
 def load_names(session_dir, label):
     names = {}
     if label:
-        for path in sorted(glob.glob(os.path.join(session_dir, "..", "..", "runs",
-                                                  f"{label}-*", "thread_snapshot_start.json")),
-                           key=os.path.getmtime, reverse=True):
-            with open(path, encoding="utf-8") as fh:
-                for tid, info in json.load(fh).items():
-                    names[int(tid)] = info.get("name") or ""
-            break
+        for fname in ("thread_snapshot_names.json", "thread_snapshot_start.json",
+                      "thread_snapshot_end.json"):
+            for path in sorted(glob.glob(os.path.join(session_dir, "..", "..", "runs",
+                                                      f"{label}-*", fname)),
+                               key=os.path.getmtime, reverse=True):
+                with open(path, encoding="utf-8") as fh:
+                    for tid, info in json.load(fh).items():
+                        if info.get("name"):
+                            names[int(tid)] = info["name"]
+                break
     return names
 
 
@@ -71,7 +76,7 @@ def main(argv=None):
     opfilter = f'"{EV["ops"]}" != 0'
 
     print("=" * 30, "THREAD SUMMARY (op samples)", "=" * 30)
-    print(f"{'thread':>28} {'ops':>9} {'share%':>6} {'jit%':>5} {'misp%':>6} {'ldmiss%':>7} "
+    print(f"{'thread':>28} {'ops':>9} {'share%':>6} {'unres%':>6} {'misp%':>6} {'ldmiss%':>7} "
           f"{'misslatcyc%':>11} {'dtlb%':>6} {'avgmisslat':>10}")
     threads = con.execute(f"""
         select threadId, {SEL.replace('sum(', 'sum(case when true then ', 1) if False else SEL}
@@ -89,7 +94,7 @@ def main(argv=None):
         label = f"{name}({tid})" if name else f"TID {tid}"
         if ops >= total_ops * 0.02 or "GPU" in name or "CPUCore" in name:
             interesting.append(tid)
-        print(f"{label:>28} {ops:9.0f} {pct(ops, total_ops):6.2f} {pct(jit.get(tid, 0), ops):5.1f} "
+        print(f"{label:>28} {ops:9.0f} {pct(ops, total_ops):6.2f} {pct(jit.get(tid, 0), ops):6.1f} "
               f"{pct(misp, br):6.2f} {pct(ldm, ld):7.2f} {pct(ldml, ttr):11.2f} {pct(dtlb, ttr):6.2f} "
               f"{ldml / ldm if ldm else 0:10.1f}")
 
