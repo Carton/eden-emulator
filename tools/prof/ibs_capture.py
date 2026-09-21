@@ -81,7 +81,10 @@ def snapshot_threads(pid):
                     try:
                         name = ""
                         buf = ctypes.c_wchar_p()
-                        if k32.GetThreadDescription(h, ctypes.byref(buf)) == 0 and buf.value:
+                        k32.GetThreadDescription(h, ctypes.byref(buf))
+                        # HRESULT is not reliably 0 on this build (self-test:
+                        # returns 0x10000000 yet fetches the string) - trust buf.
+                        if buf.value:
                             name = buf.value
                             k32.LocalFree(ctypes.cast(buf, ctypes.c_void_p))
                         c, e, k, u = wt.FILETIME(), wt.FILETIME(), wt.FILETIME(), wt.FILETIME()
