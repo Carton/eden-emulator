@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <bit>
 #include <utility>
 #include <vector>
 
@@ -15,6 +16,7 @@
 #include "common/bit_util.h"
 #include "common/common_types.h"
 #include "common/literals.h"
+#include "common/logging.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/vulkan_common/vulkan_device.h"
@@ -69,7 +71,10 @@ StagingBufferPool::StagingBufferPool(const Device& device_, MemoryAllocator& mem
                                      Scheduler& scheduler_)
     : device{device_}, memory_allocator{memory_allocator_}, scheduler{scheduler_},
       stream_buffer_size{GetStreamBufferSize(device)}, region_size{stream_buffer_size /
-                                                                   StagingBufferPool::NUM_SYNCS} {
+                                                                   StagingBufferPool::NUM_SYNCS},
+      region_shift{std::has_single_bit(region_size) ? std::countr_zero(region_size) : -1} {
+    LOG_INFO(HW_GPU, "SerialCuts stream_region diag: region_size={} pow2={} shift={}",
+             region_size, region_shift >= 0, region_shift);
     VkBufferCreateInfo stream_ci = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .pNext = nullptr,

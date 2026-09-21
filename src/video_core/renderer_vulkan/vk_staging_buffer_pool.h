@@ -101,6 +101,9 @@ private:
 
     void ReleaseLevel(StagingBuffersCache& cache, size_t log2);
     size_t Region(size_t iter) const noexcept {
+        if (region_shift >= 0) [[likely]] {
+            return static_cast<VkDeviceSize>(iter) >> region_shift;
+        }
         return iter / region_size;
     }
 
@@ -113,6 +116,7 @@ private:
     std::span<u8> stream_pointer;
     VkDeviceSize stream_buffer_size;
     VkDeviceSize region_size;
+    const int region_shift; // -1 preserves division for non-power-of-two regions.
 
     size_t iterator = 0;
     size_t used_iterator = 0;
