@@ -3517,3 +3517,96 @@ Stage 1 三门（等价/图像/性能）全部关闭。
 （worker tail 即时会合，正确性里程碑）——按 codex §33.6 的顺序建议先 2b-1
 （几何/索引/XFB 分类），Stage 3 前需先补 disable/re-enable、深度>1、
 channel 切换带 pending 事件的定向场景验证。
+
+### 33.9 Tail-on-worker stage 3 immediate rendezvous (source only)
+
+Starting tree: 678bee33d7. User authorized collapsing 2b prerequisites where
+an immediate GPU rendezvous supplies exclusive ownership. Implemented stage 3
+directly for snapshot-eligible direct draws; no build, game run or commit.
+INLINE and all existing flag defaults remain unchanged. This is a correctness
+milestone, not a performance result or permission to enable it by default.
+
+Strict EDEN_TOKEN_TAIL_WORKER=1 is parsed only inside EnsureResolver (the existing
+token path must already be enabled). It implies JOB_BINDINGS, WORKER and BATCH,
+including when those variables explicitly say 0. It overrides PIPELINE=1 with
+a warning: one job, immediate rendezvous, no parser overlap, no resolve-ahead.
+PIPELINE_DEPTH/SPIN_US are consequently unused; TAIL_IMM does not change this
+mode. Existing snapshot/check/epoch controls remain applicable. Legacy async
+selection remains disabled and retains its existing warning/fallback behavior.
+
+Execution: GPU snapshot/input capture -> existing 1B Kick/Wait -> worker resolve,
+epoch capture, FinishDrawLocked, dynamic state/query/XFB and RecordDraw in ONE
+private CaptureScope -> ReleaseCaptured -> completion publication -> GPU splice,
+snapshot verification, dirty merge/FinishJob and gpu.TickWork. pending_commit
+is published only after the immediate wait returns. CommitPendingDraw recognizes
+the completed worker tail and only retires it; it cannot emit a duplicate tail.
+tail_avg_ns still times FinishDrawLocked alone, excluding the new input checker.
+
+Ownership classification and collapsed 2b work:
+- Geometry/index/XFB/storage materialized bindings remain persistent consumer
+  state under the existing B/T pair. Their inputs are the existing engine/draw
+  snapshot. GPU parse and fallback operations cannot run during the loan.
+- Indirect parameters remain GPU-owned: DrawIndirect still drains and uses
+  PrepareDraw synchronously. Inline-index vector draws retain their fallback.
+  Neither path is sent to the worker, so indirect capture is deferred until an
+  actual indirect-worker path is implemented.
+- Uniform input mirror/pending masks remain GPU-only. Revision history and
+  materialized bindings are worker-owned during the loan and GPU-owned after
+  completion; no pending-input application runs in the bridge.
+- StateTracker points at shadow flags for the entire worker resolve/tail.
+  Scoped ExchangeFlags restores its former pointer before completion, including
+  exceptions. Query engine and uniform epoch TLS are scoped/restored as well.
+  GPU FinishJob performs the existing live dirty merge only after rendezvous.
+- Descriptor payload/reuse history, staging streams, scheduler producer state
+  and query/XFB producer state transfer exclusively with the same rendezvous.
+  VulkanWorker continues to execute commands/descriptor allocation as before;
+  it is not the resolver. Channels and jobs are not recycled during the loan.
+
+Lock/liveness static audit: GPU Kick takes/releases J before waiting; worker
+takes/releases J before B/T. Worker holds the deadlock-avoiding scoped B/T pair
+through emission and may briefly acquire J for a bridge request, then releases
+J in the condition-variable wait. GPU releases J before splice/queue service
+and never acquires B/T or touches StateTracker while servicing requests.
+Dispatch acquires/releases reserve R before queue Q. VulkanWorker takes Q -> E,
+releases Q before ExecuteAll, and submission takes E -> S; E is released before
+reserve recycling. GPU WaitWorker drops Q before waiting on E. Pipeline-build
+wait is in the recorded command, protected by build_mutex; the inspected build
+closure does not require resolver/GPU bridge progress or B/T. Descriptor allocator
+Commit stays in the recorded lambda and pool overflow grows instead of waiting
+on the draw worker. Existing Publish/WaitWorker/WaitTick bridge and ABI V2 Record
+barrier are unchanged. Runtime coverage is still required for rare sync paths.
+
+Failure: stage-3 ExecuteResolve failure stores a persistent exception before
+propagating. Later snapshot attempts rethrow before touching the job; never
+replay an already submitted prefix inline. Unpublished chunks are discarded by
+the existing worker error path. A failure log identifies the job and completed
+splice count (not proof against partial publication). Existing drain/join covers teardown.
+
+Checker: existing uniform and texture scratch-model checks are unchanged and
+now apply on the worker. Register snapshot verification remains GPU-side after
+rendezvous. New checker compares all direct DrawParams fields derived from the
+snapshot against the parked LIVE draw state, covering the non-register draw
+inputs on every eligible draw. It is nonfatal, does not replay draw side effects,
+and is not an independent Vulkan output oracle. A thread-local JobBindingsDiag-
+style INFO line every 65536 completed tail attempts reports worker_tails,
+draw_input_checks and draw_input_mismatches. A ConfigureTail resource-allocation
+skip counts as a completed tail attempt, matching existing tail_calls semantics.
+Uniform capture totals remain on GPU TLS; apply/check totals now live on worker
+TLS. Compare totals by thread across the run, not within a single log line.
+
+Static review only: git diff --check passed; source comparison verified unchanged
+tail/draw/indirect/drain helpers, FIFO entry, dirty merge, snapshot checker, uniform
+capture/application and mailbox Request/Run bodies. No buffer-cache/descriptor-table/staging/memory translation
+implementation changed, so CBPG-affine, SSBO paired-translation and descriptor
+page fast paths are preserved. No new locks, worker thread or scheduler instance.
+MSVC compilation and reverse-include closure, nonzero worker/check coverage,
+zero mismatches, disable/re-enable/TBO/XFB/cold-pipeline/bridge pressure/channel
+switch/teardown QA and interleaved A/B remain for user acceptance. The 1B mailbox
+still parks; no speedup is claimed and its measured handoff cost remains a risk.
+Later overlap requires real ownership separation for dirty carry, parser cache
+preparation, query/scheduler state and invalidation dependencies; this stage does
+not authorize removing the immediate wait.
+
+Files: vk_draw_resolver.h/.cpp, vk_graphics_pipeline.h/.cpp, vk_rasterizer.cpp,
+PROFILE_PROGRESS.md. No source prerequisite remains before this stage-3 commit;
+build/runtime acceptance is pending. All gates stay default-off per stop-loss.

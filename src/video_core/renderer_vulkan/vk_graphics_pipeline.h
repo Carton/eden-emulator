@@ -81,6 +81,8 @@ class Scheduler;
 // the GPU thread has parsed into draw N+1.
 // Thread-local counters; emits only at the 65536-event cadence.
 void LogJobBindingsDiag();
+// Stage 3 only; per-thread, nonfatal checker diagnostics at 65536 completed tails.
+void RecordWorkerTailDiag(bool check, bool equivalent);
 void RecordUniformBindingsCapture(std::span<const VideoCommon::GraphicsUniformBindingRecord> records);
 void ApplyJobUniformBindings(BufferCache& cache,
                              std::span<const VideoCommon::GraphicsUniformBindingRecord> records,
@@ -125,7 +127,7 @@ class GraphicsPipeline {
 public:
     enum class ConfigurePhase : u8 {
         Resolve, // GPU thread or exclusive 1B resolver: may invoke texture runtime
-        Tail,    // uploads + scheduler records (GPU thread only)
+        Tail,    // uploads + records; GPU or exclusive stage-3 resolver producer
         All,     // resolve + tail back to back (synchronous path)
     };
     explicit GraphicsPipeline(
@@ -169,7 +171,7 @@ public:
 
     // Resolve may upload/copy images and access the scheduler. A dedicated
     // 1B resolver is allowed only with capture + sync bridge and the GPU
-    // producer parked; the tail always runs on the GPU thread.
+    // producer parked; stage 3 also executes the tail before returning ownership.
     bool ConfigureResolve(DrawContext& ctx, bool is_indexed) {
         return configure_func(this, ctx, is_indexed, ConfigurePhase::Resolve);
     }

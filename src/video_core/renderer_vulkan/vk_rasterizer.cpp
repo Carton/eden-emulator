@@ -342,8 +342,12 @@ void RasterizerVulkan::EnsureResolver() {
                                   ? DrawResolver::SnapshotMode::FullCopy
                                   : DrawResolver::SnapshotMode::Journal;
     resolver->check_enabled = token_check_enabled;
+    const char* tail_worker{std::getenv("EDEN_TOKEN_TAIL_WORKER")};
+    resolver->tail_worker_enabled =
+        tail_worker && tail_worker[0] == '1' && tail_worker[1] == '\0';
     const char* job_bindings{std::getenv("EDEN_TOKEN_JOB_BINDINGS")};
-    if (job_bindings && job_bindings[0] == '1' && job_bindings[1] == '\0') {
+    if (resolver->tail_worker_enabled ||
+        (job_bindings && job_bindings[0] == '1' && job_bindings[1] == '\0')) {
         resolver->EnableJobBindings(*maxwell3d);
         LOG_INFO(Render_Vulkan, "DrawToken job bindings enabled: check={}", token_check_enabled);
     }
@@ -354,6 +358,39 @@ void RasterizerVulkan::EnsureResolver() {
     const char* token_pipeline{std::getenv("EDEN_TOKEN_PIPELINE")};
     resolver->pipeline_enabled =
         token_pipeline && token_pipeline[0] == '1' && token_pipeline[1] == '\0';
+    if (resolver->tail_worker_enabled) {
+        if (resolver->pipeline_enabled) {
+            LOG_WARNING(Render_Vulkan,
+                        "DrawToken tail worker overrides PIPELINE: immediate rendezvous only");
+        }
+        resolver->pipeline_enabled = false;
+        resolver->worker_enabled = true;
+        resolver->worker_tail = [this](Tegra::Engines::Maxwell3D& shadow, DrawResolver::Job& job) {
+            // GPU is parked for this entire call. This checker reference is
+            // independently read from LIVE inputs, never from the shadow copy.
+            // Indirect/inline-index draws still take the existing GPU fallback.
+            bool equivalent = true;
+            if (token_check_enabled) {
+                const auto expected = MakeDrawParams(maxwell3d->draw_manager.draw_state,
+                                                     job.instance_count, job.is_indexed);
+                const auto actual = MakeDrawParams(shadow.draw_manager.draw_state,
+                                                   job.instance_count, job.is_indexed);
+                equivalent = expected.base_instance == actual.base_instance &&
+                             expected.num_instances == actual.num_instances &&
+                             expected.base_vertex == actual.base_vertex &&
+                             expected.num_vertices == actual.num_vertices &&
+                             expected.first_index == actual.first_index &&
+                             expected.is_indexed == actual.is_indexed;
+            }
+            const auto tail_start = std::chrono::steady_clock::now();
+            FinishDrawLocked(shadow, *job.pipeline, job.ctx, job.is_indexed, job.instance_count);
+            job.tail_ns = std::chrono::steady_clock::now() - tail_start;
+            RecordWorkerTailDiag(token_check_enabled, equivalent);
+        };
+        LOG_INFO(Render_Vulkan,
+                 "DrawToken tail worker: immediate rendezvous; implies JOB_BINDINGS, WORKER, BATCH; "
+                 "PIPELINE/depth/spin and TAIL_IMM do not alter this mode");
+    }
     if (resolver->pipeline_enabled) {
         const auto bounded_env = [](const char* name, u32 fallback, u32 low, u32 high) {
             const char* value = std::getenv(name);
@@ -403,6 +440,16 @@ void RasterizerVulkan::CommitPendingDraw() {
         resolver->VerifySnapshot(*maxwell3d);
     }
     DrawResolver::Job& job{resolver->TakeJob()};
+    if (resolver->tail_worker_enabled) {
+        ASSERT_MSG(job.tail_complete, "DrawToken worker tail must finish before GPU retirement");
+        diag_tail_ns += job.tail_ns;
+        ++diag_tail_calls;
+        // Completion publishes binding versions, dirty carry and producer
+        // state. Only now may the GPU merge live flags and resume maintenance.
+        resolver->FinishJob(*maxwell3d);
+        gpu.TickWork();
+        return;
+    }
     Tegra::Engines::Maxwell3D& shadow{resolver->SnapshotEngine()};
     {
         const auto previous_query_snapshot = VideoCommon::tls_pipeline_engine_snapshot;
@@ -620,6 +667,18 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
         return;
     }
     if (resolver->SnapshotAndEnqueue(*maxwell3d, pipeline, is_indexed, instance_count)) {
+        if (resolver->tail_worker_enabled) {
+            resolver->ExecuteResolve(scheduler); // resolve + tail, immediate bridge-aware wait
+            // Publish only after all worker callbacks returned; never expose a
+            // half-completed job to a reentrant guest-memory invalidation.
+            pending_commit.store(true, std::memory_order_release);
+            CommitPendingDraw(); // GPU retirement only; no second tail
+            ++pipelined_draws;
+            if (pipelined_draws % 2000 == 0) {
+                LogTokenDiag();
+            }
+            return;
+        }
         if (token_tail_immediate) {
             // Bisect mode: snapshot + resolve + commit all inside Draw(),
             // structurally identical to the serial path plus the shadow.

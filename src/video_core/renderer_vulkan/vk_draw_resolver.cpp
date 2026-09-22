@@ -179,6 +179,12 @@ struct DrawResolver::WorkerState final : Scheduler::CaptureSyncBridge {
             owner.job_phase.store(Phase::Resolved, std::memory_order_release);
         } catch (...) {
             // Fail the job; never replay an already submitted prefix inline.
+            if (owner.tail_worker_enabled) {
+                LOG_ERROR(Render_Vulkan,
+                          "DrawToken worker tail failed: job={} completed_splices={}; "
+                          "publication may be partial, replay forbidden",
+                          job_id, batch ? batch->SpliceCount() : 0);
+            }
             batch.reset();
             owner.job_phase.store(Phase::Idle, std::memory_order_release);
             throw;
@@ -806,6 +812,14 @@ void DrawResolver::CopyDynamicState(Tegra::Engines::Maxwell3D& engine) {
 bool DrawResolver::SnapshotAndEnqueue(Tegra::Engines::Maxwell3D& engine,
                                       GraphicsPipeline* pipeline, bool is_indexed,
                                       u32 instance_count) {
+    if (tail_worker_enabled) {
+        if (tail_worker_error) {
+            std::rethrow_exception(tail_worker_error);
+        }
+        ASSERT(worker_enabled && batch_enabled && job_bindings_enabled && !pipeline_enabled);
+        job.tail_complete = false;
+        job.tail_ns = {};
+    }
     if (pipeline_enabled) {
         if (!pipeline_state) {
             pipeline_state = std::make_unique<PipelineState>(*this);
@@ -890,6 +904,9 @@ void DrawResolver::ExecuteResolve(Scheduler& scheduler) {
         } catch (...) {
             // Also cover thread-creation failure before a job is dispatched;
             // teardown must not spin forever on the enqueue's Resolving state.
+            if (tail_worker_enabled) {
+                tail_worker_error = std::current_exception();
+            }
             job_phase.store(Phase::Idle, std::memory_order_release);
             throw;
         }
@@ -919,6 +936,30 @@ void DrawResolver::ExecuteResolveImpl(Scheduler& scheduler, WorkerState* worker_
             capture.emplace(scheduler, *batch, diag_kicks, worker_state,
                             worker_state ? worker_state->gpu_thread : std::thread::id{});
         }
+        // Stage 3 lends all scheduler/cache emission state to this producer.
+        // GPU Wait only services the queue bridge: no parser, B/T, retirement,
+        // pending uniform application or StateTracker access until completion.
+        struct RestoreTailState {
+            StateTracker* tracker{};
+            Tegra::Engines::Maxwell3D::DirtyState::Flags* flags{};
+            Tegra::Engines::Maxwell3D* query{VideoCommon::tls_pipeline_engine_snapshot};
+            const VideoCommon::UniformEpochSnapshot* epoch{VideoCommon::tls_uniform_epoch};
+            ~RestoreTailState() {
+                if (tracker) {
+                    tracker->ExchangeFlags(flags);
+                    VideoCommon::tls_pipeline_engine_snapshot = query;
+                    VideoCommon::tls_uniform_epoch = epoch;
+                }
+            }
+        };
+        std::optional<RestoreTailState> restore_tail;
+        if (tail_worker_enabled) {
+            ASSERT(worker_state && worker_tail && !pipeline_enabled);
+            restore_tail.emplace();
+            restore_tail->tracker = &state_tracker;
+            restore_tail->flags = state_tracker.ExchangeFlags(&shadow->dirty.flags);
+            VideoCommon::tls_pipeline_engine_snapshot = shadow.get();
+        }
         const auto replay_start{Clock::now()};
         if (slot_journal_size != 0) {
             shadow->ReplayJournal(slot_journal, slot_journal_size);
@@ -941,6 +982,11 @@ void DrawResolver::ExecuteResolveImpl(Scheduler& scheduler, WorkerState* worker_
             job.epoch_snapshot = {job.epoch_entries.data(), job.epoch_entry_count,
                                   epoch_table.bytes.data()};
             job.epoch_valid = true;
+        }
+        if (tail_worker_enabled) {
+            VideoCommon::tls_uniform_epoch = job.epoch_valid ? &job.epoch_snapshot : nullptr;
+            worker_tail(*shadow, job);
+            job.tail_complete = true;
         }
     }
     tls_engine_snapshot = nullptr;

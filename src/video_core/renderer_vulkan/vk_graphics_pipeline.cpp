@@ -57,6 +57,26 @@ struct JobBindingsDiag {
 thread_local JobBindingsDiag job_bindings_diag;
 } // namespace
 
+void RecordWorkerTailDiag(bool check, bool equivalent) {
+    struct Diag {
+        u64 completed{};
+        u64 checks{};
+        u64 mismatches{};
+    };
+    static thread_local Diag diag;
+    ++diag.completed;
+    if (check) {
+        ++diag.checks;
+        diag.mismatches += !equivalent;
+    }
+    if ((diag.completed & 0xffff) == 0) {
+        LOG_INFO(Render_Vulkan,
+                 "DrawToken job bindings diag: worker_tails={} draw_input_checks={} "
+                 "draw_input_mismatches={}",
+                 diag.completed, diag.checks, diag.mismatches);
+    }
+}
+
 void LogJobBindingsDiag() {
     auto& diag = job_bindings_diag;
     if (diag.events != 0 && (diag.events & 0xffff) == 0 &&

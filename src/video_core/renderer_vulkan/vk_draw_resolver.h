@@ -6,6 +6,8 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <exception>
+#include <functional>
 #include <memory>
 
 #include "video_core/control/engine_override.h"
@@ -30,6 +32,8 @@ class StateTracker;
 // in draw order, at the
 // next rasterizer rendezvous. Only the FIFO head may resolve; its tail must
 // finish before the next head is armed (shared cache bindings).
+// Stage 3 instead lends the whole resolve + tail interval to the private
+// worker, immediately waits, then retires on the GPU. It does not use the FIFO.
 //
 // Snapshot modes:
 //  - FullCopy: copy regs/state every draw (depth-1 behaviour, known-good).
@@ -62,6 +66,10 @@ public:
         size_t epoch_entry_count{};
         VideoCommon::UniformEpochSnapshot epoch_snapshot{};
         bool epoch_valid{}; // capture succeeded; the tail installs the snapshot
+        // Stage 3: published by the immediate worker rendezvous, consumed once
+        // by the GPU retirement path. Never authorizes replay after failure.
+        bool tail_complete{};
+        std::chrono::nanoseconds tail_ns{};
     };
 
     DrawResolver(Tegra::MemoryManager& gpu_memory_, BufferCache& buffer_cache_,
@@ -121,6 +129,8 @@ public:
     bool job_bindings_enabled{false}; // strict EDEN_TOKEN_JOB_BINDINGS=1
     bool batch_enabled{false}; // EDEN_TOKEN_BATCH=1; never enables worker resolve
     bool worker_enabled{false}; // EDEN_TOKEN_WORKER=1 alone: batch + immediate wait
+    bool tail_worker_enabled{false}; // stage 3: exclusive producer loan, immediate wait
+    std::function<void(Tegra::Engines::Maxwell3D&, Job&)> worker_tail;
     bool pipeline_enabled{false}; // EDEN_TOKEN_PIPELINE=1; queue + consumer-side wait
     static constexpr u32 MaxPipelineDepth = 4;
     u32 pipeline_depth{1};
@@ -195,8 +205,9 @@ private:
     // switches swap Maxwell3D objects; a different source forces a resync).
     const Tegra::Engines::Maxwell3D* shadow_source{};
     bool shadow_in_sync{};
-    // Lazily allocated only for 1B. Joined before any job/cache references die.
+    // Lazily allocated for 1B/stage 3. Joined before any job/cache references die.
     std::unique_ptr<WorkerState> worker;
+    std::exception_ptr tail_worker_error; // GPU-owned poison; submitted prefixes cannot replay
     struct PipelineState;
     std::unique_ptr<PipelineState> pipeline_state;
 };
