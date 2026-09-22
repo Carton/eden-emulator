@@ -108,8 +108,16 @@ public:
     // Returns false and logs on the first divergent register.
     bool VerifySnapshot(const Tegra::Engines::Maxwell3D& engine);
 
+    // Called once by EnsureResolver after check_enabled is configured.
+    void EnableJobBindings() {
+        job_bindings_enabled = true;
+        job.ctx.job_bindings = true;
+        job.ctx.check_job_bindings = check_enabled;
+    }
+
     SnapshotMode snapshot_mode{SnapshotMode::Journal};
     bool check_enabled{false};
+    bool job_bindings_enabled{false}; // strict EDEN_TOKEN_JOB_BINDINGS=1
     bool batch_enabled{false}; // EDEN_TOKEN_BATCH=1; never enables worker resolve
     bool worker_enabled{false}; // EDEN_TOKEN_WORKER=1 alone: batch + immediate wait
     bool pipeline_enabled{false}; // EDEN_TOKEN_PIPELINE=1; queue + consumer-side wait

@@ -264,6 +264,8 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
         }
         for (u32 i = 0; i < depth; ++i) {
             entries[i] = std::make_unique<Entry>(owner.gpu_memory);
+            entries[i]->job.ctx.job_bindings = owner.job_bindings_enabled;
+            entries[i]->job.ctx.check_job_bindings = owner.check_enabled;
         }
         thread = std::jthread([this](std::stop_token stop) { Run(stop); });
     }

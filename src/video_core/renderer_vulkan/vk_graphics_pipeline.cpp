@@ -37,6 +37,32 @@
 #endif
 
 namespace Vulkan {
+
+namespace {
+struct JobBindingsDiag {
+    u64 events{};
+    u64 last_reported{};
+    u64 records_captured{};
+    u64 records_applied{};
+    u64 equivalence_checks{};
+    u64 equivalence_mismatches{};
+};
+thread_local JobBindingsDiag job_bindings_diag;
+} // namespace
+
+void LogJobBindingsDiag() {
+    auto& diag = job_bindings_diag;
+    if (diag.events != 0 && (diag.events & 0xffff) == 0 &&
+        diag.events != diag.last_reported) [[unlikely]] {
+        LOG_INFO(Render_Vulkan,
+                 "DrawToken job bindings diag: events={} records_captured={} records_applied={} "
+                 "equivalence_checks={} equivalence_mismatches={}",
+                 diag.events, diag.records_captured, diag.records_applied,
+                 diag.equivalence_checks, diag.equivalence_mismatches);
+        diag.last_reported = diag.events;
+    }
+}
+
 namespace {
 using boost::container::small_vector;
 using boost::container::static_vector;
@@ -356,6 +382,7 @@ bool GraphicsPipeline::ConfigureImpl(DrawContext& ctx, bool is_indexed,
     auto& views{ctx.views};
     auto& samplers{ctx.samplers};
     const auto& regs{ctx.engine->regs};
+    const bool job_bindings{ctx.job_bindings};
 
     if (phase != ConfigurePhase::Tail) {
         // Resolve phase: guest binding resolution, driven by ctx.engine
@@ -449,67 +476,104 @@ bool GraphicsPipeline::ConfigureImpl(DrawContext& ctx, bool is_indexed,
         ASSERT(samplers.size() == num_textures);
         texture_cache.FillImageViews(std::span(views.data(), views.size()), false, Spec::has_images);
 
-        VideoCommon::ImageViewInOut* texture_buffer_it{views.data()};
-        const auto bind_stage_info{[&](size_t stage) LAMBDA_FORCEINLINE {
-            size_t index{};
-            const auto add_buffer{[&](const auto& desc) {
-                constexpr bool is_image = std::is_same_v<decltype(desc), const ImageBufferDescriptor&>;
-                for (u32 i = 0; i < desc.count; ++i) {
-                    bool is_written{false};
-                    if constexpr (is_image) {
-                        is_written = desc.is_written;
-                    }
-                    ImageView& image_view{texture_cache.GetImageView(texture_buffer_it->id)};
-                    PixelFormat format{image_view.format};
-                    if constexpr (is_image) {
-                        if (const auto explicit_format{PixelFormatFromImageFormat(desc.format)}) {
-                            format = *explicit_format;
+        // One mode dispatch, specialized at compile time: no per-record gate.
+        const auto bind_texture_buffers = [&]<bool private_bindings>() LAMBDA_FORCEINLINE {
+            VideoCommon::ImageViewInOut* texture_buffer_it{views.data()};
+            const auto bind_stage_info{[&](size_t stage) LAMBDA_FORCEINLINE {
+                size_t index{};
+                const auto add_buffer{[&](const auto& desc) {
+                    constexpr bool is_image = std::is_same_v<decltype(desc), const ImageBufferDescriptor&>;
+                    for (u32 i = 0; i < desc.count; ++i) {
+                        bool is_written{false};
+                        if constexpr (is_image) {
+                            is_written = desc.is_written;
                         }
+                        ImageView& image_view{texture_cache.GetImageView(texture_buffer_it->id)};
+                        PixelFormat format{image_view.format};
+                        if constexpr (is_image) {
+                            if (const auto explicit_format{PixelFormatFromImageFormat(desc.format)}) {
+                                format = *explicit_format;
+                            }
+                        }
+                        if constexpr (private_bindings) {
+                            ctx.texture_buffer_records.push_back(
+                                buffer_cache.ResolveGraphicsTextureBufferBinding(
+                                    stage, index, image_view.GpuAddr(), image_view.BufferSize(),
+                                    format, is_written, is_image));
+                        } else {
+                            buffer_cache.BindGraphicsTextureBuffer(stage, index, image_view.GpuAddr(),
+                                                                   image_view.BufferSize(), format,
+                                                                   is_written, is_image);
+                        }
+                        ++index;
+                        ++texture_buffer_it;
                     }
-                    buffer_cache.BindGraphicsTextureBuffer(stage, index, image_view.GpuAddr(),
-                                                           image_view.BufferSize(), format,
-                                                           is_written, is_image);
-                    ++index;
-                    ++texture_buffer_it;
+                }};
+                if constexpr (private_bindings) {
+                    ctx.texture_buffer_reset_stages |= 1U << stage;
+                } else {
+                    buffer_cache.UnbindGraphicsTextureBuffers(stage);
+                }
+
+                const Shader::Info& info{stage_infos[stage]};
+                if constexpr (Spec::has_texture_buffers) {
+                    for (const auto& desc : info.texture_buffer_descriptors) {
+                        add_buffer(desc);
+                    }
+                }
+                if constexpr (Spec::has_image_buffers) {
+                    for (const auto& desc : info.image_buffer_descriptors) {
+                        add_buffer(desc);
+                    }
+                }
+                texture_buffer_it += Shader::NumDescriptors(info.texture_descriptors);
+                if constexpr (Spec::has_images) {
+                    texture_buffer_it += Shader::NumDescriptors(info.image_descriptors);
                 }
             }};
-            buffer_cache.UnbindGraphicsTextureBuffers(stage);
-
-            const Shader::Info& info{stage_infos[stage]};
-            if constexpr (Spec::has_texture_buffers) {
-                for (const auto& desc : info.texture_buffer_descriptors) {
-                    add_buffer(desc);
-                }
+            if constexpr (Spec::enabled_stages[0]) {
+                bind_stage_info(0);
             }
-            if constexpr (Spec::has_image_buffers) {
-                for (const auto& desc : info.image_buffer_descriptors) {
-                    add_buffer(desc);
-                }
+            if constexpr (Spec::enabled_stages[1]) {
+                bind_stage_info(1);
             }
-            texture_buffer_it += Shader::NumDescriptors(info.texture_descriptors);
-            if constexpr (Spec::has_images) {
-                texture_buffer_it += Shader::NumDescriptors(info.image_descriptors);
+            if constexpr (Spec::enabled_stages[2]) {
+                bind_stage_info(2);
             }
-        }};
-        if constexpr (Spec::enabled_stages[0]) {
-            bind_stage_info(0);
-        }
-        if constexpr (Spec::enabled_stages[1]) {
-            bind_stage_info(1);
-        }
-        if constexpr (Spec::enabled_stages[2]) {
-            bind_stage_info(2);
-        }
-        if constexpr (Spec::enabled_stages[3]) {
-            bind_stage_info(3);
-        }
-        if constexpr (Spec::enabled_stages[4]) {
-            bind_stage_info(4);
+            if constexpr (Spec::enabled_stages[3]) {
+                bind_stage_info(3);
+            }
+            if constexpr (Spec::enabled_stages[4]) {
+                bind_stage_info(4);
+            }
+        };
+        if (job_bindings) {
+            ctx.ResetTextureBufferBindings();
+            bind_texture_buffers.template operator()<true>();
+            job_bindings_diag.records_captured += ctx.texture_buffer_records.size();
+            ++job_bindings_diag.events;
+            LogJobBindingsDiag();
+        } else {
+            bind_texture_buffers.template operator()<false>();
         }
 
         if (phase == ConfigurePhase::Resolve) {
             return true;
         }
+    }
+
+    if (job_bindings) {
+        const bool equivalent = buffer_cache.ApplyGraphicsTextureBufferBindings(
+            std::span<const VideoCommon::ResolvedTextureBufferBinding>{
+                ctx.texture_buffer_records.data(), ctx.texture_buffer_records.size()},
+            ctx.texture_buffer_reset_stages, ctx.check_job_bindings);
+        job_bindings_diag.records_applied += ctx.texture_buffer_records.size();
+        if (ctx.check_job_bindings) {
+            ++job_bindings_diag.equivalence_checks;
+            job_bindings_diag.equivalence_mismatches += !equivalent;
+        }
+        ++job_bindings_diag.events;
+        LogJobBindingsDiag();
     }
 
     if (regs.transform_feedback_enabled != 0) {

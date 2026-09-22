@@ -89,6 +89,15 @@ struct TextureBufferBinding : Binding {
     PixelFormat format = PixelFormat::Invalid;
 };
 
+// Resolved under B at resolve time; applying this record performs no translation.
+struct ResolvedTextureBufferBinding {
+    TextureBufferBinding binding;
+    size_t stage;
+    size_t index;
+    bool is_written;
+    bool is_image;
+};
+
 static constexpr Binding NULL_BINDING{
     .device_addr = 0,
     .size = 0,
@@ -270,6 +279,14 @@ public:
                                    bool is_written);
 
     void UnbindGraphicsTextureBuffers(size_t stage);
+
+    ResolvedTextureBufferBinding ResolveGraphicsTextureBufferBinding(
+        size_t stage, size_t index, GPUVAddr gpu_addr, u32 size, PixelFormat format,
+        bool is_written, bool is_image);
+    void ApplyGraphicsTextureBufferBinding(const ResolvedTextureBufferBinding& resolved);
+    // Checker uses isolated scratch state and never repeats guest reads.
+    bool ApplyGraphicsTextureBufferBindings(
+        std::span<const ResolvedTextureBufferBinding> records, u32 reset_stages, bool check);
 
     void BindGraphicsTextureBuffer(size_t stage, size_t tbo_index, GPUVAddr gpu_addr, u32 size,
                                    PixelFormat format, bool is_written, bool is_image);

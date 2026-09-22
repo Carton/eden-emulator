@@ -78,6 +78,9 @@ class Scheduler;
 // see the live engine; when the resolver thread is active, ctx carries the
 // snapshot engine so both phases observe draw N's state regardless of how far
 // the GPU thread has parsed into draw N+1.
+// Thread-local counters; emits only at the 65536-event cadence.
+void LogJobBindingsDiag();
+
 struct DrawContext {
     Tegra::Engines::Maxwell3D* engine{};
     Tegra::MemoryManager* gpu_memory{};
@@ -86,6 +89,18 @@ struct DrawContext {
     // per-draw heap allocation.
     boost::container::small_vector<VideoCommon::ImageViewInOut, 64> views;
     boost::container::small_vector<VideoCommon::SamplerId, 64> samplers;
+
+    bool job_bindings{false};
+    bool check_job_bindings{false};
+    u32 texture_buffer_reset_stages{};
+    boost::container::small_vector<VideoCommon::ResolvedTextureBufferBinding, 16>
+        texture_buffer_records;
+
+    // Gated resolve only; keep capacity across jobs and leave legacy Reset untouched.
+    void ResetTextureBufferBindings() {
+        texture_buffer_records.clear();
+        texture_buffer_reset_stages = 0;
+    }
 
     void Reset(Tegra::Engines::Maxwell3D* engine_, Tegra::MemoryManager* gpu_memory_) {
         engine = engine_;

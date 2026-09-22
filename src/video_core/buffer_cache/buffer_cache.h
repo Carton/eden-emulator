@@ -550,20 +550,91 @@ void BufferCache<P>::UnbindGraphicsTextureBuffers(size_t stage) {
 }
 
 template <class P>
-void BufferCache<P>::BindGraphicsTextureBuffer(size_t stage, size_t tbo_index, GPUVAddr gpu_addr,
-                                               u32 size, PixelFormat format, bool is_written,
-                                               bool is_image) {
+ResolvedTextureBufferBinding BufferCache<P>::ResolveGraphicsTextureBufferBinding(
+    size_t stage, size_t index, GPUVAddr gpu_addr, u32 size, PixelFormat format,
+    bool is_written, bool is_image) {
+    return {GetTextureBufferBinding(gpu_addr, size, format), stage, index, is_written, is_image};
+}
+
+template <class P>
+void BufferCache<P>::ApplyGraphicsTextureBufferBinding(
+    const ResolvedTextureBufferBinding& resolved) {
+    const auto stage = resolved.stage;
+    const auto tbo_index = resolved.index;
+    const bool is_written = resolved.is_written;
+    const bool is_image = resolved.is_image;
     channel_state->enabled_texture_buffers[stage] |= 1U << tbo_index;
     channel_state->written_texture_buffers[stage] |= (is_written ? 1U : 0U) << tbo_index;
     if constexpr (SEPARATE_IMAGE_BUFFERS_BINDINGS) {
         channel_state->image_texture_buffers[stage] |= (is_image ? 1U : 0U) << tbo_index;
     }
-    const TextureBufferBinding new_binding = GetTextureBufferBinding(gpu_addr, size, format);
+    const auto& new_binding = resolved.binding;
     TextureBufferBinding& binding = channel_state->texture_buffers[stage][tbo_index];
     if (new_binding.device_addr != binding.device_addr || new_binding.size != binding.size ||
         new_binding.format != binding.format) {
         binding = new_binding;
     }
+}
+
+template <class P>
+void BufferCache<P>::BindGraphicsTextureBuffer(size_t stage, size_t tbo_index, GPUVAddr gpu_addr,
+                                               u32 size, PixelFormat format, bool is_written,
+                                               bool is_image) {
+    ApplyGraphicsTextureBufferBinding(ResolveGraphicsTextureBufferBinding(
+        stage, tbo_index, gpu_addr, size, format, is_written, is_image));
+}
+
+template <class P>
+bool BufferCache<P>::ApplyGraphicsTextureBufferBindings(
+    std::span<const ResolvedTextureBufferBinding> records, u32 reset_stages, bool check) {
+    // Isolate the old transition rules from the apply helper being checked.
+    // Seed at application time so cache invalidation between resolve and tail
+    // does not appear as a false mismatch in cached resource IDs.
+    const auto apply = [&] {
+        ForEachEnabledBit(reset_stages, [&](u32 stage) { UnbindGraphicsTextureBuffers(stage); });
+        for (const auto& record : records) {
+            ApplyGraphicsTextureBufferBinding(record);
+        }
+    };
+    if (!check) {
+        apply();
+        return true;
+    }
+    auto expected = channel_state->texture_buffers;
+    auto enabled = channel_state->enabled_texture_buffers;
+    auto written = channel_state->written_texture_buffers;
+    auto images = channel_state->image_texture_buffers;
+    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+        if ((reset_stages & (1U << stage)) != 0) {
+            enabled[stage] = written[stage] = images[stage] = 0;
+        }
+    }
+    for (const auto& record : records) {
+        enabled[record.stage] |= 1U << record.index;
+        written[record.stage] |= (record.is_written ? 1U : 0U) << record.index;
+        if constexpr (SEPARATE_IMAGE_BUFFERS_BINDINGS) {
+            images[record.stage] |= (record.is_image ? 1U : 0U) << record.index;
+        }
+        auto& previous = expected[record.stage][record.index];
+        const auto& next = record.binding;
+        if (previous.device_addr != next.device_addr || previous.size != next.size ||
+            previous.format != next.format) {
+            previous = next;
+        }
+    }
+    apply();
+    bool equal = enabled == channel_state->enabled_texture_buffers &&
+                 written == channel_state->written_texture_buffers &&
+                 images == channel_state->image_texture_buffers;
+    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+        for (size_t index = 0; index < NUM_TEXTURE_BUFFERS; ++index) {
+            const auto& lhs = expected[stage][index];
+            const auto& rhs = channel_state->texture_buffers[stage][index];
+            equal &= lhs.device_addr == rhs.device_addr && lhs.size == rhs.size &&
+                     lhs.format == rhs.format && lhs.buffer_id == rhs.buffer_id;
+        }
+    }
+    return equal;
 }
 
 template <class P>

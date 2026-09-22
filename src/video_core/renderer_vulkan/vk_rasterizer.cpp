@@ -339,6 +339,11 @@ void RasterizerVulkan::EnsureResolver() {
                                   ? DrawResolver::SnapshotMode::FullCopy
                                   : DrawResolver::SnapshotMode::Journal;
     resolver->check_enabled = token_check_enabled;
+    const char* job_bindings{std::getenv("EDEN_TOKEN_JOB_BINDINGS")};
+    if (job_bindings && job_bindings[0] == '1' && job_bindings[1] == '\0') {
+        resolver->EnableJobBindings();
+        LOG_INFO(Render_Vulkan, "DrawToken job bindings enabled: check={}", token_check_enabled);
+    }
     const char* batch{std::getenv("EDEN_TOKEN_BATCH")};
     resolver->batch_enabled = batch && batch[0] == '1' && batch[1] == '\0';
     const char* worker{std::getenv("EDEN_TOKEN_WORKER")};
@@ -493,6 +498,9 @@ void RasterizerVulkan::RecordDraw(Tegra::Engines::Maxwell3D& engine, bool is_ind
 }
 
 void RasterizerVulkan::LogTokenDiag() {
+    if (resolver->job_bindings_enabled) {
+        LogJobBindingsDiag();
+    }
     LOG_INFO(Render_Vulkan,
              "DrawToken diag: pipelined={} "
              "resolve_avg_ns={} tail_avg_ns={} epoch hit/miss/classic={}/{}/{} "
