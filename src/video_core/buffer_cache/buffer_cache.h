@@ -343,15 +343,74 @@ std::pair<typename P::Buffer*, u32> BufferCache<P>::ObtainCPUBuffer(
 }
 
 template <class P>
-void BufferCache<P>::BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr gpu_addr,
-                                               u32 size) {
+Binding BufferCache<P>::ResolveGraphicsUniformBufferBinding(GPUVAddr gpu_addr, u32 size) const {
     const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
-    const Binding binding{
+    return Binding{
         .device_addr = *device_addr,
         .size = size,
         .buffer_id = BufferId{},
     };
+}
+
+template <class P>
+void BufferCache<P>::ApplyGraphicsUniformBufferBinding(size_t stage, u32 index,
+                                                      const Binding& binding) {
     channel_state->uniform_buffers[stage][index] = binding;
+}
+
+template <class P>
+void BufferCache<P>::BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr gpu_addr,
+                                               u32 size) {
+    ApplyGraphicsUniformBufferBinding(stage, index,
+                                      ResolveGraphicsUniformBufferBinding(gpu_addr, size));
+}
+
+template <class P>
+bool BufferCache<P>::ApplyGraphicsUniformBindings(
+    std::span<const GraphicsUniformBindingRecord> records,
+    GraphicsUniformBindingVersions& applied, bool check) {
+    const auto apply = [&] {
+        for (const auto& record : records) {
+            auto& revision = applied[record.stage][record.index];
+            if (revision != record.revision) {
+                ApplyGraphicsUniformBufferBinding(record.stage, record.index, record.binding);
+                revision = record.revision;
+            }
+        }
+    };
+    if (!check) {
+        apply();
+        return true;
+    }
+    // Independent legacy event model: bind overwrites (even on equal address),
+    // disable assigns NULL_BINDING, no new event preserves materialized BufferId.
+    auto expected = channel_state->uniform_buffers;
+    auto expected_versions = applied;
+    for (const auto& record : records) {
+        if (expected_versions[record.stage][record.index] == record.revision) {
+            continue;
+        }
+        auto& binding = expected[record.stage][record.index];
+        if (record.enabled) {
+            binding.device_addr = record.binding.device_addr;
+            binding.size = record.binding.size;
+            binding.buffer_id = BufferId{};
+        } else {
+            binding = NULL_BINDING;
+        }
+        expected_versions[record.stage][record.index] = record.revision;
+    }
+    apply();
+    bool equal = expected_versions == applied;
+    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+        for (size_t index = 0; index < NUM_GRAPHICS_UNIFORM_BUFFERS; ++index) {
+            const auto& lhs = expected[stage][index];
+            const auto& rhs = channel_state->uniform_buffers[stage][index];
+            equal &= lhs.device_addr == rhs.device_addr && lhs.size == rhs.size &&
+                     lhs.buffer_id == rhs.buffer_id;
+        }
+    }
+    return equal;
 }
 
 template <class P>

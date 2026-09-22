@@ -11,6 +11,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <span>
 #include <type_traits>
 #include <vector>
 
@@ -80,6 +81,10 @@ class Scheduler;
 // the GPU thread has parsed into draw N+1.
 // Thread-local counters; emits only at the 65536-event cadence.
 void LogJobBindingsDiag();
+void RecordUniformBindingsCapture(std::span<const VideoCommon::GraphicsUniformBindingRecord> records);
+void ApplyJobUniformBindings(BufferCache& cache,
+                             std::span<const VideoCommon::GraphicsUniformBindingRecord> records,
+                             VideoCommon::GraphicsUniformBindingVersions& applied, bool check);
 
 struct DrawContext {
     Tegra::Engines::Maxwell3D* engine{};
@@ -89,6 +94,10 @@ struct DrawContext {
     // per-draw heap allocation.
     boost::container::small_vector<VideoCommon::ImageViewInOut, 64> views;
     boost::container::small_vector<VideoCommon::SamplerId, 64> samplers;
+
+    boost::container::small_vector<VideoCommon::GraphicsUniformBindingRecord, 16> uniform_records;
+    // Consumer-only revision history; parser never reads it. Resolver outlives jobs.
+    VideoCommon::GraphicsUniformBindingVersions* uniform_applied_versions{};
 
     bool job_bindings{false};
     bool check_job_bindings{false};

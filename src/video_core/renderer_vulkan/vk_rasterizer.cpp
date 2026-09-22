@@ -312,6 +312,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
     // update engine as channel may be different.
     pipeline->SetEngine(maxwell3d, gpu_memory);
     draw_ctx.Reset(maxwell3d, gpu_memory);
+    if (resolver && resolver->job_bindings_enabled) {
+        resolver->ApplyPendingUniformInputs();
+    }
     // (local-only) P2 phase split: resolve (binding lookups) then tail
     // (uploads + scheduler records), synchronously.
     pipeline->ConfigureResolve(draw_ctx, is_indexed);
@@ -341,7 +344,7 @@ void RasterizerVulkan::EnsureResolver() {
     resolver->check_enabled = token_check_enabled;
     const char* job_bindings{std::getenv("EDEN_TOKEN_JOB_BINDINGS")};
     if (job_bindings && job_bindings[0] == '1' && job_bindings[1] == '\0') {
-        resolver->EnableJobBindings();
+        resolver->EnableJobBindings(*maxwell3d);
         LOG_INFO(Render_Vulkan, "DrawToken job bindings enabled: check={}", token_check_enabled);
     }
     const char* batch{std::getenv("EDEN_TOKEN_BATCH")};
@@ -665,6 +668,9 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
     std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
     pipeline->SetEngine(maxwell3d, gpu_memory);
     draw_ctx.Reset(maxwell3d, gpu_memory);
+    if (resolver && resolver->job_bindings_enabled) {
+        resolver->ApplyPendingUniformInputs();
+    }
     pipeline->ConfigureResolve(draw_ctx, is_indexed);
     FinishDrawLocked(*maxwell3d, *pipeline, draw_ctx, is_indexed, instance_count);
     gpu.TickWork();
@@ -1050,11 +1056,20 @@ void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
 
 void RasterizerVulkan::BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr gpu_addr,
                                                  u32 size) {
+    if (resolver && resolver->job_bindings_enabled) {
+        // Parser input only. Do not wait for or overwrite an older draw's bindings.
+        resolver->BindUniformInput(stage, index, gpu_addr, size);
+        return;
+    }
     FlushPendingDraw();
     buffer_cache.BindGraphicsUniformBuffer(stage, index, gpu_addr, size);
 }
 
 void Vulkan::RasterizerVulkan::DisableGraphicsUniformBuffer(size_t stage, u32 index) {
+    if (resolver && resolver->job_bindings_enabled) {
+        resolver->DisableUniformInput(stage, index);
+        return;
+    }
     FlushPendingDraw();
     buffer_cache.DisableGraphicsUniformBuffer(stage, index);
 }
@@ -2371,6 +2386,10 @@ void RasterizerVulkan::BindChannel(Tegra::Control::ChannelState& channel) {
     const s32 channel_id = channel.bind_id;
     if (maxwell3d != &channel.payload->maxwell_3d) {
         // The resolver owns a reference to its source channel's memory manager.
+        if (resolver && resolver->job_bindings_enabled) {
+            std::scoped_lock lock{buffer_cache.mutex};
+            resolver->ApplyPendingUniformInputs();
+        }
         resolver.reset();
     }
     BindToChannel(channel_id);
@@ -2387,6 +2406,10 @@ void RasterizerVulkan::BindChannel(Tegra::Control::ChannelState& channel) {
 
 void RasterizerVulkan::ReleaseChannel(s32 channel_id) {
     FlushPendingDraw();
+    if (resolver && resolver->job_bindings_enabled) {
+        std::scoped_lock lock{buffer_cache.mutex};
+        resolver->ApplyPendingUniformInputs();
+    }
     resolver.reset();
     EraseChannel(channel_id);
     {

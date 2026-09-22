@@ -108,12 +108,13 @@ public:
     // Returns false and logs on the first divergent register.
     bool VerifySnapshot(const Tegra::Engines::Maxwell3D& engine);
 
-    // Called once by EnsureResolver after check_enabled is configured.
-    void EnableJobBindings() {
-        job_bindings_enabled = true;
-        job.ctx.job_bindings = true;
-        job.ctx.check_job_bindings = check_enabled;
-    }
+    // Called once by EnsureResolver after check_enabled is configured; seeds
+    // bind-time inputs from the current channel before parser interception.
+    void EnableJobBindings(const Tegra::Engines::Maxwell3D& engine);
+    void BindUniformInput(size_t stage, u32 index, GPUVAddr addr, u32 size);
+    void DisableUniformInput(size_t stage, u32 index);
+    // GPU-only, caller drained all jobs and holds B; for fallback/channel handoff.
+    void ApplyPendingUniformInputs();
 
     SnapshotMode snapshot_mode{SnapshotMode::Journal};
     bool check_enabled{false};
@@ -172,6 +173,14 @@ private:
     TextureCache& texture_cache;
     StateTracker& state_tracker;
     std::unique_ptr<Tegra::Engines::Maxwell3D> shadow;
+
+    // GPU-owned parser mirror. Keep translated bind-time inputs, not host IDs.
+    std::array<std::array<VideoCommon::GraphicsUniformBindingRecord,
+                          VideoCommon::NUM_GRAPHICS_UNIFORM_BUFFERS>, VideoCommon::NUM_STAGES>
+        uniform_inputs{};
+    std::array<u32, VideoCommon::NUM_STAGES> uniform_pending{};
+    VideoCommon::GraphicsUniformBindingVersions uniform_applied_versions{};
+    void CaptureUniformInputs(DrawContext& ctx, const std::array<u32, 5>& used);
 
     Job job;
     std::atomic<Phase> job_phase{Phase::Idle};

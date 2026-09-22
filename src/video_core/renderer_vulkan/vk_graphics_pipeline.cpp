@@ -46,6 +46,13 @@ struct JobBindingsDiag {
     u64 records_applied{};
     u64 equivalence_checks{};
     u64 equivalence_mismatches{};
+    u64 uniform_records_captured{};
+    u64 uniform_records_applied{};
+    u64 uniform_updates_applied{};
+    u64 uniform_disables_applied{};
+    u64 uniform_enabled_records_captured{};
+    u64 uniform_equivalence_checks{};
+    u64 uniform_equivalence_mismatches{};
 };
 thread_local JobBindingsDiag job_bindings_diag;
 } // namespace
@@ -56,10 +63,43 @@ void LogJobBindingsDiag() {
         diag.events != diag.last_reported) [[unlikely]] {
         LOG_INFO(Render_Vulkan,
                  "DrawToken job bindings diag: events={} records_captured={} records_applied={} "
-                 "equivalence_checks={} equivalence_mismatches={}",
+                 "equivalence_checks={} equivalence_mismatches={} "
+                 "uniform_records_captured={} uniform_records_applied={} "
+                 "uniform_updates_applied={} uniform_disables_applied={} "
+                 "uniform_enabled_records_captured={} uniform_equivalence_checks={} "
+                 "uniform_equivalence_mismatches={}",
                  diag.events, diag.records_captured, diag.records_applied,
-                 diag.equivalence_checks, diag.equivalence_mismatches);
+                 diag.equivalence_checks, diag.equivalence_mismatches,
+                 diag.uniform_records_captured, diag.uniform_records_applied,
+                 diag.uniform_updates_applied, diag.uniform_disables_applied,
+                 diag.uniform_enabled_records_captured, diag.uniform_equivalence_checks,
+                 diag.uniform_equivalence_mismatches);
         diag.last_reported = diag.events;
+    }
+}
+
+void RecordUniformBindingsCapture(
+    std::span<const VideoCommon::GraphicsUniformBindingRecord> records) {
+    job_bindings_diag.uniform_records_captured += records.size();
+    for (const auto& record : records) {
+        job_bindings_diag.uniform_enabled_records_captured += record.enabled;
+    }
+}
+
+void ApplyJobUniformBindings(BufferCache& cache,
+                             std::span<const VideoCommon::GraphicsUniformBindingRecord> records,
+                             VideoCommon::GraphicsUniformBindingVersions& applied, bool check) {
+    for (const auto& record : records) {
+        if (applied[record.stage][record.index] != record.revision) {
+            ++job_bindings_diag.uniform_updates_applied;
+            job_bindings_diag.uniform_disables_applied += !record.enabled;
+        }
+    }
+    const bool equivalent = cache.ApplyGraphicsUniformBindings(records, applied, check);
+    job_bindings_diag.uniform_records_applied += records.size();
+    if (check) {
+        job_bindings_diag.uniform_equivalence_checks += records.size();
+        job_bindings_diag.uniform_equivalence_mismatches += !equivalent;
     }
 }
 
@@ -563,6 +603,9 @@ bool GraphicsPipeline::ConfigureImpl(DrawContext& ctx, bool is_indexed,
     }
 
     if (job_bindings) {
+        ApplyJobUniformBindings(buffer_cache,
+                                {ctx.uniform_records.data(), ctx.uniform_records.size()},
+                                *ctx.uniform_applied_versions, ctx.check_job_bindings);
         const bool equivalent = buffer_cache.ApplyGraphicsTextureBufferBindings(
             std::span<const VideoCommon::ResolvedTextureBufferBinding>{
                 ctx.texture_buffer_records.data(), ctx.texture_buffer_records.size()},

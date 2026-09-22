@@ -89,6 +89,19 @@ struct TextureBufferBinding : Binding {
     PixelFormat format = PixelFormat::Invalid;
 };
 
+using GraphicsUniformBindingVersions =
+    std::array<std::array<u64, NUM_GRAPHICS_UNIFORM_BUFFERS>, NUM_STAGES>;
+
+// Parser input: translation belongs to the bind event, not the later upload.
+// Revision distinguishes an explicit same-address rebind from an unchanged draw.
+struct GraphicsUniformBindingRecord {
+    Binding binding;
+    u64 revision{};
+    u32 stage{};
+    u32 index{};
+    bool enabled{};
+};
+
 // Resolved under B at resolve time; applying this record performs no translation.
 struct ResolvedTextureBufferBinding {
     TextureBufferBinding binding;
@@ -235,6 +248,13 @@ public:
     std::optional<VideoCore::RasterizerDownloadArea> GetFlushArea(DAddr device_addr, u64 size);
 
     bool InlineMemory(DAddr dest_address, size_t copy_size, std::span<const u8> inlined_buffer);
+
+    // Resolve reads only the channel's stable MemoryManager; no materialized writes.
+    Binding ResolveGraphicsUniformBufferBinding(GPUVAddr gpu_addr, u32 size) const;
+    void ApplyGraphicsUniformBufferBinding(size_t stage, u32 index, const Binding& binding);
+    auto CopyGraphicsUniformBindings() const { return channel_state->uniform_buffers; }
+    bool ApplyGraphicsUniformBindings(std::span<const GraphicsUniformBindingRecord> records,
+                                     GraphicsUniformBindingVersions& applied, bool check);
 
     void BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr gpu_addr, u32 size);
 

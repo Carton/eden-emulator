@@ -3379,3 +3379,79 @@ apply 时刻，避免 resolve→tail 间失效误报 buffer_id）。28 TU touch 
   排障时先怀疑 grep 而非日志缺失。
 - CDN 截图复核再次 1210（签名锁死反斜杠路径），本地 shot_compare 替代；
   跨 24h 的 streamcut2 对照仅作形态参考（WARN 4.9-7.6），结论只认背靠背。
+
+
+### 33.6 Tail-on-worker stage 2 uniform input split (source only)
+
+User-supplied Stage 1 acceptance: 416cd43ca9, 17,170,432 equivalence checks,
+0 mismatches, gate-only QA below the same-mode floor, clean B/A=1.0049.
+Important limitation: records_captured=0 throughout the pond/load scene;
+texture-buffer checker coverage was the empty-record case only. This source
+round starts from 93be586af1 and targets actual uniform traffic. No build,
+game run, commit, or header touch closure performed; acceptance remains pending.
+
+Under the existing strict EDEN_TOKEN_JOB_BINDINGS=1 gate, parser CB bind/unbind
+updates a GPU-owned DrawResolver input mirror instead of draining the previous
+draw and overwriting its materialized channel.uniform_buffers. Capture copies
+shader-used slots plus pending changed slots (including inactive/disabled slots)
+into each job. Tail start applies those records under its existing B/T locks.
+No tail move, worker execution change, new resolve-ahead, or env default change.
+
+Why the small mirror is necessary: Maxwell snapshot CB state contains guest
+address/size/enabled, but not bind-time translated DAddr, nor the identity of an
+explicit same-address rebind. Legacy Bind performs that translation immediately
+and resets BufferId on EVERY bind event. The mirror retains the translated
+Binding and a per-slot revision; each job owns an immutable copy. Consumer-only
+applied revisions prevent reapplying unchanged records over valid cached host
+IDs. Explicit rebind resets the ID; disable installs NULL_BINDING. Multiple
+parser writes before the next draw coalesce to the final assignment. Capture
+never reads consumer revision history. This is not a second guest-byte or epoch
+cache; uploads continue through exactly the existing UBO helpers.
+
+First activation seeds from existing channel bindings, preserving legacy CB
+callbacks before the first token draw. After activation, translation uses the
+same helper and same parser event timing without acquiring B/T (it reads only
+the channel-stable MemoryManager). Channel switches still drain before changing
+that pointer. Synchronous graphics fallback/indirect preparation materializes
+pending parser inputs under existing B/T; channel switch/release materializes
+pending inputs under B before discarding the resolver, including bind events
+with no subsequent draw. No foreign invalidation callback accesses the mirror.
+
+Checker: isolated scratch binding arrays and revision history implement the
+legacy bind/disable/no-event transitions independently of the Apply helper.
+Comparison includes address, size, retained/reset BufferId, untouched slots and
+revision history. No duplicate translation or guest reads. Mismatches return a
+boolean and increment diagnostics, never assert/throw. This checks application
+semantics, not an independently translated oracle for guest addresses.
+
+JobBindingsDiag retains its 65536 capture/apply-phase-event INFO cadence and
+thread-local storage. New fields: uniform_records_captured, uniform_records_applied,
+uniform_enabled_records_captured, uniform_updates_applied, uniform_disables_applied,
+uniform_equivalence_checks, uniform_equivalence_mismatches. Checks count records
+examined; mismatches count failing apply batches. Enabled-record and actual-update
+counts distinguish real UBO coverage from empty/no-event checks. Uniform capture
+and current tail application both run on GPU, including worker-resolve modes;
+texture capture remains on the selected resolve thread. Captured/applied totals
+may differ by in-flight jobs at an intermediate diagnostic point.
+
+Static checks: git diff --check passed. Exact-source comparisons confirmed the
+UBO upload/CBPG source lookup and counters, SSBO translation cuts, texture helper
+bodies, resolver worker/bridge/poisoning, existing tail body, CommitPendingDraw and
+FlushPendingDraw are unchanged. No compiled-code, runtime or performance claim.
+CBPG eligible-path behavior is preserved, but numeric counts across different
+epoch settings/schedules must be measured rather than assumed identical.
+
+Files changed: buffer_cache_base.h, buffer_cache.h, vk_graphics_pipeline.h/.cpp,
+vk_draw_resolver.h/.cpp, vk_rasterizer.cpp, PROFILE_PROGRESS.md. No scheduler,
+MemoryManager, parser engine, descriptor-table or staging implementation changed.
+
+Remaining stage 2b order: (1) classify/materialize geometry/index/XFB and storage
+bindings as persistent consumer state, capture indirect parameters before moving
+that path; (2) split worker residual dirty carry from GPU Retire/live flag writes;
+(3) isolate descriptor reuse/allocator and query/scheduler producer ownership and
+cold pipeline handoff. Stage 3 then runs the full tail on the worker with immediate
+GPU rendezvous before removing that rendezvous. Current uniform host-binding
+masks/sizes/reuse history remain persistent consumer state, not per-job copies.
+Acceptance still needs same-address rebind, disable/re-enable, depth >1, fallback,
+channel switch with pending no-draw updates, image QA and interleaved A/B. Header
+consumers must be rebuilt using the established reverse-include touch procedure.

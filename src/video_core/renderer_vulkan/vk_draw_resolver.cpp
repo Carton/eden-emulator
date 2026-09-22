@@ -4,6 +4,7 @@
 #include "video_core/renderer_vulkan/vk_draw_resolver.h"
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -370,6 +371,9 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
         e.job.is_indexed = indexed;
         e.job.instance_count = instances;
         e.job.ctx.Reset(e.engine.get(), &owner.gpu_memory);
+        if (owner.job_bindings_enabled) {
+            owner.CaptureUniformInputs(e.job.ctx, pipeline->UniformBufferMasks());
+        }
         e.job.epoch_valid = false;
         e.epoch.short_circuit = owner.epoch_table.short_circuit;
         e.copies = e.epoch.diag_copies;
@@ -658,6 +662,67 @@ DrawResolver::DrawResolver(Tegra::MemoryManager& gpu_memory_, BufferCache& buffe
     : gpu_memory{gpu_memory_}, buffer_cache{buffer_cache_}, texture_cache{texture_cache_},
       state_tracker{state_tracker_}, shadow{std::make_unique<Tegra::Engines::Maxwell3D>(gpu_memory_)} {}
 
+void DrawResolver::EnableJobBindings(const Tegra::Engines::Maxwell3D& engine) {
+    job_bindings_enabled = true;
+    job.ctx.job_bindings = true;
+    job.ctx.check_job_bindings = check_enabled;
+    // First activation can follow legacy CB callbacks, including a channel rebind.
+    std::scoped_lock lock{buffer_cache.mutex};
+    const auto bindings = buffer_cache.CopyGraphicsUniformBindings();
+    for (u32 stage = 0; stage < VideoCommon::NUM_STAGES; ++stage) {
+        for (u32 index = 0; index < VideoCommon::NUM_GRAPHICS_UNIFORM_BUFFERS; ++index) {
+            uniform_inputs[stage][index] = {
+                bindings[stage][index], 0, stage, index,
+                engine.state.shader_stages[stage].const_buffers[index].enabled};
+        }
+    }
+}
+
+void DrawResolver::BindUniformInput(size_t stage, u32 index, GPUVAddr addr, u32 size) {
+    auto& input = uniform_inputs[stage][index];
+    input.binding = buffer_cache.ResolveGraphicsUniformBufferBinding(addr, size);
+    input.enabled = true;
+    ++input.revision;
+    uniform_pending[stage] |= 1U << index;
+}
+
+void DrawResolver::DisableUniformInput(size_t stage, u32 index) {
+    auto& input = uniform_inputs[stage][index];
+    input.binding = VideoCommon::NULL_BINDING;
+    input.enabled = false;
+    ++input.revision;
+    uniform_pending[stage] |= 1U << index;
+}
+
+void DrawResolver::CaptureUniformInputs(DrawContext& ctx, const std::array<u32, 5>& used) {
+    ctx.uniform_records.clear();
+    for (u32 stage = 0; stage < VideoCommon::NUM_STAGES; ++stage) {
+        u32 mask = used[stage] | uniform_pending[stage];
+        while (mask != 0) {
+            const u32 index = std::countr_zero(mask);
+            ctx.uniform_records.push_back(uniform_inputs[stage][index]);
+            mask &= mask - 1;
+        }
+    }
+    uniform_pending.fill(0);
+    ctx.uniform_applied_versions = &uniform_applied_versions;
+    RecordUniformBindingsCapture({ctx.uniform_records.data(), ctx.uniform_records.size()});
+}
+
+void DrawResolver::ApplyPendingUniformInputs() {
+    ASSERT(!ResolveInFlight());
+    if (std::all_of(uniform_pending.begin(), uniform_pending.end(),
+                    [](u32 mask) { return mask == 0; })) {
+        return;
+    }
+    // Only pending parser events, never replay all inputs over cached host IDs.
+    DrawContext pending;
+    CaptureUniformInputs(pending, {});
+    ApplyJobUniformBindings(buffer_cache,
+                            {pending.uniform_records.data(), pending.uniform_records.size()},
+                            uniform_applied_versions, check_enabled);
+}
+
 DrawResolver::~DrawResolver() {
     WaitResolved();
     worker.reset();
@@ -791,6 +856,9 @@ bool DrawResolver::SnapshotAndEnqueue(Tegra::Engines::Maxwell3D& engine,
     job.is_indexed = is_indexed;
     job.instance_count = instance_count;
     job.ctx.Reset(shadow.get(), &gpu_memory);
+    if (job_bindings_enabled) {
+        CaptureUniformInputs(job.ctx, pipeline->UniformBufferMasks());
+    }
     job_phase.store(Phase::Resolving, std::memory_order_release);
     if (++diag_kicks % 2000 == 0) {
         LOG_INFO(Render_Vulkan,
