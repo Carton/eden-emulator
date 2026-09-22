@@ -3283,3 +3283,99 @@ MWAITX 用户态 C1 等待分支——线程打盹期间仍被记账为运行（
   每 65536 次输出 `CBPG diag`（path 区分）。通用 ImmediateUploadMemory 未动；该数据不直接
   等于 read_handle CB 页缓存命中率，也未缓存地址或字节。各线程/模板实例分别累计。
 - `git diff --check` 通过；无实测收益结论。用户负责运行 touch_includers.py 重编头文件闭包及验收。
+
+## 33. 2B tail-on-worker 设计定案 + Stage 1 实施（2026-09-22）
+
+**背景**：三遗留项 rot7 关闭后用户放行 tail-on-worker（"无项阻挡"）。分支
+test/p2-draw-resolver @168faf7756 起步；串行基线快档 43.8fps/med 22.50ms。
+
+### 33.1 设计轮（codex resume 01a0bd33，delta 简报）
+
+产出 789 行设计文档，全文存 **F:\prof\codex_tail_on_worker_design.md**。要点：
+
+- **选型：分阶段走向 worker 全权 draw 发射**（steady state：GPU 线程只
+  parse→snapshot→enqueue→发布前缀；worker 按 FIFO 执行完整 draw job =
+  Resolve(N)→Epoch(N)→Tail(N)；VulkanWorker 执行已发布命令）。否决"tail 留
+  GPU 只做 resolve-ahead"作为终点（tail 仍占指令瓶颈的 GPU 线程、B/T 争用
+  仍在、私有 chunk 隔离不了 render-pass/描述符/查询状态）。
+- **对我方两个前提的修正（重要）**：① epoch 槽不使 tail 成纯函数（只保住
+  uniform 字节；tail 还读顶点/索引/SSBO 描述符、改资源缓存、推进上传与描述符
+  分配器、动 scheduler/查询状态）；② 单 worker 无法同时执行 tail N 与
+  resolve N+1——真正的重叠对象是 GPU 线程对后续 draw 的 parse/snapshot。
+- **绑定三分法**：job 不可变输入 / worker 持久发射状态（跨 draw 复用，不随
+  job 复制重置，否则 all-dirty 回归换个形态回来）/ 共享资源库（留在 B/T 下，
+  区分 epoch 字节 vs 资源 generation vs 生命周期 pin 三个概念）。
+- **队列四序号**：enqueued/executed/published/reclaimed 分离；执行可超越发布；
+  容量须计入 completed-but-unpublished（否则私有命令存储无界增长）。
+- **锁协议**：J/B/T/R/Q/E/S 全序表 + 禁止边（J→B/T、GPU 持 B/T 等 worker
+  服务、E→J/B/T、S→resolver 等待等）；死锁论证条件=审计所有 tail 生成
+  lambda（pipeline build_mutex 在 VulkanWorker 内等待的路径必须证明不依赖被
+  阻塞的 draw worker，否则发射前强制就绪屏障）。
+- **6 阶段**：1 job-private TBO records（EDEN_TOKEN_JOB_BINDINGS）→ 2 parser
+  输入/发射状态分离 → 3 worker tail 即时会合（正确性里程碑，允许更慢）→
+  4 worker 独立推进 FIFO → 5 逐项移除已证明不必要的等待 → 6 可选第二执行道
+  （真 resolve/tail 并行，明确"worker emission ≠ parallel resolve+tail"）。
+- **天花板**：0.8µs/draw 结构残差≈2.4ms/frame（43.8fps 时 ~10.5% 帧时长）；
+  诚实模型 frame=max(GPU parse/snapshot, worker resolve+epoch+tail,
+  VulkanWorker, device)+暴露停顿；GPU 固有=parse/journal/管线 key/发布簿记。
+  FlushCaching 排干初期保持现状语义（本场景重大限速项，异步化需先证读集）。
+
+### 33.2 Stage 1 实施（codex，commit 416cd43ca9）
+
+TBO 解析/应用拆分：resolve 在 B 下产出 `ResolvedTextureBufferBinding` 记录
+（同一翻译时刻，零额外翻译），tail 起点批量 Apply（reset_stages 先清 mask 再
+置位，与旧逐 stage 序语义等价）；legacy 入口=两者组合，行为不变。checker
+（EDEN_TOKEN_CHECK=1）在隔离 scratch 上独立复算旧转移规则再对比（seed 在
+apply 时刻，避免 resolve→tail 间失效误报 buffer_id）。28 TU touch 闭包重建，
+零警告零错误。
+
+### 33.3 Stage 1 验收（2026-09-22 晚）
+
+- **2bs1-check（inline+gate+CHECK）**：fps 29.41/med 33.33（check 开销，
+  正确性臂不进结论）；**equivalence_checks=17,170,432，mismatches=0**；
+  pipelined=17,198,383/fallbacks=0；无断言（2 条=老面孔 settings dump +
+  LAN protocol stub）。
+- **覆盖缺口（诚实记录）**：`records_captured=0`——水塘场景（含加载画面）
+  管线无 TBO/image-buffer 描述符，记录路径零真实流量；等价只验证了"空记录+
+  无 stage 复位"退化情形。TBO 真流量验证顺延（Stage 2 的 uniform 绑定每 draw
+  必发，才是等价机制的真实验场）。
+- **图像 QA（背靠背）**：同模地板 golden×2 PASS（bad% 3.1-4.8）；跨模
+  golden vs jobbind WARN（4.3-6.9），形态与历史 token-vs-serial 图像差一致，
+  无损坏签名。
+- **首场 A/B（对臂设计错误，弃用为 gate 结论）**：golden(无 token) vs
+  inline+gate：B/A 中位 ≈0.854（-14.6%）——量到的是**已知 INLINE token
+  模式成本**（med 22.50→26.66，+4.16ms/frame ≈1.2µs/draw×3000+量化栅格），
+  与 §28.20.2 的 -12.4% 传承一致，非 Stage 1 回归。顺带获得快档下
+  serial-vs-INLINE-token 参照：43.5-43.8 vs 37.0-37.5 fps。
+- 修正版 A/B（inline-base vs inline+gate，仅 gate 差异）：见 33.4。
+- 会话插曲：2 局 B 臂被用户输入 VOID（工具自动重试补齐）；事后核对 valid 局
+  截图无桌面污染。
+
+### 33.4 修正版 A/B：gate 中性确认（2026-09-22 深夜）
+
+对臂：A=inline-base（EDEN_DRAW_TOKEN=inline）vs B=2bs1-gate（+EDEN_TOKEN_JOB_BINDINGS=1），
+仅 gate 差异。结果 **2/3 对**（第 3 对重试也被用户输入 VOID 耗尽——今晚机器上有人，
+共 4 局 VOID）：
+- pair 1：B/A=1.0555 —— A 臂 med 28.33 离群（其余 inline 局 25.8-26.7），该臂
+  21:33 紧接上一场 A/B 收尾，疑受扰动；
+- pair 2（干净对，双臂 med 26.66）：**B/A=1.0049**；
+- 2/3 中位 1.0302 由 pair 1 的 A 臂离群驱动，不作数。
+
+**判定：gate 中性（条件通过）**——机制层面本场景 records=0，gate 成本=每 draw
+一次分支+两次计数器自增，物理上必在带内；干净对 1.0049 佐证。留一个尾巴：
+静置窗口补 3 对干净交错对（非阻塞：gate 默认关，Stage 2 是源码工作）。
+
+**同模 gate-only 图像 QA（pair 2 双臂）**：PASS，bad% 2.35-3.38，低于同模
+地板（3.1-4.8）——gate 开关画面本质相同。Stage 1 三门验收：等价 ✓ / 图像 ✓ /
+性能 中性（条件）。
+
+**快档 serial-vs-INLINE-token 参照（顺带获得）**：43.5-43.8 vs 37.0-37.6 fps
+（med 22.50 vs 26.66），即当前串行切口后的 token INLINE 代价 ≈4.16ms/frame
+——tail-on-worker 各阶段的对照组就以此为本。
+
+### 33.5 本轮坑
+
+- **eden_log.txt 含 NUL 字节**：grep 不加 `-a` 静默无输出（连计数都不打），
+  排障时先怀疑 grep 而非日志缺失。
+- CDN 截图复核再次 1210（签名锁死反斜杠路径），本地 shot_compare 替代；
+  跨 24h 的 streamcut2 对照仅作形态参考（WARN 4.9-7.6），结论只认背靠背。
