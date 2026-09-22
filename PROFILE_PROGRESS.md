@@ -3610,3 +3610,46 @@ not authorize removing the immediate wait.
 Files: vk_draw_resolver.h/.cpp, vk_graphics_pipeline.h/.cpp, vk_rasterizer.cpp,
 PROFILE_PROGRESS.md. No source prerequisite remains before this stage-3 commit;
 build/runtime acceptance is pending. All gates stay default-off per stop-loss.
+
+### 33.10 Stage 3 验收：worker tail 即时会合——机制成立（2026-09-23 凌晨）
+
+codex 直上 Stage 3（跳过独立 2b，理由=等待期间独占所有权使 2b 的分离
+对即时会合结构不必要；几何/索引/XFB/存储绑定作为持久消费者状态留在 B/T 下
+随 worker 走；间接/inline-index draw 保留 GPU fallback）。commit 8962d2d93f
+（6 文件 +235/-4，12 TU touch 重建零错）。
+
+**机制**（细节见 codex PROFILE 段 §33.9）：
+- `EDEN_TOKEN_TAIL_WORKER=1`（严格值）隐含 JOB_BINDINGS/WORKER/BATCH，
+  强制关 PIPELINE（警告）；worker 在既有 capture+B/T 作用域内执行完整
+  resolve+tail（StateTracker RAII 换 shadow flags、query TLS 与 uniform
+  epoch 指向 job 快照）；GPU 立即等待，完成后只做退休（FinishJob 状态转移
+  +TickWork），不重复发射；失败 poison 整个 resolver，禁止重放已提交前缀。
+- 新增非致命 draw-input checker：live vs shadow 的直接 draw 参数对比。
+
+**验收（2bs3-check/2bs3-bare，均 valid、优雅关闭正常）**：
+- **worker_tails=5,177,344 全部在 worker 完成，0 失败 0 段错误**；
+- draw_input_checks=5,177,344，**mismatches=0**；
+- 寄存器快照校验 kicks=5,188,000 **mismatches=0**（resyncs=1）；
+- uniform 等价（apply 侧已随 tail 移到 worker 线程流）：25,489,123 次
+  **mismatches=0**（≈4.9 条/draw 与 stage 2 一致）；
+- fallbacks=0 / sync_requests=0 / pipelined=6,060,471（bare 局）——本场景
+  未触发间接 draw fallback 与 bridge 请求（覆盖缺口，见下）；
+- 图像 QA：vs 37fps 参照 WARN 8.4-10.9 —— **同模地板实验定案为相位漂移**：
+  2bs3-check(8.28fps) vs 2bs3-bare(9.60fps) 同速对比同样 WARN 4.1-10.1 且
+  随索引上升（速度差 16% × 80s ≈ 13s 游戏时差累积）；两对比 worst 均
+  ~150-160 无局部热点 → 无损坏签名；luma 56.81/57.06 同档。
+
+**性能（记录，不设门——设计即声明正确性里程碑允许更慢）**：
+- check 臂 8.28fps/med 119ms；bare 臂 9.60fps/med 103ms（checker 占 ~14%）；
+- 每帧 ~3200 draw → 裸模式 ~32µs/draw 全在会合（resolve 1.13µs + worker
+  tail 5.12µs + ~26µs 停车/唤醒/簿记）——与 1B 时代 37µs 会合成本传承一致。
+  **去掉立即等待 = Stage 4**（worker 独立推进 FIFO），架构按计划推进。
+
+**覆盖缺口（诚实记录，均"水塘场景不触发"类）**：间接/inline-index 的 GPU
+fallback 路径（fallbacks=0）、bridge 请求（sync_requests=0，每 draw 发射
+命令但描述符环未溢出）、UBO disable 事件、TBO 记录。Stage 4 前不必补，
+但**直上 Stage 4 前必须**跑一次非水塘场景（含间接 draw 的战斗/神庙）。
+
+**tail-on-worker 里程碑状态**：设计 ✓ → Stage 1 ✓（416cd43ca9）→ Stage 2 ✓
+（dea7a9deb6）→ **Stage 3 ✓ 机制成立**（8962d2d93f）。下一步 Stage 4
+（执行游标与发布/回收分离，去掉立即等待），是第一条真正可能出性能的臂。
