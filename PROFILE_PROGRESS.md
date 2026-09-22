@@ -3455,3 +3455,65 @@ masks/sizes/reuse history remain persistent consumer state, not per-job copies.
 Acceptance still needs same-address rebind, disable/re-enable, depth >1, fallback,
 channel switch with pending no-draw updates, image QA and interleaved A/B. Header
 consumers must be rebuilt using the established reverse-include touch procedure.
+
+### 33.7 Stage 1 定案补测 + Stage 2 实施验收（2026-09-22 深夜二）
+
+**Stage 1 gate 中性定案**（静置窗口，3/3 干净对，用户离开）：
+B/A = 0.9970 / 1.0002 / 1.0124，**中位 1.0002**——±2% 带内，定案。
+Stage 1 三门（等价/图像/性能）全部关闭。
+
+**Stage 2 实施**（codex，commit dea7a9deb6，8 文件 +319/-12）：
+- parser 的 `RasterizerVulkan::BindGraphicsUniformBuffer/Disable`（gate on）改投
+  `DrawResolver` 输入镜像（翻译好的 Binding + 每 slot revision 计数），**不再
+  FlushPendingDraw+直接改 channel uniform_buffers**（这是解耦本体：parser 事件
+  不再排干前驱 tail）；
+- 快照 CB 状态不足以表达"同地址重绑必须重置 BufferId"与 bind 时刻翻译——
+  镜像保留两者；job 捕获 used∪pending 槽位记录，tail 起点在既有 B/T 下
+  revision 门控应用（revision 未变→保留已缓存 host BufferId，变→重绑语义重置）；
+  首次激活从 channel 现值 seed（revision 0=已应用，首 draw 不重复写）；
+- 同步 fallback（PrepareDraw/Draw）与 channel 切换/释放前 ApplyPendingUniformInputs
+  材料化未消费事件（含无后续 draw 的 bind）；
+- EnableJobBindings 新增 scoped_lock{B} seed——EnsureResolver 调用点（Draw() 入口）
+  无锁上下文，安全（核实过）；
+- checker：隔离 scratch 独立复算 legacy bind/disable/无事件转移规则，对比含
+  address/size/保留或重置的 BufferId/未触碰槽位/版本史；新增 7 个 uniform 计数。
+
+**Stage 2 验收（2bs2-check，inline+gate+CHECK，dea7a9deb6 构建 22:46）**：
+- **真实流量**：uniform_records_captured=**74,918,061**（≈4.95 条/draw），
+  applied 全量；**uniform_equivalence_checks=74.9M、mismatches=0**；
+- revision 门真实行使 uniform_updates_applied=24,311,880（缓存保留+重绑两条
+  路径都有流量；disable 事件本场景 0 次）；TBO 侧仍 0（该场景无 TBO，不变）；
+- pipelined=15.13M、无崩溃断言；tail_avg_ns 1703→1867（check 开销臂，
+  +164ns/draw=74.9M/15.1M 记录的 scratch 检查，中性 A/B 用 check=false 不受此影响）；
+- 局 VOID：优雅关闭超时强杀（已知问题#1，帧 CSV 不可靠；计数器/截图不受影响）；
+- 图像 QA vs 30 分钟前的 stage1-gate 臂：WARN 4.1-7.8（混 check 开关+相位差，
+  正式 QA 以下方 A/B 同模对臂为准）。
+
+**Stage 2 中性 A/B**（inline-base vs 2bs2-gate，新 exe）：见 §33.8。
+
+### 33.8 Stage 2 中性 A/B 定案（2026-09-22 深夜三）
+
+3/3 对（静置，新 exe dea7a9deb6）：A 臂 med 25.83/25.84/26.67，B 臂 med
+**全部 26.66-26.67**；B/A = 0.9716 / 0.9740 / 0.9999，**中位 0.9740（-2.6%）**。
+
+**判读：量化栅格伪影，非真实 -2.6%**（§23.4 纪律的教科书案例）：
+- 两对 A 臂落在 25.83/25.84（31 栅格），gate 使 med 上移恰好一步到 26.66
+  （32 栅格），一步比值 25.83/26.66=0.969 ≈ 观测 0.9716/0.9740；
+- 第三对 A 臂本身已在 26.67（近带心），B 臂同栅格 → 0.9999；
+- 机制估算（check=false）：每 draw 捕获 ~4.95 条记录（small_vector 内联容量
+  16，无堆）+ revision 门控应用迭代 ≈ 100ns 级 → ≤1% 帧时，亚栅格；
+- B 臂 gate 完整行使（uniform_records_captured=109.7M，无 check 开销）。
+
+**Stage 2 三门验收**：等价 ✓（74.9M 真实流量 0 失配）/ 图像 ✓（同栅格背靠背
+对 PASS 3.3-4.5，带内）/ 性能：真实成本亚栅格（≤1%），中位数因栅格步进出带
+（0.974）。按止损条款处置：**gate 保持默认关**（本就如此），不挡 stage 推进；
+若后续阶段需要压掉这 ~≤1%，候选项=只捕获 pending 变更槽（job 携带 used 槽是
+为 stage 3+ 的 worker 输入完整性，inline 下是纯开销）——记为 stage 3 前的可选
+微切口，不单独立项。
+
+**tail-on-worker 进度标记**：设计定案（§33.1）→ Stage 1 落地+三门全过
+（416cd43ca9）→ Stage 2 落地+等价/图像过、性能亚栅格（dea7a9deb6）。
+下一阶段 = 2b（几何/索引/XFB 绑定 + 残余 dirty 分离）或直上 Stage 3
+（worker tail 即时会合，正确性里程碑）——按 codex §33.6 的顺序建议先 2b-1
+（几何/索引/XFB 分类），Stage 3 前需先补 disable/re-enable、深度>1、
+channel 切换带 pending 事件的定向场景验证。
