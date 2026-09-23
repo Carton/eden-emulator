@@ -3910,3 +3910,41 @@ same-mode image floor / interleaved A/B remain required; no default changes.
 Files changed: gpu.h/.cpp, gpu_thread.h/.cpp, rasterizer_interface.h,
 renderer_vulkan/renderer_vulkan.cpp, renderer_vulkan/vk_rasterizer.h/.cpp,
 renderer_vulkan/vk_scheduler.h/.cpp (all under src/video_core), plus this record.
+
+### 33.13 Stage 4 验收定案（2026-09-24 凌晨）
+
+**历程**：首验崩溃 0xC0000005（加载期/首 draw 前、串行也崩）→ 手动复现 100%
+→ 反向构建链接错误暴露 ABI 缝合怪 → 全量删 obj 重建后串行不崩（frankenbuild
+定案，AGENTS 新规：宽影响面头文件一律删 obj 重建，勿信闭包 touch；机制未定位：
+闭包 48 TU 全部"已编"仍崩，miss 点不明）→ 干净构建上 stage-4 真实崩溃
+0xC0000409，日志铁证 = DLB 同步 flush 撞生产者 loan（sync_flushes 4→6 的
+瞬间 `assert DrawToken semantic producer used without tail FIFO handoff`）
+→ codex 修复 GPU-service handoff（d0e8e3e4cf）：全部外来生产者入口（同步
+回调/FlushRegion/Unmap/ModifyGPUMemory/合成/截图）统一先排干归还 loan 再执行，
+异常边界改走 poison+会话退出而非 fail-fast。
+
+**正确性验收（2bs4-check，全过）**：196s 有效局优雅关闭；
+**enqueued=executed=published=reclaimed=11,790,136 终态收敛**；worker_tails
+11.73M / draw-input 全量 0 失配；寄存器 checker 0 失配；**零所有权违规零
+poison**；31,367 次 sync_request + 154,084 次 download 服务调用干净穿过
+（修复点验证）；max_emitted_unpublished=2（run-ahead 真实达成）；同模图像
+QA PASS（2.6-4.0 低于地板）。**间接 draw 计数观测：水塘 0 次**（新计数器
+上线，首日数据）。
+
+**性能（交错 3/3 对）**：B/A = 0.6567/0.6542/0.6516，**中位 0.6542（-34.6%）**
+vs INLINE（A 臂 38.5-38.8 fps 全程稳定）。**止损生效**：INLINE 保持默认，
+EDEN_TOKEN_TAIL_PIPELINE=1 归档为已验证实验开关（与 2A 同等待遇）。
+
+**成本画像（stage 5 的靶子，diag 数据）**：
+- **618 B/draw 捕获**（11.8M draw 共 7.3GB 过 capture chunk）——worker 发射
+  把每个 draw 的命令都变成捕获流量（1A 时代仅 0.77% resolve 捕获率）；
+- enqueue→execution 939ns + emission→publication 1194ns 均值；
+- capacity_waits=2,082,440（深度 2 背压：worker 拖不动 resolve+tail+捕获全套）；
+- invalidation 调用 1.03M 次（drains=0，队列总已被排空——但 GPU 为此频繁等待）。
+模型对账：worker 现在承担全部串行 draw 工作+捕获开销，且深度 2 重叠余量
+极小 ⇒ -35% 与帧模型 max(GPU parse, worker 全套+capture) 自洽。
+
+**结论**：tail-on-worker 四阶段全部落地——设计/1/2/3/4 都通过了各自的正确性
+门；性能天花板之争正式进入 stage 5（拆除已证明不必要的等待+捕获瘦身）+
+codex 遗留项（残余 dirty 传播精化）。2B 档案臂对比（vs PIPELINE=1）未跑，
+不阻塞定案（两者都已归档）。
