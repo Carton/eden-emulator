@@ -3808,3 +3808,105 @@ memory_manager.cpp; rasterizer_interface.h; renderer_vulkan/vk_draw_resolver.h/.
 renderer_vulkan/vk_pipeline_cache.h/.cpp; renderer_vulkan/vk_rasterizer.h/.cpp;
 renderer_vulkan/vk_scheduler.h/.cpp; texture_cache/texture_cache.h;
 PROFILE_PROGRESS.md. All source paths are under src/video_core/.
+
+
+### 33.12 Stage-4 external producer handoff / failure boundary repair (2026-09-24, source only)
+
+User first clean-full-rebuild acceptance: 493,999 resolves / 86 s, max_inflight=2,
+425k spin wins / 28k parks, 36,839 capacity waits, resyncs=2, snapshot avg 626 ns,
+register mismatches=0. Real crash at 86.4 s: CheckLoanedProducer asserted, followed
+by 0xC0000409. DLB sync flushes rose 4->6 (17-21 ms average sync wait). This is
+separate from the earlier stale-object crash, which the user eliminated by full
+object rebuild. Stage 4 remains unaccepted/default-off; no performance conclusion.
+
+Evidence limit: the old ownership message contains no caller or thread ID. It
+proves a non-resolver producer entered while the loan was active; it does NOT
+identify Finish versus RequestOutsideRenderPassOperationContext versus
+FlushDeferredClear. In particular, FlushRegion already had FlushPendingDraw,
+which should drain when draw_owner TLS identifies the same GPU thread. Do not
+claim the DLB correlation proves which guarded call fired. The following source
+paths and missing boundaries were audited and repaired:
+
+- CPU OnCPURead (non-preemptive) -> RequestSyncOperation -> GPUTick/TickWork on GPU
+  -> FlushRegion -> texture/buffer/query download. Texture download emits through
+  Image::DownloadMemory (render-pass operations/Record, possibly scaling) and
+  TextureCacheRuntime::Finish -> Scheduler::Finish. RequestFlush and synchronous
+  FlushRegionCommand reach the same rasterizer entry. The dispatcher previously
+  had no mandatory producer handoff; drain eligibility relied on draw_owner TLS.
+- Stage-4 TickWork now calls PrepareGPUService BEFORE each callback, with the sync
+  mutex unlocked. Rasterizer drains by actual GPU thread identity, publishes /
+  reclaims all slots and returns ownership before producer/cache work. Nested
+  TickWork is suppressed only in Stage 4, so drain-triggered maintenance cannot
+  execute younger requests before the popped request or advance its fence early.
+- Foreign FlushRegion is marshalled synchronously to GPU before B/T locks. Worker
+  callbacks with engine-snapshot TLS retain their existing capture/bridge path.
+- Foreign UnmapMemory / ModifyGPUMemory can reach texture DeleteImage ->
+  RemoveFramebuffers -> runtime.FlushDeferredClear -> Scheduler::FlushDeferredClear.
+  Dirty-mask deferral alone did not protect this producer call. Marshal these
+  callbacks before cache locks too. Cache-only GetFlushArea, MustFlushRegion,
+  OnCPUWrite and OnCacheInvalidation keep their existing mutex paths; they do not
+  borrow resolver state or emit scheduler commands.
+- Composite calls RenderAppletCaptureLayer and direct scheduler operations BEFORE
+  the later AccelerateDisplay/TickFrame drains; previous frames working did not
+  prove entry safety. Composite and GetAppletCaptureBuffer now explicitly hand off
+  before any producer work; screenshots are inside the Composite boundary.
+- Deferred composite guest actions may run under SyncpointManager::guard on GPU or
+  host1x threads. Stage 4 queues their rendering as a GPU sync request instead of
+  producing or waiting under that lock. A separate Stage-4 service wake/CV avoids putting these notifications into
+  the bounded command queue. Its mutex is held only for wait predicates/notification,
+  never while running commands, callbacks, or FIFO waits; GPU service also polls
+  after each queue command (after releasing write_lock). GPU-origin actions need no self-enqueue
+  into the bounded command queue. The presentation thread only uses its own copy /
+  present state and scheduler.submit_mutex, not scheduler semantic producer state.
+
+Exception repair:
+- GPU sync callback boundary and GPU command dispatch boundary catch Stage-4
+  exceptions, call AbortTailPipeline, clear pending maintenance, return producer
+  ownership after worker stop, log the reason and request frontend session exit.
+  No inline fallback/replay. Non-Stage-4 exceptions retain existing behavior.
+- TickWork may execute inside noexcept SCOPE_EXIT destructors. Stage-4 callback
+  failures are contained there; service is also skipped during exception unwind.
+- Fatal service marks requests CANCELLED (not successful fence completion), clears
+  queued borrowed captures, wakes WaitForSyncOperation, and rejects later requests.
+  The GPU queue acknowledges/discards subsequent entries until frontend shutdown,
+  so synchronous submitters can leave their waits.
+- CheckProducer still ASSERTs/throws; no unsafe exemption. C++20 source_location
+  adds the guarded function and line to the assertion/exception for any recurrence.
+
+Locks: sync-request mutex is released before FIFO waits or producer work. J is
+managed by the existing bridge/poison protocol, never held over B/T. Abort waits
+for worker stop before ReturnTailOwnership takes B/T. Foreign download/unmap
+forwarding happens before local cache locks. Deferred syncpoint callbacks never
+wait for producer ownership or bounded GPU queue capacity. No new worker locks. The GPU service wake mutex never nests with J/B/T or
+producer work; command enqueue may take it after write_lock, with no reverse edge.
+
+Diagnostics: existing counters / cadence unchanged. Added drain reasons
+sync_request, download, presentation, capture. A DLB non-preemptive flush yields a
+sync_request call followed by a download call; sync_request takes the nonempty
+queue drain, so download.drains may legitimately be zero. download.calls also
+includes parser/other explicit downloads and is not an exact DLB total. Composite
+and applet capture add their own reason calls; all sync callbacks contribute to
+sync_request.calls. Final successful FIFO position equality still required.
+
+Static verification only: changed-source diff --check, delimiter check, preserved
+indirect diagnostic lines, CommandChunk class-body equality. Resolver FIFO,
+Capture/BridgeCaptureSync, serial-cut translation/upload helpers are unmodified.
+No build/run/commit. Existing user edits to AGENTS.md and untracked Python cache
+were left untouched. User must wipe affected target obj directories and rebuild
+per updated AGENTS rule; reverse-include touch alone is insufficient for these
+wide interface/layout changes. MSVC compilation, shutdown/failure injection,
+syncpoint wake stress, image QA and performance remain unverified.
+
+Next acceptance: repeat CHECK Stage 4 depth2/spin20 beyond 86 s and through multiple
+DLB flush increments. Require no producer violation, no FIFO poison, all checkers
+zero, graceful close and final enqueued=executed=published=reclaimed. Verify the
+new reason counters around flushes. Separately exercise capture/screenshot,
+fenced composites, map/unmap, depth1/spin0 and deeper queue pressure. Inject an
+ownership failure in a separate local test if desired: expect reason log + FIFO
+poison + session exit, no 0xC0000409 and no stranded CPU sync waiter. Normal runs
+must never enter this failure branch. Default/INLINE/2A/Stage3 control arms and
+same-mode image floor / interleaved A/B remain required; no default changes.
+
+Files changed: gpu.h/.cpp, gpu_thread.h/.cpp, rasterizer_interface.h,
+renderer_vulkan/renderer_vulkan.cpp, renderer_vulkan/vk_rasterizer.h/.cpp,
+renderer_vulkan/vk_scheduler.h/.cpp (all under src/video_core), plus this record.

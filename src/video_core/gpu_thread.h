@@ -125,6 +125,10 @@ public:
 
     void TickGPU(bool is_async);
 
+    bool IsGPUThread() const { return std::this_thread::get_id() == thread.get_id(); }
+    // Called under foreign callback locks: never wait for queue capacity.
+    void WakeGPUService();
+
 private:
     /// Pushes a command to be executed by the GPU thread
     u64 PushCommand(CommandData&& command_data, bool block, bool is_async);
@@ -132,6 +136,11 @@ private:
     Core::System& system;
     VideoCore::RasterizerInterface* rasterizer = nullptr;
     SynchState state;
+    // Stage-4 service wake is independent of the bounded command queue. This
+    // mutex is never held while executing commands, callbacks, or FIFO waits.
+    std::mutex service_mutex;
+    std::condition_variable_any service_cv;
+    bool service_wake{};
     std::jthread thread;
 };
 

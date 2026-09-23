@@ -4,6 +4,8 @@
 // SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <exception>
+
 #include "common/assert.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
@@ -36,20 +38,44 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
         auto current_context = context.Acquire();
         CommandDataContainer next;
         while (!stop_token.stop_requested()) {
-            state.queue.PopWait(next, stop_token);
+            bool has_command = true;
+            if (rasterizer->UsesGPUServiceHandoff()) {
+                std::unique_lock lock{service_mutex};
+                service_cv.wait(lock, stop_token, [&] {
+                    has_command = state.queue.TryPop(next);
+                    return has_command || service_wake;
+                });
+                service_wake = false;
+            } else {
+                state.queue.PopWait(next, stop_token);
+            }
             if (stop_token.stop_requested()) {
                 break;
             }
-            if (auto* submit_list = std::get_if<SubmitListCommand>(&next.data)) {
-                scheduler.Push(system.GPU(), submit_list->channel, std::move(submit_list->entries));
-            } else if (std::holds_alternative<GPUTickCommand>(next.data)) {
+            if (!has_command) {
                 system.GPU().TickWork();
-            } else if (const auto* flush = std::get_if<FlushRegionCommand>(&next.data)) {
-                renderer.ReadRasterizer()->FlushRegion(flush->addr, flush->size);
-            } else if (const auto* invalidate = std::get_if<InvalidateRegionCommand>(&next.data)) {
-                renderer.ReadRasterizer()->OnCacheInvalidation(invalidate->addr, invalidate->size);
-            } else {
-                ASSERT(false);
+                continue;
+            }
+            try {
+                if (system.GPU().HasRendererFailure()) {
+                    // Keep acknowledging cancelled queue entries until frontend
+                    // shutdown, so synchronous submitters cannot strand teardown.
+                } else if (auto* submit_list = std::get_if<SubmitListCommand>(&next.data)) {
+                    scheduler.Push(system.GPU(), submit_list->channel, std::move(submit_list->entries));
+                } else if (std::holds_alternative<GPUTickCommand>(next.data)) {
+                    system.GPU().TickWork();
+                } else if (const auto* flush = std::get_if<FlushRegionCommand>(&next.data)) {
+                    renderer.ReadRasterizer()->FlushRegion(flush->addr, flush->size);
+                } else if (const auto* invalidate = std::get_if<InvalidateRegionCommand>(&next.data)) {
+                    renderer.ReadRasterizer()->OnCacheInvalidation(invalidate->addr, invalidate->size);
+                } else {
+                    ASSERT(false);
+                }
+            } catch (...) {
+                if (!rasterizer->AbortGPUService(std::current_exception())) {
+                    throw; // preserve non-Stage-4 error behavior
+                }
+                system.GPU().NotifyRendererFailure();
             }
             state.signaled_fence.store(next.fence);
             if (next.block) {
@@ -57,6 +83,11 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 // race between the check and the lock itself.
                 std::scoped_lock lk{state.write_lock};
                 state.cv.notify_all();
+            }
+            if (rasterizer->UsesGPUServiceHandoff()) {
+                // Service callbacks also make progress under command pressure.
+                // TickWork catches Stage-4 failures.
+                system.GPU().TickWork();
             }
         }
     });
@@ -75,6 +106,14 @@ void ThreadManager::FlushRegion(DAddr addr, u64 size, bool is_async) {
 
 void ThreadManager::TickGPU(bool is_async) {
     PushCommand(GPUTickCommand(), false, is_async);
+}
+
+void ThreadManager::WakeGPUService() {
+    {
+        std::scoped_lock lock{service_mutex};
+        service_wake = true;
+    }
+    service_cv.notify_one();
 }
 
 void ThreadManager::InvalidateRegion(DAddr addr, u64 size) {
@@ -104,6 +143,9 @@ u64 ThreadManager::PushCommand(CommandData&& command_data, bool block, bool is_a
     std::unique_lock lk(state.write_lock);
     const u64 fence{++state.last_fence};
     state.queue.EmplaceWait(std::move(command_data), fence, block);
+    if (rasterizer->UsesGPUServiceHandoff()) {
+        WakeGPUService();
+    }
 
     if (block) {
         state.cv.wait(lk, thread.get_stop_token(), [this, fence] {

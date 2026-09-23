@@ -12,6 +12,7 @@
 #include <exception>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 
 #include <fmt/format.h>
 
@@ -478,6 +479,7 @@ void RasterizerVulkan::EnsureResolver() {
     const char* epoch_memcmp{std::getenv("EDEN_TOKEN_EPOCH_MEMCMP")};
     resolver->epoch_table.short_circuit =
         !(epoch_memcmp && *epoch_memcmp != '\0' && *epoch_memcmp == '0');
+    tail_service_enabled.store(resolver->tail_pipeline_enabled, std::memory_order_release);
 }
 
 void RasterizerVulkan::CommitPendingDraw() {
@@ -542,7 +544,11 @@ void RasterizerVulkan::CommitPendingDraw() {
 }
 
 void RasterizerVulkan::FlushPendingDraw(DrawDrain reason) {
-    if (draw_owner == this && resolver && resolver->tail_pipeline_enabled) {
+    if (UsesGPUServiceHandoff() && gpu.IsGPUThread() && resolver &&
+        resolver->tail_pipeline_enabled) {
+        if (gpu.HasRendererFailure()) {
+            throw std::runtime_error("DrawToken producer entry after session cancellation");
+        }
         const auto index = static_cast<size_t>(reason);
         ++tail_drain_calls[index];
         if (pending_commit.load(std::memory_order_acquire)) {
@@ -567,6 +573,37 @@ void RasterizerVulkan::FlushPendingDraw(DrawDrain reason) {
     while (draw_owner == this && pending_commit.load(std::memory_order_acquire)) {
         CommitPendingDraw();
     }
+}
+
+void RasterizerVulkan::PrepareGPUService(GPUServiceReason reason) {
+    if (!UsesGPUServiceHandoff()) {
+        return;
+    }
+    if (!gpu.IsGPUThread()) {
+        throw std::logic_error("DrawToken external producer must marshal to GPU service thread");
+    }
+    FlushPendingDraw(reason == GPUServiceReason::Presentation ? DrawDrain::Presentation :
+                     reason == GPUServiceReason::Capture ? DrawDrain::Capture : DrawDrain::SyncRequest);
+}
+
+bool RasterizerVulkan::AbortGPUService(std::exception_ptr error) {
+    if (!UsesGPUServiceHandoff() || !gpu.IsGPUThread()) {
+        return false;
+    }
+    try {
+        std::rethrow_exception(error);
+    } catch (const std::exception& e) {
+        LOG_ERROR(Render_Vulkan, "DrawToken GPU service failure: {}", e.what());
+    } catch (...) {
+        LOG_ERROR(Render_Vulkan, "DrawToken GPU service failure: unknown exception");
+    }
+    if (resolver) {
+        resolver->AbortTailPipeline(error); // stops worker before returning producer state
+        pending_commit.store(false, std::memory_order_release);
+        tail_maintenance_pending = 0;
+        resolver->ReturnTailOwnership(*maxwell3d);
+    }
+    return true;
 }
 
 void RasterizerVulkan::WaitForDrawResolve(DrawResolveReason reason) {
@@ -666,7 +703,7 @@ void RasterizerVulkan::LogTokenDiag(bool force_tail_diag) {
             resolver->LogTailPipelineDiag();
             static constexpr std::array names{"other", "flush_caching", "guest_write", "map",
                 "unmap", "cold_pipeline", "submit", "indirect", "fallback", "channel", "teardown",
-                "invalidation"};
+                "invalidation", "sync_request", "download", "presentation", "capture"};
             for (size_t i = 0; i < names.size(); ++i) {
                 LOG_INFO(Render_Vulkan, "DrawToken tail drain: reason={} calls={} drains={} jobs={}",
                          names[i], tail_drain_calls[i], tail_drains[i], tail_drain_jobs[i]);
@@ -1287,7 +1324,11 @@ void Vulkan::RasterizerVulkan::DisableGraphicsUniformBuffer(size_t stage, u32 in
 void RasterizerVulkan::FlushAll() {}
 
 void RasterizerVulkan::FlushRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
-    FlushPendingDraw();
+    if (UsesGPUServiceHandoff() && !VideoCommon::tls_engine_snapshot && !gpu.IsGPUThread()) {
+        gpu.RunGPUService([this, addr, size, which] { FlushRegion(addr, size, which); });
+        return;
+    }
+    FlushPendingDraw(DrawDrain::Download);
     if (addr == 0 || size == 0) {
         return;
     }
@@ -1422,6 +1463,10 @@ void RasterizerVulkan::InvalidateGPUCache() {
 }
 
 void RasterizerVulkan::UnmapMemory(DAddr addr, u64 size) {
+    if (UsesGPUServiceHandoff() && !VideoCommon::tls_engine_snapshot && !gpu.IsGPUThread()) {
+        gpu.RunGPUService([this, addr, size] { UnmapMemory(addr, size); });
+        return;
+    }
     FlushPendingDraw(DrawDrain::Invalidation);
     {
         std::scoped_lock lock{texture_cache.mutex};
@@ -1435,6 +1480,10 @@ void RasterizerVulkan::UnmapMemory(DAddr addr, u64 size) {
 }
 
 void RasterizerVulkan::ModifyGPUMemory(size_t as_id, GPUVAddr addr, u64 size) {
+    if (UsesGPUServiceHandoff() && !VideoCommon::tls_engine_snapshot && !gpu.IsGPUThread()) {
+        gpu.RunGPUService([this, as_id, addr, size] { ModifyGPUMemory(as_id, addr, size); });
+        return;
+    }
     FlushPendingDraw();
     {
         std::scoped_lock lock{texture_cache.mutex};

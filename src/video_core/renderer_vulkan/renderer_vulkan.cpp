@@ -195,6 +195,7 @@ RendererVulkan::~RendererVulkan() {
 }
 
 void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebuffers) {
+    rasterizer.PrepareGPUService(VideoCore::RasterizerInterface::GPUServiceReason::Presentation);
     SCOPE_EXIT {
         render_window.OnFrameDisplayed();
     };
@@ -306,6 +307,7 @@ void RendererVulkan::RenderScreenshot(std::span<const Tegra::FramebufferConfig> 
 }
 
 std::vector<u8> RendererVulkan::GetAppletCaptureBuffer() {
+    rasterizer.PrepareGPUService(VideoCore::RasterizerInterface::GPUServiceReason::Capture);
     using namespace VideoCore::Capture;
 
     std::vector<u8> out(VideoCore::Capture::TiledSize);

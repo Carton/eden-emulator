@@ -15,6 +15,7 @@
 #include <mutex>
 #include <new>
 #include <queue>
+#include <source_location>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -105,9 +106,9 @@ public:
     void SetTailProducerLoan(bool enabled) {
         tail_producer_loan.store(enabled, std::memory_order_release);
     }
-    void CheckProducer() const {
+    void CheckProducer(std::source_location caller = std::source_location::current()) const {
         if (tail_producer_loan.load(std::memory_order_acquire)) {
-            CheckLoanedProducer();
+            CheckLoanedProducer(caller);
         }
     }
 
@@ -426,7 +427,7 @@ public:
     }
 
 private:
-    void CheckLoanedProducer() const;
+    void CheckLoanedProducer(std::source_location caller) const;
     // Intentional link barrier: stale 1A/initial-1B Record instantiations used
     // ActiveCapture() and incompatible CapturedBatch offsets. Do not provide
     // the old overload; unresolved references require rebuilding consumers.

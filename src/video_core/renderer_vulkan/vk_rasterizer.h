@@ -103,6 +103,9 @@ public:
     void BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr gpu_addr, u32 size) override;
     void DisableGraphicsUniformBuffer(size_t stage, u32 index) override;
     void FlushAll() override;
+    bool UsesGPUServiceHandoff() const override { return tail_service_enabled.load(); }
+    void PrepareGPUService(GPUServiceReason reason = GPUServiceReason::SyncRequest) override;
+    bool AbortGPUService(std::exception_ptr error) override;
     void FlushRegion(DAddr addr, u64 size,
                      VideoCommon::CacheType which = VideoCommon::CacheType::All) override;
     bool MustFlushRegion(DAddr addr, u64 size,
@@ -170,9 +173,10 @@ private:
     void CommitPendingDraw();
     enum class DrawDrain : size_t {
         Other, FlushCaching, GuestWrite, Map, Unmap, ColdPipeline, Submit, Indirect,
-        Fallback, Channel, Teardown, Invalidation, Count
+        Fallback, Channel, Teardown, Invalidation, SyncRequest, Download, Presentation, Capture, Count
     };
     void FlushPendingDraw(DrawDrain reason = DrawDrain::Other);
+    std::atomic_bool tail_service_enabled{};
     void DrawPipelined(bool is_indexed, u32 instance_count);
     void DrawTailPipelined(bool is_indexed, u32 instance_count);
     // (local-only) 2000-draw diag dump shared by both token commit paths

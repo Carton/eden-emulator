@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <exception>
 #include <list>
 #include <memory>
 #include <utility>
@@ -15,6 +16,7 @@
 #include "common/assert.h"
 #include "common/cpu_features.h"
 #include "common/logging.h"
+#include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
 #include "core/core.h"
@@ -154,6 +156,9 @@ struct GPU::Impl {
     template <typename Func>
     [[nodiscard]] u64 RequestSyncOperation(Func&& action) {
         std::unique_lock lck{sync_request_mutex};
+        if (renderer_failed.load()) {
+            return last_sync_fence; // cancelled session: do not retain borrowed captures
+        }
         const u64 fence = ++last_sync_fence;
         sync_requests.emplace_back(std::forward<Func>(action));
         return fence;
@@ -166,7 +171,9 @@ struct GPU::Impl {
 
     void WaitForSyncOperation(const u64 fence) {
         std::unique_lock lck{sync_request_mutex};
-        sync_request_cv.wait(lck, [this, fence] { return CurrentSyncRequestFence() >= fence; });
+        sync_request_cv.wait(lck, [this, fence] {
+            return CurrentSyncRequestFence() >= fence || renderer_failed.load();
+        });
     }
 
     void WaitForIdle() {
@@ -177,16 +184,56 @@ struct GPU::Impl {
 
     /// Tick pending requests within the GPU.
     void TickWork() {
+        const bool handoff = renderer->ReadRasterizer()->UsesGPUServiceHandoff();
+        if (handoff && (servicing_sync || renderer_failed.load() || std::uncaught_exceptions() != 0)) {
+            return;
+        }
+        if (handoff) {
+            servicing_sync = true;
+        }
+        SCOPE_EXIT {
+            if (handoff) {
+                servicing_sync = false;
+            }
+        };
         std::unique_lock lck{sync_request_mutex};
         while (!sync_requests.empty()) {
             auto request = std::move(sync_requests.front());
             sync_requests.pop_front();
-            sync_request_mutex.unlock();
-            request();
+            lck.unlock();
+            try {
+                if (handoff) {
+                    // Drain before arbitrary service code, outside the sync mutex
+                    // and before acquiring any cache/renderer producer locks.
+                    renderer->ReadRasterizer()->PrepareGPUService();
+                }
+                request();
+            } catch (...) {
+                if (!renderer->ReadRasterizer()->AbortGPUService(std::current_exception())) {
+                    throw;
+                }
+                // TickWork also runs in noexcept scope guards. Do not rethrow
+                // a poisoned Stage-4 failure through those destructors.
+                NotifyRendererFailure();
+                return;
+            }
             current_sync_fence.fetch_add(1, std::memory_order_release);
-            sync_request_mutex.lock();
+            lck.lock();
             sync_request_cv.notify_all();
         }
+    }
+
+    void NotifyRendererFailure() {
+        {
+            std::scoped_lock lock{sync_request_mutex};
+            if (renderer_failed.exchange(true)) {
+                return;
+            }
+            sync_requests.clear(); // cancellation, NOT successful fence completion
+        }
+        sync_request_cv.notify_all();
+        LOG_ERROR(HW_GPU, "DrawToken GPU service aborted; requesting session exit (no replay)");
+        system.Exit();
     }
 
     [[nodiscard]] u64 GetTicks() const {
@@ -300,7 +347,19 @@ struct GPU::Impl {
                         }
                         free_swap_counters.push_back(current_request_counter);
                     }
-                    renderer->Composite(composite_layers);
+                    if (renderer->ReadRasterizer()->UsesGPUServiceHandoff()) {
+                        // Guest actions can run under the syncpoint lock, on a
+                        // foreign thread. Never drain/wait or produce there.
+                        const auto fence = RequestSyncOperation([this, composite_layers] {
+                            renderer->Composite(composite_layers);
+                        });
+                        (void)fence;
+                        if (!gpu_thread.IsGPUThread()) {
+                            gpu_thread.WakeGPUService();
+                        }
+                    } else {
+                        renderer->Composite(composite_layers);
+                    }
                 };
                 for (size_t i = 0; i < num_fences; i++) {
                     syncpoint_manager.RegisterGuestAction(composite_fences[i].id,
@@ -343,6 +402,8 @@ struct GPU::Impl {
     VideoCore::ShaderNotify shader_notify;
     /// When true, we are about to shut down emulation session, so terminate outstanding tasks
     std::atomic_bool shutting_down{};
+    std::atomic_bool renderer_failed{};
+    bool servicing_sync{}; // GPU thread only; suppress nested Stage-4 TickWork
 
     std::array<std::atomic<u32>, Service::Nvidia::MaxSyncPoints> syncpoints{};
 
@@ -433,6 +494,29 @@ void GPU::WaitForSyncOperation(u64 fence) {
 
 void GPU::TickWork() {
     impl->TickWork();
+}
+
+bool GPU::IsGPUThread() const {
+    return impl->gpu_thread.IsGPUThread();
+}
+
+void GPU::RunGPUService(std::function<void()> action) {
+    if (IsGPUThread()) {
+        impl->renderer->ReadRasterizer()->PrepareGPUService();
+        action();
+        return;
+    }
+    const u64 fence = impl->RequestSyncOperation(std::move(action));
+    impl->gpu_thread.TickGPU(true);
+    impl->WaitForSyncOperation(fence);
+}
+
+void GPU::NotifyRendererFailure() {
+    impl->NotifyRendererFailure();
+}
+
+bool GPU::HasRendererFailure() const {
+    return impl->renderer_failed.load();
 }
 
 /// Gets a mutable reference to the Host1x interface

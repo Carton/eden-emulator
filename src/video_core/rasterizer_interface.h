@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <exception>
 #include <functional>
 #include <optional>
 #include <span>
@@ -117,6 +118,13 @@ public:
     /// changes. Other backends submit draws synchronously and need no barrier.
     enum class DrawResolveReason { GuestWrite, Map, Unmap };
     virtual void WaitForDrawResolve(DrawResolveReason = DrawResolveReason::GuestWrite) {}
+
+    // GPU service thread only. Foreign callers must marshal producer work first;
+    // cache-only CPU callbacks must not inspect the resolver's private state.
+    enum class GPUServiceReason { SyncRequest, Presentation, Capture };
+    virtual bool UsesGPUServiceHandoff() const { return false; }
+    virtual void PrepareGPUService(GPUServiceReason = GPUServiceReason::SyncRequest) {}
+    virtual bool AbortGPUService(std::exception_ptr) { return false; }
 
     /// Sync memory between guest and host.
     virtual void InvalidateGPUCache() = 0;

@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <functional>
 #include <memory>
 
 #include "common/bit_field.h"
@@ -172,6 +173,13 @@ public:
 
     /// Tick pending requests within the GPU.
     void TickWork();
+
+    // Stage-4 external producer callbacks. Never call the blocking form with
+    // cache/syncpoint locks held. Deferred presentation queues a sync request.
+    bool IsGPUThread() const;
+    void RunGPUService(std::function<void()> action);
+    void NotifyRendererFailure();
+    bool HasRendererFailure() const;
 
     /// Gets a mutable reference to the Host1x interface
     [[nodiscard]] Host1x::Host1x& Host1x();

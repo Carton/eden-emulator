@@ -32,11 +32,13 @@ namespace Vulkan {
 thread_local Scheduler::ResolverCaptureContext* Scheduler::active_capture = nullptr;
 thread_local Scheduler* Scheduler::resolver_record_owner = nullptr;
 
-void Scheduler::CheckLoanedProducer() const {
+void Scheduler::CheckLoanedProducer(std::source_location caller) const {
     const bool valid = resolver_record_owner == this;
-    ASSERT_MSG(valid, "DrawToken semantic producer used without tail FIFO handoff");
+    ASSERT_MSG(valid, "DrawToken semantic producer used without tail FIFO handoff: {}:{} {}",
+               caller.file_name(), caller.line(), caller.function_name());
     if (!valid) {
-        throw std::logic_error("DrawToken scheduler producer ownership violation");
+        throw std::logic_error(fmt::format("DrawToken scheduler producer ownership violation: {}:{} {}",
+                                          caller.file_name(), caller.line(), caller.function_name()));
     }
 }
 
