@@ -113,6 +113,9 @@ public:
     ~PipelineCache();
 
     [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipeline();
+    // Stage 4 only: parser registers + GPU-owned cache lookup, never guest reads,
+    // cache locks, pipeline construction, or scheduler producer operations.
+    [[nodiscard]] GraphicsPipeline* TryGraphicsPipelineForParser();
 
     [[nodiscard]] ComputePipeline* CurrentComputePipeline();
 

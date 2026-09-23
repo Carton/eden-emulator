@@ -168,16 +168,21 @@ private:
     // (local-only) P2 depth-1 draw resolver plumbing
     void EnsureResolver();
     void CommitPendingDraw();
-    void FlushPendingDraw();
+    enum class DrawDrain : size_t {
+        Other, FlushCaching, GuestWrite, Map, Unmap, ColdPipeline, Submit, Indirect,
+        Fallback, Channel, Teardown, Invalidation, Count
+    };
+    void FlushPendingDraw(DrawDrain reason = DrawDrain::Other);
     void DrawPipelined(bool is_indexed, u32 instance_count);
+    void DrawTailPipelined(bool is_indexed, u32 instance_count);
     // (local-only) 2000-draw diag dump shared by both token commit paths
     // (deferred and TAIL_IMM; the immediate branch returns before the
     // inline log site, so both call this helper instead).
-    void LogTokenDiag();
+    void LogTokenDiag(bool force_tail_diag = false);
     void FinishDrawLocked(Tegra::Engines::Maxwell3D& engine, GraphicsPipeline& pipeline,
                           DrawContext& ctx, bool is_indexed, u32 instance_count);
     void RecordDraw(Tegra::Engines::Maxwell3D& engine, bool is_indexed, u32 instance_count);
-    void WaitForDrawResolve() override;
+    void WaitForDrawResolve(DrawResolveReason reason = DrawResolveReason::GuestWrite) override;
 
     void UpdateDynamicStates(Tegra::Engines::Maxwell3D& engine, GraphicsPipeline* pipeline);
 
@@ -269,6 +274,10 @@ private:
     // (local-only) bisect switches for the right-edge HUD divergence.
     bool token_tail_immediate{false};// commit runs inside Draw, not deferred
     std::unique_ptr<DrawResolver> resolver;
+    std::array<u64, static_cast<size_t>(DrawDrain::Count)> tail_drains{}, tail_drain_jobs{};
+    std::array<u64, static_cast<size_t>(DrawDrain::Count)> tail_drain_calls{};
+    u64 tail_maintenance_pending{};
+    u64 tail_diag_last{};
     std::atomic<bool> pending_commit{false};
     u64 pipelined_draws{};
     u64 fallback_draws{};

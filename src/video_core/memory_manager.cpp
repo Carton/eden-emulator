@@ -177,7 +177,7 @@ void MemoryManager::BindRasterizer(VideoCore::RasterizerInterface* rasterizer_) 
 
 GPUVAddr MemoryManager::Map(GPUVAddr gpu_addr, DAddr dev_addr, std::size_t size, PTEKind kind, bool is_big_pages) {
     if (rasterizer) [[unlikely]] {
-        rasterizer->WaitForDrawResolve();
+        rasterizer->WaitForDrawResolve(VideoCore::RasterizerInterface::DrawResolveReason::Map);
     }
     if (is_big_pages)
         return BigPageTableOp(gpu_addr, dev_addr, size, kind, EntryType::Mapped);
@@ -186,7 +186,7 @@ GPUVAddr MemoryManager::Map(GPUVAddr gpu_addr, DAddr dev_addr, std::size_t size,
 
 GPUVAddr MemoryManager::MapSparse(GPUVAddr gpu_addr, std::size_t size, bool is_big_pages) {
     if (rasterizer) [[unlikely]] {
-        rasterizer->WaitForDrawResolve();
+        rasterizer->WaitForDrawResolve(VideoCore::RasterizerInterface::DrawResolveReason::Map);
     }
     if (is_big_pages)
         return BigPageTableOp(gpu_addr, 0, size, PTEKind::INVALID, EntryType::Reserved);
@@ -195,7 +195,7 @@ GPUVAddr MemoryManager::MapSparse(GPUVAddr gpu_addr, std::size_t size, bool is_b
 
 void MemoryManager::Unmap(GPUVAddr gpu_addr, std::size_t size) {
     if (rasterizer) [[unlikely]] {
-        rasterizer->WaitForDrawResolve();
+        rasterizer->WaitForDrawResolve(VideoCore::RasterizerInterface::DrawResolveReason::Unmap);
     }
     if (size == 0) {
         return;

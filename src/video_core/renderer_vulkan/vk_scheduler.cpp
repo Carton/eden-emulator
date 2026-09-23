@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <memory>
+#include <algorithm>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -30,6 +31,14 @@ namespace Vulkan {
 
 thread_local Scheduler::ResolverCaptureContext* Scheduler::active_capture = nullptr;
 thread_local Scheduler* Scheduler::resolver_record_owner = nullptr;
+
+void Scheduler::CheckLoanedProducer() const {
+    const bool valid = resolver_record_owner == this;
+    ASSERT_MSG(valid, "DrawToken semantic producer used without tail FIFO handoff");
+    if (!valid) {
+        throw std::logic_error("DrawToken scheduler producer ownership violation");
+    }
+}
 
 Scheduler::ResolverThreadScope::ResolverThreadScope(Scheduler& scheduler_)
     : scheduler{scheduler_} {
@@ -140,6 +149,8 @@ Scheduler::CapturedBatch::~CapturedBatch() {
 void Scheduler::CapturedBatch::SealChunk() {
     if (current && !current->Empty()) {
         sealed.emplace_back(std::move(current));
+        ++captured_chunks;
+        chunk_high_water = (std::max)(chunk_high_water, static_cast<u64>(sealed.size()));
     }
 }
 
@@ -159,6 +170,13 @@ void Scheduler::SpliceCaptured(CapturedBatch& batch, u64 job_id) {
         std::scoped_lock ql{queue_mutex};
         for (auto& entry : batch.sealed) {
             work_queue.push(std::move(entry));
+        }
+        // This boundary describes a successfully published PREFIX, not a tick
+        // merely allocated by the emitting thread. Partial push failure poisons
+        // the FIFO and cannot authorize a wait/replay.
+        if (batch.has_submission) {
+            published_submission_tick = (std::max)(published_submission_tick, batch.submission_tick);
+            has_published_submission = true;
         }
     }
     batch.sealed.clear();
@@ -186,6 +204,7 @@ void Scheduler::ReleaseCaptured(CapturedBatch& batch, u64 job_id) {
     ASSERT(batch.producer == std::this_thread::get_id());
     batch.SealChunk();
     batch.handed_off = true;
+    ++batch.prefix_sequence;
 }
 
 bool Scheduler::BridgeCaptureSync(CaptureSync operation, u64 tick) {
@@ -269,6 +288,7 @@ Scheduler::Scheduler(const Device& device_, StateTracker& state_tracker_)
 Scheduler::~Scheduler() = default;
 
 u64 Scheduler::Flush(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore) {
+    CheckProducer();
     // When flushing, we only send data to the worker thread; no waiting is necessary.
     const u64 signal_value = SubmitExecution(signal_semaphore, wait_semaphore);
     AllocateNewContext();
@@ -276,6 +296,7 @@ u64 Scheduler::Flush(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore) {
 }
 
 void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore) {
+    CheckProducer();
     // When finishing, we need to wait for the submission to have executed on the device.
     const u64 presubmit_tick = CurrentTick();
     SubmitExecution(signal_semaphore, wait_semaphore);
@@ -308,10 +329,15 @@ void Scheduler::DispatchWork() {
     }
     if (chunk && !chunk->Empty()) {
         auto work = std::move(chunk);
+        const bool submit = work->HasSubmit();
         AcquireNewChunk();
         {
             std::scoped_lock ql{queue_mutex};
             work_queue.push(std::move(work));
+            if (submit) {
+                published_submission_tick = (std::max)(published_submission_tick, main_submission_tick);
+                has_published_submission = true;
+            }
         }
         event_cv.notify_all();
     }
@@ -360,6 +386,7 @@ void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass
 }
 
 void Scheduler::RealizeDeferredClear() {
+    CheckProducer();
     if (deferred_clear.framebuffer == nullptr) {
         return;
     }
@@ -404,6 +431,7 @@ bool Scheduler::DeferColorClear(const Framebuffer* framebuffer, u32 rt_slot,
 }
 
 bool Scheduler::DeferDepthStencilClear(const Framebuffer* framebuffer, const VkClearValue& value) {
+    CheckProducer();
     if (IsRenderPassActive()) {
         return false;
     }
@@ -418,6 +446,7 @@ bool Scheduler::DeferDepthStencilClear(const Framebuffer* framebuffer, const VkC
 }
 
 void Scheduler::FlushDeferredClear() {
+    CheckProducer();
     if (deferred_clear.framebuffer == nullptr) {
         return;
     }
@@ -426,6 +455,7 @@ void Scheduler::FlushDeferredClear() {
 }
 
 void Scheduler::RequestRenderpass(const Framebuffer* framebuffer) {
+    CheckProducer();
     if (deferred_clear.framebuffer == framebuffer) {
         RealizeDeferredClear();
         return;
@@ -444,10 +474,12 @@ void Scheduler::RequestRenderpass(const Framebuffer* framebuffer) {
 }
 
 void Scheduler::RequestOutsideRenderPassOperationContext() {
+    CheckProducer();
     EndRenderPass();
 }
 
 bool Scheduler::UpdateGraphicsPipeline(GraphicsPipeline* pipeline) {
+    CheckProducer();
     if (state.graphics_pipeline == pipeline) {
         if (pipeline && pipeline->UsesExtendedDynamicState() &&
             state.needs_state_enable_refresh) {
@@ -474,6 +506,7 @@ bool Scheduler::UpdateGraphicsPipeline(GraphicsPipeline* pipeline) {
 }
 
 bool Scheduler::UpdateRescaling(bool is_rescaling) {
+    CheckProducer();
     if (state.rescaling_defined && is_rescaling == state.is_rescaling) {
         return false;
     }
@@ -483,6 +516,7 @@ bool Scheduler::UpdateRescaling(bool is_rescaling) {
 }
 
 bool Scheduler::UpdateDescriptorBufferChunk(u32 descriptor_chunk) {
+    CheckProducer();
     if (state.descriptor_buffer_bound && descriptor_chunk == state.descriptor_buffer_chunk) {
         return false;
     }
@@ -610,10 +644,13 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
         // next command buffers after executing a chunk carrying HasSubmit.
         ASSERT(capture->batch.current != nullptr);
         capture->batch.current->MarkSubmit();
+        capture->batch.submission_tick = signal_value;
+        capture->batch.has_submission = true;
         capture->batch.SealChunk();
         DrainCapturePrefix();
     } else {
         chunk->MarkSubmit();
+        main_submission_tick = signal_value;
         DispatchWork();
     }
     return signal_value;
@@ -624,6 +661,7 @@ void Scheduler::AllocateNewContext() {
 }
 
 void Scheduler::InvalidateState() {
+    CheckProducer();
     state.graphics_pipeline = nullptr;
     state.rescaling_defined = false;
     state.descriptor_buffer_bound = false;

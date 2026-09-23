@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <bitset>
 #include <deque>
 #include <limits>
 #include <mutex>
@@ -49,6 +50,18 @@ public:
 template <class P>
 class ChannelSetupCaches {
 public:
+    // Stage 4 only, protected by the derived cache's B/T mutex. Foreign
+    // invalidation callbacks never access a resolver slot or live parser flags.
+    using GraphicsDirtyFlags = std::bitset<(std::numeric_limits<u8>::max)() + 1>;
+    void DeferGraphicsInvalidations(bool enable) { defer_graphics_invalidations = enable; }
+    bool DefersGraphicsInvalidations() const { return defer_graphics_invalidations; }
+    GraphicsDirtyFlags& PendingGraphicsInvalidations() { return pending_graphics_invalidations; }
+    GraphicsDirtyFlags TakeGraphicsInvalidations() {
+        const auto flags = pending_graphics_invalidations;
+        pending_graphics_invalidations.reset();
+        return flags;
+    }
+
     /// Operations for setting the channel of execution.
     virtual ~ChannelSetupCaches();
 
@@ -77,6 +90,8 @@ public:
     }
 
 protected:
+    bool defer_graphics_invalidations{};
+    GraphicsDirtyFlags pending_graphics_invalidations{};
     static constexpr size_t UNSET_CHANNEL{(std::numeric_limits<size_t>::max)()};
 
     // (local-only) P2: engine access for cache code. Redirects to the draw

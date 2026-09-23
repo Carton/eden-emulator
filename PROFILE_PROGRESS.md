@@ -3653,3 +3653,158 @@ fallback 路径（fallbacks=0）、bridge 请求（sync_requests=0，每 draw �
 **tail-on-worker 里程碑状态**：设计 ✓ → Stage 1 ✓（416cd43ca9）→ Stage 2 ✓
 （dea7a9deb6）→ **Stage 3 ✓ 机制成立**（8962d2d93f）。下一步 Stage 4
 （执行游标与发布/回收分离，去掉立即等待），是第一条真正可能出性能的臂。
+
+### 33.11 Stage 4 independent worker-tail FIFO (source only, 2026-09-23)
+
+Base 7d11b3206b, including the user's indirect observability change, preserved.
+No build, game, benchmark, commit, or header-touch closure was run. This records
+implementation/static review only; stage 4 has NOT received runtime acceptance.
+
+Gate: strict EDEN_TOKEN_TAIL_PIPELINE=1 selects stage 4 inside the existing token
+path. It implies TAIL_WORKER/JOB_BINDINGS/WORKER/BATCH/PIPELINE, even if their env
+values say 0. Without the new gate, stage 3 still overrides PIPELINE and parks
+immediately, and PIPELINE=1 without TAIL_WORKER remains archived 2A. Serial and
+INLINE remain defaults. Stage-4 depth defaults to 2 (range 1..4), spin to 20 us
+(range 0..1000), using existing PIPELINE_DEPTH/SPIN_US parsing. Archived 2A keeps
+depth 1/spin 20. TAIL_IMM=1 deliberately drains after each stage-4 enqueue; it is
+a diagnostic rendezvous arm, not the ordinary stage-4 configuration. Existing
+snapshot/check/epoch switches retain their meanings; use epoch defaults first.
+
+Queue base: PipelineState's per-slot engines, bounded catch-up journals, independent
+checker references and epoch tables. Stage 4 has a separate worker loop and
+publication/wait methods; archived Run/ArmFront/Wait behavior is retained behind
+the old mode branch. GPU tail/head count enqueued/reclaimed slots; ready_tail
+release-publishes input, executed_tail is worker-owned, published_tail is GPU-owned.
+Capacity is tail-head, including executing, emitted, and published-but-unreclaimed
+jobs. Worker advances immediately to the next ready job, without GPU retirement.
+GPU reclaims only after final batch publication and checker inspection.
+
+Publication: each CapturedBatch has a handoff prefix sequence. SpliceTail enforces
+(job == published_tail+1, prefix == previous_prefix+1). A request from job N first
+publishes completed jobs < N, then its own prefix; it never waits for N+1. The
+GPU can publish commands while the resolver continues a younger job. WaitTick
+requires Scheduler::IsSubmissionPublished(tick), a boundary advanced only after
+actual queue insertion. Merely allocating CurrentTick cannot satisfy it. Submit
+metadata lives in CapturedBatch / scheduler metadata; CommandChunk's arena layout
+and the out-of-line RecordResolverCommandAbiV2 barrier remain unchanged.
+
+Ownership and necessary separation:
+- The GPU parser gets a new TryGraphicsPipelineForParser path: dirty shader state,
+  null/current miss or unbuilt pipeline returns a miss. Hits use parser registers,
+  the GPU-owned key/transition/cache lookup and immutable pipeline metadata only.
+  A miss drains/returns ownership before the original CurrentGraphicsPipeline path,
+  including shader-memory reads and compilation setup. No unconditional removal
+  of the old preparation barrier in the archived 2A arm.
+- Snapshot copy-then-clear produces parser deltas. The worker ORs its own residual
+  dirty mask and cache-local invalidations into each job, then retains unconsumed
+  flags after tail. GPU retirement does not forward flags into another slot/live
+  engine. Full handoff merges residual/cache dirty state into live once.
+- Buffer deletion and texture deletion/scale invalidation can run on foreign
+  threads. While the loan is active, those non-snapshot callbacks write cache-local
+  pending masks under the existing B/T mutex, never resolver state or live flags.
+  Routing is enabled BEFORE snapshot capture, closing the snapshot-to-Kick window.
+  Worker callbacks with snapshot TLS still dirty that job immediately. Routing is
+  disabled after quiescence under B/T, before GPU fallback/channel work resumes.
+- Uniform parser mirror remains GPU-owned; revision/materialized binding history,
+  geometry/index/storage/XFB bindings, descriptor reuse/streams, StateTracker and
+  query/scheduler producer state belong to the worker for the loan. Query/engine/
+  epoch TLS and the StateTracker flag pointer are restored before execution release.
+- Scheduler producer entry checks reject the wrong thread during a loan. GPU may
+  dispatch its preceding main chunk and publish handed-off batches; it may not
+  mutate render-pass/binding/submit state. No new mutex is introduced.
+- Arbitrary gpu.TickWork requests are deferred to explicit full handoffs, not run
+  during ordinary reclamation. Periodic submission (4096 desktop/512 Android draws)
+  returns ownership first. Existing DMA/query/compute/frame/fallback/channel drains
+  remain. Indirect draws still use their own synchronous entry and retain all three
+  user counters; only their drain reason is tagged.
+
+Memory barriers: FlushCaching still drains on actual InnerInvalidation; no async
+invalidation or deferred guest write was introduced. Map/MapSparse/Unmap and guest
+writes keep WaitForDrawResolve before mutation. A reason argument distinguishes
+map, unmap and writes without changing the barrier itself. Foreign callbacks keep
+their existing cache-lock protocol and do not inspect GPU-private queue state.
+
+Lock audit: Kick publishes under J after cache ownership setup. Worker releases J
+before B/T work. A bridge request can take B/T -> J, then cv.wait releases J. GPU
+copies a request under J, releases J, publishes older jobs/prefixes and services
+queue/worker/tick waits; it never takes B/T in that service loop. Handoff takes B/T
+only after all execution and reclamation completed. Main Dispatch takes/releases R
+before Q; VulkanWorker takes Q -> E, drops Q before command execution, takes E -> S
+for submission, and releases E before recycling under R. WaitWorker drops Q before
+waiting for E. Existing cold build/descriptor command behavior is unchanged. Driver
+progress and rare paths still require runtime verification.
+
+Failure: worker failure publishes its FIFO position and cancellation, stops before
+younger jobs, and GPU publishes completed predecessors before poisoning. Publication
+failure can occur while a younger job is emitting: GPU requests cancellation and
+rejects pending/new bridge requests so that worker can unwind without GPU taking
+B/T. Only after the stopped rendezvous are remaining private batches discarded.
+Fatal state prevents later enqueue/replay; partial publication is explicitly logged.
+Quiescent waits do not rethrow an already reported poison during destruction.
+If a failure is first observed during stage-4 teardown, AbortTailPipeline completes
+the stop/discard rendezvous before returning producer ownership for final cleanup.
+
+Checker: register reference remains the independent LIVE enqueue image. Stage 4's
+direct DrawParams reference is now also captured on GPU at enqueue; worker never
+reads the concurrently parsing live draw state. Existing nonfatal uniform/texture
+scratch-model checks run on worker with real UBO traffic. GPU diagnostics aggregate
+published per-job epoch deltas, avoiding reads of worker-mutated cache counters.
+Disable/TBO/XFB/bridge coverage is still not implied by pond success.
+
+Diagnostics: existing 2000-draw logs remain. Extended FIFO/reason lines emit at the
+first normal diagnostic poll after each 65536 additional draws, plus teardown.
+- enqueued/executed/published/reclaimed positions; discarded slots on failure;
+  max_queued is resident slot high-water (includes emitted/unreclaimed jobs),
+  max_executing <= 1, max_emitted_unpublished, capacity waits.
+- enqueue->execution and emission->publication totals/averages, with published
+  jobs as the sample count; bridge request->ack latency and service count.
+- captured bytes/chunks and per-draw means; exact per-batch sealed-chunk high-water
+  and receiver-observed unpublished sealed-chunk high-water. The latter is not
+  VulkanWorker queue/GPU-resource memory and excludes a currently open chunk.
+- bridge_predecessors proves older completed jobs were published while servicing
+  a younger request; last_prefix_job/last_prefix_seq expose publication position.
+- drain calls / nonempty drains / jobs by other, FlushCaching, guest write, map,
+  unmap, cold pipeline, submit, indirect, fallback, channel, teardown, invalidation.
+  Foreign callbacks produce no GPU FIFO drain; cache-local masks handle their dirty
+  effects. Reason counts describe GPU-owned drain calls only.
+
+Static verification: git diff --check and a delimiter scan passed. Source-body
+comparison verified 25 preserved helpers, including archived DrawPipelined, stage-3
+ExecuteResolveImpl, legacy worker Run/Wait, SnapshotRegisters, uniform capture/apply,
+original pipeline selection, Record ABI/bridge and SSBO/uniform bind helpers.
+DrawIndirect is identical except its drain-reason argument; every indirect counter
+definition/update/log reference is preserved. Descriptor-table arithmetic, CBPG
+upload/translation, SSBO paired translation and staging pow2 fast paths are untouched.
+This does not verify C++ type checking, object code equivalence or runtime liveness.
+Reverse-include closure is required for ALL edited headers before the MSVC build.
+
+First acceptance (user-run):
+1. Build after full reverse-include touch; verify default/INLINE and archived 2A,
+   then a stage-3 control with the new gate unset. Compare default-off performance
+   too: new ownership guards must not cause an off-arm regression.
+2. Stage 4 + CHECK, depth 1/spin 0; then depth 2/spin 20 and depth 4/spin 0/20.
+   Require zero snapshot/draw-input/binding mismatches and producer/order/tick
+   violations, graceful close, and equal enqueued/executed/published/reclaimed on
+   successful final drain. Extend validation toward >=14.1M snapshots.
+3. Non-pond battle/shrine with indirect counters >0, inline-index/disable/re-enable,
+   XFB/query, channel/map/unmap, cold pipeline and shutdown pressure. Force/test
+   descriptor/staging wrap, Finish/WaitWorker/WaitTick and prefix failure separately;
+   sync_requests=0 is NOT bridge acceptance. Seek bridge_predecessors>0 to exercise
+   the younger-request publication case, and max_emitted_unpublished>1 for run-ahead.
+4. Calibrated same-mode image floors; interleaved bare A/B versus INLINE-token and
+   archived 2A in the same gear/luma, retaining a stage-3 parking reference. FIFO
+   mechanism success is separate from a performance verdict. Default stays off
+   unless final measured behavior is within +/-2% or better.
+
+Risk order: (1) missed producer/cache entry or untested bridge cycle; (2) shader/
+invalidation ordering and late guest reads under longer queue residence; (3) slot,
+descriptor/upload lifetime under wrap, cancellation and teardown; (4) dirty carry
+across fallback/channel changes; (5) performance, including private chunk allocation,
+cache migration and drains collapsing depth. Stage 3 did not exercise simultaneous
+parser/worker access or multiple unpublished jobs; no runtime claim is made here.
+
+Files touched: buffer_cache/buffer_cache.h; control/channel_state_cache.h;
+memory_manager.cpp; rasterizer_interface.h; renderer_vulkan/vk_draw_resolver.h/.cpp;
+renderer_vulkan/vk_pipeline_cache.h/.cpp; renderer_vulkan/vk_rasterizer.h/.cpp;
+renderer_vulkan/vk_scheduler.h/.cpp; texture_cache/texture_cache.h;
+PROFILE_PROGRESS.md. All source paths are under src/video_core/.

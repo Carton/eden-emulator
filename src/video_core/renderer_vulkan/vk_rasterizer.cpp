@@ -9,6 +9,7 @@
 #include <charconv>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <mutex>
 
@@ -65,6 +66,11 @@ struct DrawParams {
     u32 first_index;
     bool is_indexed;
 };
+
+std::array<u32, 6> DrawInputWords(const DrawParams& p) {
+    return {p.base_instance, p.num_instances, p.base_vertex, p.num_vertices,
+            p.first_index, static_cast<u32>(p.is_indexed)};
+}
 
 VkViewport GetViewportState(const Device& device, const Maxwell& regs, size_t index, float scale) {
     const auto& src = regs.viewport_transform[index];
@@ -271,8 +277,29 @@ RasterizerVulkan::~RasterizerVulkan() {
         // Destruction is quiescent with respect to the ordinary GPU producer.
         // Finish pending tails even when teardown runs on a different thread.
         resolver->BeginPipelineTeardown();
-        while (pending_commit.load(std::memory_order_acquire)) {
-            CommitPendingDraw();
+        if (resolver->tail_pipeline_enabled) {
+            const auto index = static_cast<size_t>(DrawDrain::Teardown);
+            ++tail_drain_calls[index];
+            tail_drains[index] += pending_commit.load(std::memory_order_acquire);
+        }
+        if (resolver->tail_pipeline_enabled) {
+            try {
+                while (pending_commit.load(std::memory_order_acquire)) {
+                    CommitPendingDraw();
+                    ++tail_drain_jobs[static_cast<size_t>(DrawDrain::Teardown)];
+                }
+            } catch (...) {
+                resolver->AbortTailPipeline(std::current_exception());
+                pending_commit.store(false, std::memory_order_release);
+            }
+        } else {
+            while (pending_commit.load(std::memory_order_acquire)) {
+                CommitPendingDraw();
+            }
+        }
+        if (resolver->tail_pipeline_enabled) {
+            resolver->ReturnTailOwnership(*maxwell3d);
+            LogTokenDiag(true);
         }
     }
     if (resolver) {
@@ -350,9 +377,13 @@ void RasterizerVulkan::EnsureResolver() {
                                   ? DrawResolver::SnapshotMode::FullCopy
                                   : DrawResolver::SnapshotMode::Journal;
     resolver->check_enabled = token_check_enabled;
+    const char* tail_pipeline{std::getenv("EDEN_TOKEN_TAIL_PIPELINE")};
+    resolver->tail_pipeline_enabled =
+        tail_pipeline && tail_pipeline[0] == '1' && tail_pipeline[1] == '\0';
     const char* tail_worker{std::getenv("EDEN_TOKEN_TAIL_WORKER")};
     resolver->tail_worker_enabled =
-        tail_worker && tail_worker[0] == '1' && tail_worker[1] == '\0';
+        resolver->tail_pipeline_enabled ||
+        (tail_worker && tail_worker[0] == '1' && tail_worker[1] == '\0');
     const char* job_bindings{std::getenv("EDEN_TOKEN_JOB_BINDINGS")};
     if (resolver->tail_worker_enabled ||
         (job_bindings && job_bindings[0] == '1' && job_bindings[1] == '\0')) {
@@ -367,37 +398,41 @@ void RasterizerVulkan::EnsureResolver() {
     resolver->pipeline_enabled =
         token_pipeline && token_pipeline[0] == '1' && token_pipeline[1] == '\0';
     if (resolver->tail_worker_enabled) {
-        if (resolver->pipeline_enabled) {
+        if (resolver->pipeline_enabled && !resolver->tail_pipeline_enabled) {
             LOG_WARNING(Render_Vulkan,
                         "DrawToken tail worker overrides PIPELINE: immediate rendezvous only");
         }
-        resolver->pipeline_enabled = false;
+        resolver->pipeline_enabled = resolver->tail_pipeline_enabled;
         resolver->worker_enabled = true;
+        if (resolver->tail_pipeline_enabled) {
+            resolver->capture_tail_inputs = [](const Tegra::Engines::Maxwell3D& live,
+                                               DrawResolver::Job& job) {
+                job.expected_draw_inputs = DrawInputWords(MakeDrawParams(
+                    live.draw_manager.draw_state, job.instance_count, job.is_indexed));
+            };
+        }
         resolver->worker_tail = [this](Tegra::Engines::Maxwell3D& shadow, DrawResolver::Job& job) {
-            // GPU is parked for this entire call. This checker reference is
-            // independently read from LIVE inputs, never from the shadow copy.
+            // Stage 3 reads the parked live engine. Stage 4 uses an independent
+            // LIVE enqueue reference; it never reads the concurrently parsing engine.
             // Indirect/inline-index draws still take the existing GPU fallback.
             bool equivalent = true;
             if (token_check_enabled) {
-                const auto expected = MakeDrawParams(maxwell3d->draw_manager.draw_state,
-                                                     job.instance_count, job.is_indexed);
-                const auto actual = MakeDrawParams(shadow.draw_manager.draw_state,
-                                                   job.instance_count, job.is_indexed);
-                equivalent = expected.base_instance == actual.base_instance &&
-                             expected.num_instances == actual.num_instances &&
-                             expected.base_vertex == actual.base_vertex &&
-                             expected.num_vertices == actual.num_vertices &&
-                             expected.first_index == actual.first_index &&
-                             expected.is_indexed == actual.is_indexed;
+                const auto expected = resolver->tail_pipeline_enabled ? job.expected_draw_inputs
+                    : DrawInputWords(MakeDrawParams(maxwell3d->draw_manager.draw_state,
+                                                   job.instance_count, job.is_indexed));
+                equivalent = expected == DrawInputWords(MakeDrawParams(
+                    shadow.draw_manager.draw_state, job.instance_count, job.is_indexed));
             }
             const auto tail_start = std::chrono::steady_clock::now();
             FinishDrawLocked(shadow, *job.pipeline, job.ctx, job.is_indexed, job.instance_count);
             job.tail_ns = std::chrono::steady_clock::now() - tail_start;
             RecordWorkerTailDiag(token_check_enabled, equivalent);
         };
-        LOG_INFO(Render_Vulkan,
+        if (!resolver->tail_pipeline_enabled) {
+            LOG_INFO(Render_Vulkan,
                  "DrawToken tail worker: immediate rendezvous; implies JOB_BINDINGS, WORKER, BATCH; "
                  "PIPELINE/depth/spin and TAIL_IMM do not alter this mode");
+        }
     }
     if (resolver->pipeline_enabled) {
         const auto bounded_env = [](const char* name, u32 fallback, u32 low, u32 high) {
@@ -414,15 +449,24 @@ void RasterizerVulkan::EnsureResolver() {
             }
             return parsed;
         };
-        resolver->pipeline_depth = bounded_env("EDEN_TOKEN_PIPELINE_DEPTH", 1, 1,
+        resolver->pipeline_depth = bounded_env("EDEN_TOKEN_PIPELINE_DEPTH",
+                                               resolver->tail_pipeline_enabled ? 2 : 1, 1,
                                                DrawResolver::MaxPipelineDepth);
         resolver->spin_us = bounded_env("EDEN_TOKEN_SPIN_US", 20, 0, 1000);
         resolver->worker_enabled = true;
-        LOG_INFO(Render_Vulkan,
-                 "DrawToken pipeline: depth={} spin_us={} snapshot={} tail-gated resolves",
-                 resolver->pipeline_depth, resolver->spin_us,
-                 resolver->snapshot_mode == DrawResolver::SnapshotMode::FullCopy ? "full"
-                                                                               : "journal");
+        if (resolver->tail_pipeline_enabled) {
+            LOG_INFO(Render_Vulkan,
+                     "DrawToken tail FIFO enabled: depth={} spin_us={} snapshot={}",
+                     resolver->pipeline_depth, resolver->spin_us,
+                     resolver->snapshot_mode == DrawResolver::SnapshotMode::FullCopy ? "full"
+                                                                                   : "journal");
+        } else {
+            LOG_INFO(Render_Vulkan,
+                     "DrawToken pipeline: depth={} spin_us={} snapshot={} tail-gated resolves",
+                     resolver->pipeline_depth, resolver->spin_us,
+                     resolver->snapshot_mode == DrawResolver::SnapshotMode::FullCopy ? "full"
+                                                                                   : "journal");
+        }
     }
     resolver->batch_enabled |= resolver->worker_enabled;
     // (local-only) EDEN_TOKEN_EPOCH=0 turns the uniform epoch capture off
@@ -452,9 +496,14 @@ void RasterizerVulkan::CommitPendingDraw() {
         ASSERT_MSG(job.tail_complete, "DrawToken worker tail must finish before GPU retirement");
         diag_tail_ns += job.tail_ns;
         ++diag_tail_calls;
-        // Completion publishes binding versions, dirty carry and producer
-        // state. Only now may the GPU merge live flags and resume maintenance.
+        // Stage 3 returns producer ownership. Stage 4 only reclaims this slot;
+        // dirty carry and producer state remain worker-owned until a full drain.
         resolver->FinishJob(*maxwell3d);
+        if (resolver->tail_pipeline_enabled) {
+            pending_commit.store(resolver->ResolveInFlight(), std::memory_order_release);
+            ++tail_maintenance_pending;
+            return;
+        }
         gpu.TickWork();
         return;
     }
@@ -492,7 +541,26 @@ void RasterizerVulkan::CommitPendingDraw() {
     gpu.TickWork();
 }
 
-void RasterizerVulkan::FlushPendingDraw() {
+void RasterizerVulkan::FlushPendingDraw(DrawDrain reason) {
+    if (draw_owner == this && resolver && resolver->tail_pipeline_enabled) {
+        const auto index = static_cast<size_t>(reason);
+        ++tail_drain_calls[index];
+        if (pending_commit.load(std::memory_order_acquire)) {
+            ++tail_drains[index];
+        }
+        while (pending_commit.load(std::memory_order_acquire)) {
+            CommitPendingDraw();
+            ++tail_drain_jobs[index];
+        }
+        resolver->ReturnTailOwnership(*maxwell3d);
+        // Arbitrary GPU requests may mutate producer state. Service only at
+        // an explicit handoff, never between reclaiming two queued tails.
+        if (tail_maintenance_pending) {
+            tail_maintenance_pending = 0;
+            gpu.TickWork();
+        }
+        return;
+    }
     // Only the GPU producer consumes tails (including the entire 2A FIFO). Foreign
     // invalidation and resolver callbacks have no draw_owner TLS: they use
     // cache mutexes and must not read/reset/wait on the GPU-owned pending draw.
@@ -501,10 +569,11 @@ void RasterizerVulkan::FlushPendingDraw() {
     }
 }
 
-void RasterizerVulkan::WaitForDrawResolve() {
+void RasterizerVulkan::WaitForDrawResolve(DrawResolveReason reason) {
     // Resolve completion alone is insufficient: the tail still translates
     // addresses and uploads vertex/index/storage data from guest memory.
-    FlushPendingDraw();
+    FlushPendingDraw(reason == DrawResolveReason::Map ? DrawDrain::Map :
+                     reason == DrawResolveReason::Unmap ? DrawDrain::Unmap : DrawDrain::GuestWrite);
 }
 
 void RasterizerVulkan::FinishDrawLocked(Tegra::Engines::Maxwell3D& engine,
@@ -555,7 +624,7 @@ void RasterizerVulkan::RecordDraw(Tegra::Engines::Maxwell3D& engine, bool is_ind
     }
 }
 
-void RasterizerVulkan::LogTokenDiag() {
+void RasterizerVulkan::LogTokenDiag(bool force_tail_diag) {
     if (resolver->job_bindings_enabled) {
         LogJobBindingsDiag();
     }
@@ -568,8 +637,10 @@ void RasterizerVulkan::LogTokenDiag() {
                  ? resolver->diag_resolve_ns.count() / resolver->diag_resolve_calls
                  : 0,
              diag_tail_calls ? diag_tail_ns.count() / diag_tail_calls : 0,
-             buffer_cache.diag_epoch_hits, buffer_cache.diag_epoch_misses,
-             buffer_cache.diag_epoch_classic, resolver->epoch_table.diag_copies,
+             resolver->tail_pipeline_enabled ? resolver->diag_tail_epoch_hits : buffer_cache.diag_epoch_hits,
+             resolver->tail_pipeline_enabled ? resolver->diag_tail_epoch_misses : buffer_cache.diag_epoch_misses,
+             resolver->tail_pipeline_enabled ? resolver->diag_tail_epoch_classic : buffer_cache.diag_epoch_classic,
+             resolver->epoch_table.diag_copies,
              resolver->epoch_table.diag_skips, resolver->epoch_table.diag_overflows);
     if (diag_draw_indirect_calls) {
         LOG_INFO(Render_Vulkan,
@@ -589,6 +660,18 @@ void RasterizerVulkan::LogTokenDiag() {
                  resolver->diag_worker_resolves, resolver->diag_worker_sync_requests);
     }
     if (resolver->pipeline_enabled) {
+        if (resolver->tail_pipeline_enabled &&
+            (force_tail_diag || pipelined_draws - tail_diag_last >= 65536)) {
+            tail_diag_last = pipelined_draws;
+            resolver->LogTailPipelineDiag();
+            static constexpr std::array names{"other", "flush_caching", "guest_write", "map",
+                "unmap", "cold_pipeline", "submit", "indirect", "fallback", "channel", "teardown",
+                "invalidation"};
+            for (size_t i = 0; i < names.size(); ++i) {
+                LOG_INFO(Render_Vulkan, "DrawToken tail drain: reason={} calls={} drains={} jobs={}",
+                         names[i], tail_drain_calls[i], tail_drains[i], tail_drain_jobs[i]);
+            }
+        }
         LOG_INFO(Render_Vulkan,
                  "DrawToken diag: diag_pipeline_snapshot_ns={} diag_pipeline_snapshot_count={} "
                  "pipeline_snapshot_avg_ns={} pipeline_resyncs={} pipeline_replayed_entries={}",
@@ -655,6 +738,53 @@ void RasterizerVulkan::DrawPipelined(bool is_indexed, u32 instance_count) {
     }
 }
 
+void RasterizerVulkan::DrawTailPipelined(bool is_indexed, u32 instance_count) {
+    resolver->PollResolveSync();
+    while (resolver->TailFrontReady()) {
+        CommitPendingDraw(); // publication/reclaim only; worker advances independently
+    }
+    if (resolver->PipelineFull()) {
+        ++resolver->diag_pipeline_backpressure;
+        CommitPendingDraw();
+    }
+#ifdef __ANDROID__
+    constexpr u32 flush_interval = 512;
+#else
+    constexpr u32 flush_interval = 4096;
+#endif
+    if (draw_counter >= flush_interval - 1) {
+        FlushPendingDraw(DrawDrain::Submit);
+    }
+    FlushWork(); // dispatch is publication-only; submit above requires handoff
+    gpu_memory->FlushCaching(); // real invalidations still synchronously drain
+    auto* pipeline = pipeline_cache.TryGraphicsPipelineForParser();
+    if (!pipeline) {
+        FlushPendingDraw(DrawDrain::ColdPipeline);
+        pipeline = pipeline_cache.CurrentGraphicsPipeline();
+    }
+    if (!pipeline) {
+        return;
+    }
+    if (!resolver->SnapshotAndEnqueue(*maxwell3d, pipeline, is_indexed, instance_count)) {
+        ++fallback_draws;
+        ++resolver->diag_fallbacks;
+        FlushPendingDraw(DrawDrain::Fallback);
+        PrepareDraw(is_indexed, [this, is_indexed, instance_count] {
+            RecordDraw(*maxwell3d, is_indexed, instance_count);
+        });
+        return;
+    }
+    resolver->ExecuteResolve(scheduler);
+    pending_commit.store(true, std::memory_order_release);
+    ++pipelined_draws;
+    if (token_tail_immediate) {
+        FlushPendingDraw();
+    }
+    if (pipelined_draws % 2000 == 0) {
+        LogTokenDiag();
+    }
+}
+
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
     if (token_mode == TokenMode::Off) {
         PrepareDraw(is_indexed, [this, is_indexed, instance_count] {
@@ -664,6 +794,10 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
     }
     draw_owner = this;
     EnsureResolver();
+    if (resolver->tail_pipeline_enabled) {
+        DrawTailPipelined(is_indexed, instance_count);
+        return;
+    }
     if (resolver->pipeline_enabled) {
         DrawPipelined(is_indexed, instance_count);
         return;
@@ -751,7 +885,7 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
 
 void RasterizerVulkan::DrawIndirect() {
     ++diag_draw_indirect_calls;
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::Indirect);
     const auto& params = maxwell3d->draw_manager.indirect_state;
     diag_draw_indirect_byte_count += params.is_byte_count;
     diag_draw_indirect_count_buffer += params.include_count;
@@ -1206,7 +1340,7 @@ VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64
 }
 
 void RasterizerVulkan::InvalidateRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::Invalidation);
     if (addr == 0 || size == 0) {
         return;
     }
@@ -1227,7 +1361,7 @@ void RasterizerVulkan::InvalidateRegion(DAddr addr, u64 size, VideoCommon::Cache
 }
 
 void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::size_t>> sequences) {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::FlushCaching);
     {
         std::scoped_lock lock{texture_cache.mutex};
         for (const auto& [addr, size] : sequences) {
@@ -1249,7 +1383,7 @@ void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::s
 }
 
 bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::Invalidation);
     DEBUG_ASSERT(addr != 0 || size != 0);
     {
         std::scoped_lock lock{buffer_cache.mutex};
@@ -1266,7 +1400,7 @@ bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {
 }
 
 void RasterizerVulkan::OnCacheInvalidation(DAddr addr, u64 size) {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::Invalidation);
     if (addr == 0 || size == 0) {
         return;
     }
@@ -1283,12 +1417,12 @@ void RasterizerVulkan::OnCacheInvalidation(DAddr addr, u64 size) {
 }
 
 void RasterizerVulkan::InvalidateGPUCache() {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::Invalidation);
     gpu.InvalidateGPUCache();
 }
 
 void RasterizerVulkan::UnmapMemory(DAddr addr, u64 size) {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::Invalidation);
     {
         std::scoped_lock lock{texture_cache.mutex};
         texture_cache.UnmapMemory(addr, size);
@@ -2458,7 +2592,7 @@ void RasterizerVulkan::InitializeChannel(Tegra::Control::ChannelState& channel) 
 }
 
 void RasterizerVulkan::BindChannel(Tegra::Control::ChannelState& channel) {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::Channel);
     const s32 channel_id = channel.bind_id;
     if (maxwell3d != &channel.payload->maxwell_3d) {
         // The resolver owns a reference to its source channel's memory manager.
@@ -2481,7 +2615,7 @@ void RasterizerVulkan::BindChannel(Tegra::Control::ChannelState& channel) {
 }
 
 void RasterizerVulkan::ReleaseChannel(s32 channel_id) {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::Channel);
     if (resolver && resolver->job_bindings_enabled) {
         std::scoped_lock lock{buffer_cache.mutex};
         resolver->ApplyPendingUniformInputs();

@@ -7,6 +7,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <functional>
@@ -100,6 +101,15 @@ public:
     void AdoptCapturedReceiverForTeardown(CapturedBatch& batch, u64 job_id,
                                           std::thread::id former_receiver);
     void ReleaseCaptured(CapturedBatch& batch, u64 job_id);
+    // GPU handoff only, before publication of input / after full FIFO drain.
+    void SetTailProducerLoan(bool enabled) {
+        tail_producer_loan.store(enabled, std::memory_order_release);
+    }
+    void CheckProducer() const {
+        if (tail_producer_loan.load(std::memory_order_acquire)) {
+            CheckLoanedProducer();
+        }
+    }
 
     explicit Scheduler(const Device& device, StateTracker& state_tracker);
     ~Scheduler();
@@ -135,6 +145,7 @@ public:
 
     /// Returns true when a render pass is currently active in the scheduler state.
     bool IsRenderPassActive() const {
+        CheckProducer();
         return state.renderpass != VK_NULL_HANDLE;
     }
 
@@ -178,6 +189,7 @@ public:
             ActiveCapture()->batch.Record(command);
             return;
         }
+        CheckProducer();
         if (chunk->Record(command)) {
             return;
         }
@@ -366,6 +378,10 @@ public:
         u64 SpliceCount() const {
             return splice_count;
         }
+        u64 PrefixSequence() const { return prefix_sequence; }
+        u64 CapturedChunks() const { return captured_chunks; }
+        u64 ChunkHighWater() const { return chunk_high_water; }
+        u64 PendingChunks() const { return static_cast<u64>(sealed.size()); }
 
     private:
         friend class Scheduler;
@@ -399,9 +415,18 @@ public:
         std::vector<std::unique_ptr<CommandChunk>> sealed;
         u64 captured_bytes{};
         u64 splice_count{};
+        u64 prefix_sequence{}, captured_chunks{}, chunk_high_water{};
+        u64 submission_tick{};
+        bool has_submission{};
     };
 
+    // Receiver-owned boundary: advanced only AFTER the submit chunk enters Q.
+    bool IsSubmissionPublished(u64 tick) const {
+        return has_published_submission && tick <= published_submission_tick;
+    }
+
 private:
+    void CheckLoanedProducer() const;
     // Intentional link barrier: stale 1A/initial-1B Record instantiations used
     // ActiveCapture() and incompatible CapturedBatch offsets. Do not provide
     // the old overload; unresolved references require rebuilding consumers.
@@ -489,6 +514,12 @@ private:
     double last_target_fps{};
     u64 max_frame_count{};
     u64 frame_counter{};
+
+    // Appended metadata: preserve CommandChunk's arena and existing member offsets.
+    u64 published_submission_tick{};
+    u64 main_submission_tick{};
+    bool has_published_submission{};
+    std::atomic<bool> tail_producer_loan{};
 };
 
 } // namespace Vulkan

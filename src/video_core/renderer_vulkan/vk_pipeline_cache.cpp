@@ -24,6 +24,7 @@
 #include "shader_recompiler/frontend/maxwell/control_flow.h"
 #include "shader_recompiler/frontend/maxwell/translate_program.h"
 #include "shader_recompiler/program_header.h"
+#include "video_core/dirty_flags.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/memory_manager.h"
@@ -569,6 +570,27 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
         }
     }
     return CurrentGraphicsPipelineSlowPath();
+}
+
+GraphicsPipeline* PipelineCache::TryGraphicsPipelineForParser() {
+    if (!current_pipeline || maxwell3d->dirty.flags[VideoCommon::Dirty::Shaders]) {
+        return nullptr;
+    }
+    graphics_key.state.Refresh(*maxwell3d, dynamic_features);
+    GraphicsPipeline* next = current_pipeline->Next(graphics_key);
+    if (!next) {
+        const auto it = graphics_cache.find(graphics_key);
+        if (it == graphics_cache.end()) {
+            return nullptr;
+        }
+        next = it->second.get();
+    }
+    // Cold dependencies use the existing path only after returning ownership.
+    if (!next || !next->IsBuilt()) {
+        return nullptr;
+    }
+    current_pipeline = next;
+    return next;
 }
 
 ComputePipeline* PipelineCache::CurrentComputePipeline() {

@@ -1297,7 +1297,8 @@ void TextureCache<P>::InvalidateScale(Image& image) {
         image.scale_tick = frame_tick + 1;
     }
     const std::span<const ImageViewId> image_view_ids = image.image_view_ids;
-    auto& dirty = Engine3D()->dirty.flags;
+    auto& dirty = this->DefersGraphicsInvalidations() && !tls_engine_snapshot
+                      ? this->PendingGraphicsInvalidations() : Engine3D()->dirty.flags;
     dirty[Dirty::RenderTargets] = true;
     dirty[Dirty::ZetaBuffer] = true;
     for (size_t rt = 0; rt < NUM_RT; ++rt) {
@@ -2358,7 +2359,8 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered), "Image was not unregistered");
 
     // Mark render targets as dirty
-    auto& dirty = Engine3D()->dirty.flags;
+    auto& dirty = this->DefersGraphicsInvalidations() && !tls_engine_snapshot
+                      ? this->PendingGraphicsInvalidations() : Engine3D()->dirty.flags;
     dirty[Dirty::RenderTargets] = true;
     dirty[Dirty::ZetaBuffer] = true;
     for (size_t rt = 0; rt < NUM_RT; ++rt) {

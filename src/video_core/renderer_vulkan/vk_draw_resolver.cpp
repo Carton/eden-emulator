@@ -255,6 +255,10 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
         u64 id{};
         u64 copies{}, skips{}, overflows{}, sync_requests{};
         std::chrono::nanoseconds resolve_ns{};
+        Clock::time_point enqueued_at{}, emitted_at{};
+        std::chrono::nanoseconds enqueue_latency{};
+        u64 prefix_published{};
+        u64 epoch_hits{}, epoch_misses{}, epoch_classic{};
         bool armed{}, spliced{}; // GPU-only
     };
     struct RequestData {
@@ -274,7 +278,13 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
             entries[i]->job.ctx.job_bindings = owner.job_bindings_enabled;
             entries[i]->job.ctx.check_job_bindings = owner.check_enabled;
         }
-        thread = std::jthread([this](std::stop_token stop) { Run(stop); });
+        thread = std::jthread([this](std::stop_token stop) {
+            if (owner.tail_pipeline_enabled) {
+                RunTails(stop);
+            } else {
+                Run(stop);
+            }
+        });
     }
 
     ~PipelineState() {
@@ -376,6 +386,14 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
         e.job.pipeline = pipeline;
         e.job.is_indexed = indexed;
         e.job.instance_count = instances;
+        if (owner.tail_pipeline_enabled) {
+            e.job.tail_complete = false;
+            e.job.tail_ns = {};
+            e.prefix_published = 0;
+            if (owner.check_enabled) {
+                owner.capture_tail_inputs(live, e.job);
+            }
+        }
         e.job.ctx.Reset(e.engine.get(), &owner.gpu_memory);
         if (owner.job_bindings_enabled) {
             owner.CaptureUniformInputs(e.job.ctx, pipeline->UniformBufferMasks());
@@ -419,6 +437,17 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
         Poll(); // never overwrite a parked worker's request
         ASSERT(!Empty());
         entries[(tail - 1) % depth]->scheduler = &scheduler;
+        if (owner.tail_pipeline_enabled) {
+            auto& e = *entries[(tail - 1) % depth];
+            e.enqueued_at = Clock::now();
+            e.armed = true;
+            // J synchronizes the notification with a parked worker. It never
+            // nests a cache lock. Slot storage is published by ready_tail.
+            std::scoped_lock lock{mutex};
+            ready_tail.store(tail, std::memory_order_release);
+            cv.notify_all();
+            return;
+        }
         ArmFront();
     }
 
@@ -426,10 +455,16 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
                  Scheduler::CaptureSync operation, u64 tick) override {
         std::unique_lock lock{mutex};
         ASSERT(std::this_thread::get_id() == thread.get_id());
+        if (owner.tail_pipeline_enabled && cancelled.load(std::memory_order_acquire)) {
+            throw std::runtime_error("DrawToken tail FIFO cancelled");
+        }
         ASSERT(!request && executing && executing->id == job_id &&
                executing->batch && &*executing->batch == &batch);
         ++executing->sync_requests;
         request = RequestData{executing, operation, tick};
+        if (owner.tail_pipeline_enabled) {
+            request_at = Clock::now();
+        }
         request_pending.store(true, std::memory_order_release);
         cv.notify_all();
         cv.wait(lock, [this] { return !request; }); // releases J, retains B/T
@@ -448,6 +483,10 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
     }
 
     void Poll() {
+        if (owner.tail_pipeline_enabled) {
+            PollTails();
+            return;
+        }
         ASSERT(teardown || std::this_thread::get_id() == gpu_thread);
         if (!request_pending.load(std::memory_order_acquire)) {
             return;
@@ -486,6 +525,10 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
     }
 
     void Wait() {
+        if (owner.tail_pipeline_enabled) {
+            WaitTail();
+            return;
+        }
         if (Empty()) {
             return;
         }
@@ -555,6 +598,11 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
 
     void Retire(Tegra::Engines::Maxwell3D& live) {
         ASSERT(!Empty() && Front().spliced);
+        if (owner.tail_pipeline_enabled) {
+            Front().batch.reset();
+            ++head; // capacity includes every emitted-but-unpublished slot
+            return;
+        }
         // Preserve unconsumed bits, including new invalidations from resolve
         // and tail. No younger resolve can have started before this tail.
         const auto remaining = Front().engine->dirty.flags;
@@ -579,10 +627,12 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
             Tegra::Engines::Maxwell3D* previous{tls_engine_snapshot};
             Tegra::Engines::Maxwell3D* query_previous{
                 VideoCommon::tls_pipeline_engine_snapshot};
+            const VideoCommon::UniformEpochSnapshot* epoch_previous{VideoCommon::tls_uniform_epoch};
             ~Restore() {
                 tracker.ExchangeFlags(flags);
                 tls_engine_snapshot = previous;
                 VideoCommon::tls_pipeline_engine_snapshot = query_previous;
+                VideoCommon::tls_uniform_epoch = epoch_previous;
             }
         } restore{owner.state_tracker,
                   owner.state_tracker.ExchangeFlags(&e.engine->dirty.flags)};
@@ -591,6 +641,14 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
         {
             std::scoped_lock lock{owner.buffer_cache.mutex, owner.texture_cache.mutex};
             Scheduler::CaptureScope capture{*e.scheduler, *e.batch, e.id, this, gpu_thread};
+            if (owner.tail_pipeline_enabled) {
+                e.engine->dirty.flags |= residual_dirty;
+                e.engine->dirty.flags |= owner.buffer_cache.TakeGraphicsInvalidations();
+                e.engine->dirty.flags |= owner.texture_cache.TakeGraphicsInvalidations();
+                e.epoch_hits = owner.buffer_cache.diag_epoch_hits;
+                e.epoch_misses = owner.buffer_cache.diag_epoch_misses;
+                e.epoch_classic = owner.buffer_cache.diag_epoch_classic;
+            }
             const auto start = Clock::now();
             e.job.pipeline->ConfigureResolve(e.job.ctx, e.job.is_indexed);
             e.resolve_ns = Clock::now() - start;
@@ -603,8 +661,259 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
                                         e.epoch.bytes.data()};
                 e.job.epoch_valid = true;
             }
+            if (owner.tail_pipeline_enabled) {
+                VideoCommon::tls_uniform_epoch = e.job.epoch_valid ? &e.job.epoch_snapshot : nullptr;
+                owner.worker_tail(*e.engine, e.job);
+                residual_dirty = e.engine->dirty.flags;
+                e.job.tail_complete = true;
+                e.epoch_hits = owner.buffer_cache.diag_epoch_hits - e.epoch_hits;
+                e.epoch_misses = owner.buffer_cache.diag_epoch_misses - e.epoch_misses;
+                e.epoch_classic = owner.buffer_cache.diag_epoch_classic - e.epoch_classic;
+            }
         }
         e.scheduler->ReleaseCaptured(*e.batch, e.id);
+    }
+
+    // Stage 4 publication is GPU-only. A requesting job can be younger than
+    // Front(): publish its completed predecessors, never wait on a successor.
+    void SpliceTail(Entry& e) {
+        const u64 prefix = e.batch->PrefixSequence();
+        if (e.id != published_tail + 1 || prefix != e.prefix_published + 1) {
+            throw std::logic_error("DrawToken tail prefix order violation");
+        }
+        Splice(e);
+        e.prefix_published = prefix;
+        last_prefix_job = e.id;
+        last_prefix_seq = prefix;
+    }
+
+    void ObservePendingChunks(Entry* requested = nullptr) {
+        u64 chunks = requested ? requested->batch->PendingChunks() : 0;
+        const u64 end = executed_tail.load(std::memory_order_acquire);
+        for (u64 seq = published_tail; seq < end; ++seq) {
+            chunks += entries[seq % depth]->batch->PendingChunks();
+        }
+        queue_chunk_high_water = (std::max)(queue_chunk_high_water, chunks);
+    }
+
+    void PublishTails(u64 end) {
+        ObservePendingChunks();
+        ASSERT(end <= executed_tail.load(std::memory_order_acquire));
+        while (published_tail < end) {
+            auto& e = *entries[published_tail % depth];
+            ASSERT(e.job.tail_complete && e.status.load(std::memory_order_acquire) == Status::Complete);
+            SpliceTail(e);
+            e.spliced = true;
+            ++owner.diag_capture_batches;
+            owner.diag_captured_bytes += e.batch->CapturedBytes();
+            owner.diag_splice_count += e.batch->SpliceCount();
+            captured_chunks += e.batch->CapturedChunks();
+            chunk_high_water = (std::max)(chunk_high_water, e.batch->ChunkHighWater());
+            ++owner.diag_resolve_calls;
+            owner.diag_resolve_ns += e.resolve_ns;
+            ++owner.diag_worker_resolves;
+            owner.diag_worker_sync_requests += e.sync_requests;
+            ++owner.diag_pipeline_resolves;
+            owner.diag_tail_epoch_hits += e.epoch_hits;
+            owner.diag_tail_epoch_misses += e.epoch_misses;
+            owner.diag_tail_epoch_classic += e.epoch_classic;
+            owner.epoch_table.diag_copies += e.epoch.diag_copies - e.copies;
+            owner.epoch_table.diag_skips += e.epoch.diag_skips - e.skips;
+            owner.epoch_table.diag_overflows += e.epoch.diag_overflows - e.overflows;
+            enqueue_latency += e.enqueue_latency;
+            publication_latency += Clock::now() - e.emitted_at;
+            ++published_tail;
+            published_observed.store(published_tail, std::memory_order_release);
+        }
+    }
+
+    [[noreturn]] void PoisonTails(std::exception_ptr error) {
+        const u64 failed_job = published_tail + 1;
+        if (!fatal_error) {
+            fatal_error = error;
+        }
+        cancelled.store(true, std::memory_order_release);
+        std::unique_lock lock{mutex};
+        cv.notify_all();
+        // A younger job may already be emitting. Do not free its slot or wait
+        // on B/T: reject any bridge request so it can unwind and stop itself.
+        while (!stopped.load(std::memory_order_acquire)) {
+            if (request) {
+                sync_error = fatal_error;
+                request.reset();
+                request_pending.store(false, std::memory_order_release);
+                cv.notify_all();
+            }
+            cv.wait(lock, [this] {
+                return stopped.load(std::memory_order_acquire) || request.has_value();
+            });
+        }
+        lock.unlock();
+        const u64 reclaimed = head;
+        for (auto& e : entries) {
+            if (e) {
+                e->batch.reset();
+            }
+        }
+        discarded_jobs += tail - head;
+        head = tail; // discarded suffix; fatal_error prevents all later enqueue
+        LOG_ERROR(Render_Vulkan,
+                  "DrawToken tail FIFO poisoned: failed_job={} enqueued={} executed={} "
+                  "published={} reclaimed={}; partial publication possible, no replay",
+                  failed_job, tail, executed_tail.load(), published_tail, reclaimed);
+        std::rethrow_exception(fatal_error);
+    }
+
+    void CheckTails() {
+        if (fatal_error) {
+            std::rethrow_exception(fatal_error);
+        }
+        if (cancelled.load(std::memory_order_acquire)) {
+            // Worker error and failed_seq precede the release cancellation.
+            auto error = entries[failed_seq % depth]->error;
+            try {
+                PublishTails(executed_tail.load(std::memory_order_acquire));
+            } catch (...) {
+                PoisonTails(std::current_exception());
+            }
+            PoisonTails(error ? error : std::make_exception_ptr(
+                std::runtime_error("DrawToken tail FIFO cancelled")));
+        }
+    }
+
+    void PollTails() {
+        ASSERT(teardown || std::this_thread::get_id() == gpu_thread);
+        CheckTails();
+        try {
+            if (request_pending.load(std::memory_order_acquire)) {
+                std::unique_lock lock{mutex};
+                if (request) {
+                    const auto service = *request;
+                    const auto began = request_at;
+                    lock.unlock();
+                    ObservePendingChunks(service.entry);
+                    bridge_predecessors += executed_tail.load(std::memory_order_acquire) - published_tail;
+                    // Worker parked in job N. All jobs < N have completed,
+                    // including ones not yet reclaimed by the GPU.
+                    PublishTails(executed_tail.load(std::memory_order_acquire));
+                    auto& e = *service.entry;
+                    SpliceTail(e);
+                    switch (service.operation) {
+                    case Scheduler::CaptureSync::Publish:
+                        e.scheduler->DispatchWork();
+                        break;
+                    case Scheduler::CaptureSync::WaitWorker:
+                        e.scheduler->WaitWorker();
+                        break;
+                    case Scheduler::CaptureSync::WaitTick:
+                        if (!e.scheduler->IsSubmissionPublished(service.tick)) {
+                            throw std::logic_error("DrawToken wait before submit publication");
+                        }
+                        e.scheduler->GetMasterSemaphore().Wait(service.tick);
+                        break;
+                    }
+                    bridge_latency += Clock::now() - began;
+                    ++bridge_services;
+                    lock.lock();
+                    request.reset();
+                    request_pending.store(false, std::memory_order_release);
+                    cv.notify_all();
+                }
+            }
+            PublishTails(executed_tail.load(std::memory_order_acquire));
+        } catch (...) {
+            PoisonTails(std::current_exception());
+        }
+        CheckTails();
+    }
+
+    void WaitTail() {
+        if (Empty()) {
+            return; // quiescent teardown must not rethrow an already reported poison
+        }
+        PollTails();
+        auto next_warning = Clock::now() + std::chrono::seconds{5};
+        while (published_tail <= head) {
+            const bool spun = SpinUntil(owner.spin_us, [&] {
+                return executed_tail.load(std::memory_order_acquire) > head ||
+                       request_pending.load(std::memory_order_acquire) ||
+                       cancelled.load(std::memory_order_acquire);
+            });
+            PollTails();
+            if (published_tail > head) {
+                owner.diag_pipeline_spin_wins += spun;
+                break;
+            }
+            std::unique_lock lock{mutex};
+            if (!request && executed_tail.load(std::memory_order_acquire) <= head &&
+                !cancelled.load(std::memory_order_acquire)) {
+                ++owner.diag_pipeline_parks;
+                cv.wait_for(lock, std::chrono::seconds{5});
+            }
+            lock.unlock();
+            PollTails();
+            if (Clock::now() >= next_warning) {
+                LOG_WARNING(Render_Vulkan,
+                            "DrawToken tail wait: job={} executed={} published={} reclaimed={}",
+                            Front().id, executed_tail.load(), published_tail, head);
+                next_warning = Clock::now() + std::chrono::seconds{5};
+            }
+        }
+    }
+
+    void RunTails(std::stop_token stop) {
+        Common::SetCurrentThreadName("DrawResolver");
+        u64 cursor{};
+        for (;;) {
+            const bool spun = SpinUntil(owner.spin_us, [&] {
+                return ready_tail.load(std::memory_order_acquire) > cursor ||
+                       cancelled.load(std::memory_order_acquire) || stop.stop_requested();
+            });
+            std::unique_lock lock{mutex};
+            if (ready_tail.load(std::memory_order_acquire) == cursor &&
+                !cancelled.load(std::memory_order_acquire) && !stop.stop_requested()) {
+                owner.diag_pipeline_worker_parks.fetch_add(1, std::memory_order_relaxed);
+                cv.wait(lock, stop, [&] {
+                    return ready_tail.load(std::memory_order_acquire) > cursor ||
+                           cancelled.load(std::memory_order_acquire);
+                });
+            } else if (spun) {
+                owner.diag_pipeline_worker_spin_wins.fetch_add(1, std::memory_order_relaxed);
+            }
+            if (stop.stop_requested() || cancelled.load(std::memory_order_acquire)) {
+                stopped.store(true, std::memory_order_release);
+                cv.notify_all();
+                return;
+            }
+            auto& e = *entries[cursor % depth];
+            executing = &e;
+            max_executing.store(1, std::memory_order_relaxed);
+            lock.unlock();
+            try {
+                e.enqueue_latency = Clock::now() - e.enqueued_at;
+                Resolve(e);
+                e.emitted_at = Clock::now();
+            } catch (...) {
+                e.error = std::current_exception();
+            }
+            lock.lock();
+            executing = nullptr;
+            if (e.error) {
+                failed_seq = cursor;
+                e.status.store(Status::Failed, std::memory_order_release);
+                cancelled.store(true, std::memory_order_release);
+                stopped.store(true, std::memory_order_release);
+                cv.notify_all();
+                return; // younger slots are poisoned, never executed
+            }
+            const u64 unpublished = cursor + 1 - published_observed.load(std::memory_order_acquire);
+            max_unpublished.store((std::max)(max_unpublished.load(), unpublished));
+            e.status.store(Status::Complete, std::memory_order_release);
+            executed_tail.store(++cursor, std::memory_order_release);
+            cv.notify_all();
+            // No slot access after executed_tail publication: receiver can
+            // publish/reclaim while this thread starts the next queued job.
+        }
     }
 
     void Run(std::stop_token stop) {
@@ -660,6 +969,20 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
     std::atomic<u64> wake_sequence{};
     Entry* scheduled{}; // J-protected, published with wake_sequence
     Entry* executing{}; // J-protected for Request
+    // Stage 4: tail/head are GPU enqueued/reclaimed positions. Publication is
+    // independent; worker alone advances executed_tail. All are exclusive ends.
+    std::atomic<u64> ready_tail{}, executed_tail{}, published_observed{};
+    Scheduler* tail_scheduler{}; // GPU-only handoff target; survives all jobs
+    u64 published_tail{};
+    std::atomic<bool> cancelled{}, stopped{};
+    u64 failed_seq{}; // published by stopped/cancelled after the error is stored
+    Tegra::Engines::Maxwell3D::DirtyState::Flags residual_dirty{};
+    Clock::time_point request_at{}; // J/bridge rendezvous
+    std::atomic<u64> max_unpublished{};
+    std::atomic<u64> max_executing{};
+    u64 captured_chunks{}, chunk_high_water{}, queue_chunk_high_water{}, discarded_jobs{};
+    std::chrono::nanoseconds enqueue_latency{}, publication_latency{}, bridge_latency{};
+    u64 bridge_services{}, bridge_predecessors{}, last_prefix_job{}, last_prefix_seq{};
     std::jthread thread;
 };
 
@@ -764,6 +1087,69 @@ void DrawResolver::PollResolveSync() {
     }
 }
 
+bool DrawResolver::TailFrontReady() {
+    PollResolveSync();
+    return pipeline_state && pipeline_state->published_tail > pipeline_state->head;
+}
+
+void DrawResolver::ReturnTailOwnership(Tegra::Engines::Maxwell3D& engine) {
+    if (!tail_pipeline_enabled || !tail_ownership) {
+        return;
+    }
+    ASSERT(pipeline_state && pipeline_state->Empty());
+    std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
+    engine.dirty.flags |= pipeline_state->residual_dirty;
+    pipeline_state->residual_dirty.reset();
+    engine.dirty.flags |= buffer_cache.TakeGraphicsInvalidations();
+    engine.dirty.flags |= texture_cache.TakeGraphicsInvalidations();
+    buffer_cache.DeferGraphicsInvalidations(false);
+    texture_cache.DeferGraphicsInvalidations(false);
+    if (pipeline_state->tail_scheduler) {
+        pipeline_state->tail_scheduler->SetTailProducerLoan(false);
+        pipeline_state->tail_scheduler = nullptr;
+    }
+    tail_ownership = false;
+}
+
+void DrawResolver::LogTailPipelineDiag() {
+    if (!pipeline_state) {
+        return;
+    }
+    const auto& p = *pipeline_state;
+    const u64 published = p.published_tail;
+    LOG_INFO(Render_Vulkan,
+             "DrawToken tail FIFO: enqueued={} executed={} published={} reclaimed={} "
+             "max_queued={} max_executing={} max_emitted_unpublished={} capacity_waits={} "
+             "enqueue_execution_avg_ns={} emission_publication_avg_ns={} "
+             "bridge_services={} bridge_service_avg_ns={} captured_bytes={} captured_chunks={} "
+             "bytes_per_draw={} chunks_per_draw={} batch_chunk_high_water={} "
+             "unpublished_chunk_high_water={} discarded={} enqueue_execution_ns={} "
+             "emission_publication_ns={} bridge_service_ns={} bridge_predecessors={} "
+             "last_prefix_job={} last_prefix_seq={}",
+             p.tail, p.executed_tail.load(std::memory_order_acquire), published, p.head - p.discarded_jobs,
+             diag_pipeline_max_inflight, p.max_executing.load(), p.max_unpublished.load(),
+             diag_pipeline_backpressure, published ? p.enqueue_latency.count() / published : 0,
+             published ? p.publication_latency.count() / published : 0,
+             p.bridge_services, p.bridge_services ? p.bridge_latency.count() / p.bridge_services : 0,
+             diag_captured_bytes, p.captured_chunks,
+             published ? diag_captured_bytes / published : 0,
+             published ? static_cast<double>(p.captured_chunks) / published : 0.0,
+             p.chunk_high_water, p.queue_chunk_high_water, p.discarded_jobs,
+             p.enqueue_latency.count(), p.publication_latency.count(), p.bridge_latency.count(),
+             p.bridge_predecessors, p.last_prefix_job, p.last_prefix_seq);
+}
+
+void DrawResolver::AbortTailPipeline(std::exception_ptr error) noexcept {
+    if (tail_pipeline_enabled && pipeline_state) {
+        try {
+            pipeline_state->PoisonTails(error);
+        } catch (...) {
+            // Teardown only: poison already stopped the producer and discarded
+            // all unpublished batches. The original failure was reported.
+        }
+    }
+}
+
 void DrawResolver::PreparePipelineEnqueue() {
     PollResolveSync();
     if (pipeline_state && !pipeline_state->Empty() && pipeline_state->Front().armed) {
@@ -812,7 +1198,7 @@ void DrawResolver::CopyDynamicState(Tegra::Engines::Maxwell3D& engine) {
 bool DrawResolver::SnapshotAndEnqueue(Tegra::Engines::Maxwell3D& engine,
                                       GraphicsPipeline* pipeline, bool is_indexed,
                                       u32 instance_count) {
-    if (tail_worker_enabled) {
+    if (tail_worker_enabled && !tail_pipeline_enabled) {
         if (tail_worker_error) {
             std::rethrow_exception(tail_worker_error);
         }
@@ -823,6 +1209,14 @@ bool DrawResolver::SnapshotAndEnqueue(Tegra::Engines::Maxwell3D& engine,
     if (pipeline_enabled) {
         if (!pipeline_state) {
             pipeline_state = std::make_unique<PipelineState>(*this);
+        }
+        if (tail_pipeline_enabled && !tail_ownership) {
+            // Route foreign invalidations BEFORE copying live flags. Enabling
+            // at Kick would lose an invalidation between snapshot and dispatch.
+            std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
+            buffer_cache.DeferGraphicsInvalidations(true);
+            texture_cache.DeferGraphicsInvalidations(true);
+            tail_ownership = true;
         }
         return pipeline_state->Snapshot(engine, pipeline, is_indexed, instance_count);
     }
@@ -891,6 +1285,11 @@ bool DrawResolver::SnapshotAndEnqueue(Tegra::Engines::Maxwell3D& engine,
 
 void DrawResolver::ExecuteResolve(Scheduler& scheduler) {
     if (pipeline_enabled) {
+        if (tail_pipeline_enabled && !pipeline_state->tail_scheduler) {
+            ASSERT(tail_ownership);
+            pipeline_state->tail_scheduler = &scheduler;
+            scheduler.SetTailProducerLoan(true);
+        }
         pipeline_state->Kick(scheduler);
         return; // 2A waits at consumption/barriers, never at this enqueue point.
     }

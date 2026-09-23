@@ -70,6 +70,7 @@ public:
         // by the GPU retirement path. Never authorizes replay after failure.
         bool tail_complete{};
         std::chrono::nanoseconds tail_ns{};
+        std::array<u32, 6> expected_draw_inputs{}; // stage 4: LIVE enqueue oracle
     };
 
     DrawResolver(Tegra::MemoryManager& gpu_memory_, BufferCache& buffer_cache_,
@@ -86,6 +87,10 @@ public:
     void PreparePipelineEnqueue();
     // Rasterizer destruction only, after the ordinary GPU producer has stopped.
     void BeginPipelineTeardown();
+    bool TailFrontReady();
+    void ReturnTailOwnership(Tegra::Engines::Maxwell3D& engine);
+    void LogTailPipelineDiag();
+    void AbortTailPipeline(std::exception_ptr error) noexcept;
 
     // GPU thread: block until the current job finished resolving (returns
     // immediately when none is running).
@@ -130,7 +135,9 @@ public:
     bool batch_enabled{false}; // EDEN_TOKEN_BATCH=1; never enables worker resolve
     bool worker_enabled{false}; // EDEN_TOKEN_WORKER=1 alone: batch + immediate wait
     bool tail_worker_enabled{false}; // stage 3: exclusive producer loan, immediate wait
+    bool tail_pipeline_enabled{false}; // stage 4, independent strict opt-in
     std::function<void(Tegra::Engines::Maxwell3D&, Job&)> worker_tail;
+    std::function<void(const Tegra::Engines::Maxwell3D&, Job&)> capture_tail_inputs;
     bool pipeline_enabled{false}; // EDEN_TOKEN_PIPELINE=1; queue + consumer-side wait
     static constexpr u32 MaxPipelineDepth = 4;
     u32 pipeline_depth{1};
@@ -155,6 +162,7 @@ public:
     u64 diag_splice_count{};    // nonempty prefix publications (Finish may split a batch)
     u64 diag_worker_resolves{};
     u64 diag_worker_sync_requests{};
+    u64 diag_tail_epoch_hits{}, diag_tail_epoch_misses{}, diag_tail_epoch_classic{};
     u64 diag_pipeline_resolves{};
     std::chrono::nanoseconds diag_pipeline_snapshot_ns{};
     u64 diag_pipeline_snapshot_count{};
@@ -210,6 +218,7 @@ private:
     std::exception_ptr tail_worker_error; // GPU-owned poison; submitted prefixes cannot replay
     struct PipelineState;
     std::unique_ptr<PipelineState> pipeline_state;
+    bool tail_ownership{}; // GPU-only; cache-local routing changes only at handoff
 };
 
 } // namespace Vulkan

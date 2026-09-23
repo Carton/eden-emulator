@@ -2213,7 +2213,8 @@ void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
         channel_state->uniform_buffer_binding_sizes.fill({});
     }
 
-    auto& flags = Engine3D()->dirty.flags;
+    auto& flags = this->DefersGraphicsInvalidations() && !tls_engine_snapshot
+                      ? this->PendingGraphicsInvalidations() : Engine3D()->dirty.flags;
     if (dirty_index) {
         flags[Dirty::IndexBuffer] = true;
     }

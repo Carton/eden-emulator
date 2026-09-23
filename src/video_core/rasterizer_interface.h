@@ -115,7 +115,8 @@ public:
 
     /// Complete a pending draw before GPU-thread memory writes or page-table
     /// changes. Other backends submit draws synchronously and need no barrier.
-    virtual void WaitForDrawResolve() {}
+    enum class DrawResolveReason { GuestWrite, Map, Unmap };
+    virtual void WaitForDrawResolve(DrawResolveReason = DrawResolveReason::GuestWrite) {}
 
     /// Sync memory between guest and host.
     virtual void InvalidateGPUCache() = 0;
