@@ -156,6 +156,13 @@ VkRect2D GetScissorState(const Maxwell& regs, size_t index, u32 up_scale = 1, u3
     return scissor;
 }
 
+// GPU-thread-only counters. Indirect draws never enter Draw(); without these
+// the token diag cannot distinguish "scene has no indirect draws" from "never
+// looked" (the fallbacks counter only covers inline-index fallbacks).
+u64 diag_draw_indirect_calls{};
+u64 diag_draw_indirect_byte_count{};
+u64 diag_draw_indirect_count_buffer{};
+
 DrawParams MakeDrawParams(const Tegra::Engines::Maxwell3D::DrawManager::State& draw_state, u32 num_instances, bool is_indexed) {
     DrawParams params{
         .base_instance = draw_state.base_instance,
@@ -271,9 +278,10 @@ RasterizerVulkan::~RasterizerVulkan() {
     if (resolver) {
         resolver->WaitResolved();
     }
-    if (pipelined_draws || fallback_draws) {
-        LOG_INFO(Render_Vulkan, "Draw tokens: {} pipelined, {} synchronous fallback",
-                 pipelined_draws, fallback_draws);
+    if (pipelined_draws || fallback_draws || diag_draw_indirect_calls) {
+        LOG_INFO(Render_Vulkan,
+                 "Draw tokens: {} pipelined, {} synchronous fallback, {} indirect",
+                 pipelined_draws, fallback_draws, diag_draw_indirect_calls);
     }
     // Drain queued token commands before member teardown frees the resolver.
     scheduler.WaitWorker();
@@ -563,6 +571,12 @@ void RasterizerVulkan::LogTokenDiag() {
              buffer_cache.diag_epoch_hits, buffer_cache.diag_epoch_misses,
              buffer_cache.diag_epoch_classic, resolver->epoch_table.diag_copies,
              resolver->epoch_table.diag_skips, resolver->epoch_table.diag_overflows);
+    if (diag_draw_indirect_calls) {
+        LOG_INFO(Render_Vulkan,
+                 "DrawToken diag: indirect_calls={} (byte_count={} count_buffer={})",
+                 diag_draw_indirect_calls, diag_draw_indirect_byte_count,
+                 diag_draw_indirect_count_buffer);
+    }
     if (resolver->batch_enabled) {
         LOG_INFO(Render_Vulkan,
                  "DrawToken diag: capture_batches={} captured_bytes={} splice_count={}",
@@ -736,8 +750,11 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
 }
 
 void RasterizerVulkan::DrawIndirect() {
+    ++diag_draw_indirect_calls;
     FlushPendingDraw();
     const auto& params = maxwell3d->draw_manager.indirect_state;
+    diag_draw_indirect_byte_count += params.is_byte_count;
+    diag_draw_indirect_count_buffer += params.include_count;
     buffer_cache.SetDrawIndirect(&params);
     PrepareDraw(params.is_indexed, [this, &params] {
         const auto indirect_buffer = buffer_cache.GetDrawIndirectBuffer();
