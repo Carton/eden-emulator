@@ -26,6 +26,7 @@
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_state_tracker.h"
+#include "video_core/renderer_vulkan/vk_tail_pipeline_diag.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 
 namespace Vulkan {
@@ -292,6 +293,9 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
         thread.request_stop();
         cv.notify_all();
         thread.join();
+        if (owner.tail_pipeline_enabled) {
+            worker_final.Log("worker_final", this);
+        }
     }
 
     Entry& Front() const { return *entries[head % depth]; }
@@ -782,6 +786,7 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
     }
 
     void PollTails() {
+        ++TailPipelineDiag::gpu.poll_calls;
         ASSERT(teardown || std::this_thread::get_id() == gpu_thread);
         CheckTails();
         try {
@@ -863,6 +868,9 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
 
     void RunTails(std::stop_token stop) {
         Common::SetCurrentThreadName("DrawResolver");
+        auto& timing = TailPipelineDiag::worker;
+        timing = {};
+        auto idle_begin = Clock::now(); // one startup stamp, not per draw
         u64 cursor{};
         for (;;) {
             const bool spun = SpinUntil(owner.spin_us, [&] {
@@ -870,6 +878,8 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
                        cancelled.load(std::memory_order_acquire) || stop.stop_requested();
             });
             std::unique_lock lock{mutex};
+            worker_timing = &timing;
+            worker_idle_begin = idle_begin;
             if (ready_tail.load(std::memory_order_acquire) == cursor &&
                 !cancelled.load(std::memory_order_acquire) && !stop.stop_requested()) {
                 owner.diag_pipeline_worker_parks.fetch_add(1, std::memory_order_relaxed);
@@ -881,6 +891,9 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
                 owner.diag_pipeline_worker_spin_wins.fetch_add(1, std::memory_order_relaxed);
             }
             if (stop.stop_requested() || cancelled.load(std::memory_order_acquire)) {
+                timing.idle_ns += TailPipelineDiag::Ns(Clock::now() - idle_begin);
+                worker_final = timing;
+                worker_timing = nullptr;
                 stopped.store(true, std::memory_order_release);
                 cv.notify_all();
                 return;
@@ -889,8 +902,10 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
             executing = &e;
             max_executing.store(1, std::memory_order_relaxed);
             lock.unlock();
+            Clock::time_point job_begin;
             try {
-                e.enqueue_latency = Clock::now() - e.enqueued_at;
+                job_begin = Clock::now(); // reuse the existing enqueue latency stamp
+                e.enqueue_latency = job_begin - e.enqueued_at;
                 Resolve(e);
                 e.emitted_at = Clock::now();
             } catch (...) {
@@ -898,7 +913,10 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
             }
             lock.lock();
             executing = nullptr;
+            timing.idle_ns += TailPipelineDiag::Ns(job_begin - idle_begin);
             if (e.error) {
+                worker_final = timing;
+                worker_timing = nullptr;
                 failed_seq = cursor;
                 e.status.store(Status::Failed, std::memory_order_release);
                 cancelled.store(true, std::memory_order_release);
@@ -908,9 +926,23 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
             }
             const u64 unpublished = cursor + 1 - published_observed.load(std::memory_order_acquire);
             max_unpublished.store((std::max)(max_unpublished.load(), unpublished));
+            // TLS accumulation is under the ALREADY held completion lock J.
+            // The cold diagnostic reader can copy it under J without races.
+            const auto& job_timing = TailPipelineDiag::worker_job;
+            timing.resolve_ns += TailPipelineDiag::Ns(job_timing.tail_begin - job_begin);
+            timing.resolve_body_ns += static_cast<u64>(e.resolve_ns.count());
+            timing.tail_ns += TailPipelineDiag::Ns(job_timing.tail_end - job_timing.tail_begin);
+            const auto split = job_timing.emitted ? job_timing.emit_begin : job_timing.tail_end;
+            timing.tail_configure_ns += TailPipelineDiag::Ns(split - job_timing.tail_begin);
+            timing.tail_emit_ns += TailPipelineDiag::Ns(job_timing.tail_end - split);
             e.status.store(Status::Complete, std::memory_order_release);
             executed_tail.store(++cursor, std::memory_order_release);
             cv.notify_all();
+            const auto published_at = Clock::now();
+            timing.publish_ns += TailPipelineDiag::Ns(published_at - job_timing.tail_end);
+            ++timing.jobs;
+            idle_begin = published_at;
+            worker_idle_begin = idle_begin;
             // No slot access after executed_tail publication: receiver can
             // publish/reclaim while this thread starts the next queued job.
         }
@@ -963,6 +995,10 @@ struct DrawResolver::PipelineState final : Scheduler::CaptureSyncBridge {
     u64 head{}, tail{}; // GPU-only FIFO, includes completed but unconsumed tails
     std::mutex mutex;
     std::condition_variable_any cv;
+    // J-protected snapshot access; the TLS pointer is cleared before thread exit.
+    TailPipelineDiag::Worker* worker_timing{};
+    TailPipelineDiag::Worker worker_final{};
+    Clock::time_point worker_idle_begin{};
     std::optional<RequestData> request;
     std::exception_ptr sync_error;
     std::atomic<bool> request_pending{};
@@ -1115,10 +1151,10 @@ void DrawResolver::LogTailPipelineDiag() {
     if (!pipeline_state) {
         return;
     }
-    const auto& p = *pipeline_state;
+    auto& p = *pipeline_state;
     const u64 published = p.published_tail;
     LOG_INFO(Render_Vulkan,
-             "DrawToken tail FIFO: enqueued={} executed={} published={} reclaimed={} "
+             "DrawToken tail FIFO diag: enqueued={} executed={} published={} reclaimed={} "
              "max_queued={} max_executing={} max_emitted_unpublished={} capacity_waits={} "
              "enqueue_execution_avg_ns={} emission_publication_avg_ns={} "
              "bridge_services={} bridge_service_avg_ns={} captured_bytes={} captured_chunks={} "
@@ -1137,6 +1173,20 @@ void DrawResolver::LogTailPipelineDiag() {
              p.chunk_high_water, p.queue_chunk_high_water, p.discarded_jobs,
              p.enqueue_latency.count(), p.publication_latency.count(), p.bridge_latency.count(),
              p.bridge_predecessors, p.last_prefix_job, p.last_prefix_seq);
+    if (tail_pipeline_enabled) {
+        TailPipelineDiag::Worker timing;
+        {
+            std::scoped_lock lock{p.mutex}; // reporting only; no new hot-path lock
+            timing = p.worker_timing ? *p.worker_timing : p.worker_final;
+            if (p.worker_timing && !p.executing) {
+                timing.idle_ns += TailPipelineDiag::Ns(Clock::now() - p.worker_idle_begin);
+            }
+        }
+        timing.Log("periodic", &p);
+        if (std::this_thread::get_id() == p.gpu_thread) {
+            TailPipelineDiag::gpu.Log("periodic");
+        }
+    }
 }
 
 void DrawResolver::AbortTailPipeline(std::exception_ptr error) noexcept {

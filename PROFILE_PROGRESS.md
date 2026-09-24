@@ -3948,3 +3948,87 @@ EDEN_TOKEN_TAIL_PIPELINE=1 归档为已验证实验开关（与 2A 同等待遇�
 门；性能天花板之争正式进入 stage 5（拆除已证明不必要的等待+捕获瘦身）+
 codex 遗留项（残余 dirty 传播精化）。2B 档案臂对比（vs PIPELINE=1）未跑，
 不阻塞定案（两者都已归档）。
+
+
+### 33.14 Stage 5 step 0: tail-FIFO decomposition instrumentation (2026-09-24, source only)
+
+Only EDEN_TOKEN_TAIL_PIPELINE uses the new measurements. No env/default/depth,
+queue sequence, wait, invalidation, capture, checker or command-emission behavior
+changes. No build/run/commit; acceptance and binary rebuild remain user-owned.
+
+Clock budget interpretation (clarification asked during implementation): NEW
+steady-state points, excluding existing spin-loop/resolve/tail/latency clocks.
+GPU DrawTailPipelined adds entry + end-of-poll + optional capacity-wait end +
+prepare/enqueue end = at most 4. Worker adds the coarse tail split + completion
+handoff end = at most 2. A nonempty reason drain adds 2 (8 for a draw with one
+such drain). Empty drains add no clocks. Startup/stop, diagnostic reporting and
+additional exceptional/barrier/TAIL_IMM events have their own event cost; this is
+NOT a claim of a global eight-clock hard cap with arbitrarily many callbacks.
+No sampling or per-command Record instrumentation was added.
+
+GPU counters are thread_local u64. The ordinary draw-entry poll/publish/reclaim
+block is timed as a group; ALL PollTails invocations are separately counted.
+Polls inside capacity waits, reason drains, and Kick remain charged to those
+containing blocks (not timed again), so the grouped service time must not be
+interpreted as the exclusive time of all individual PollTails calls.
+- gpu_poll_publish_reclaim: entry PollResolveSync + ready-head reclaim loop.
+- gpu_capacity_wait_service: full-queue CommitPendingDraw, including its wait,
+  bridge/publish/check/reclaim work. Total, event count, max, histogram.
+- gpu_parse_snapshot_enqueue_inclusive: post-capacity preparation, FlushWork /
+  FlushCaching, pipeline lookup, snapshot and Kick; excludes final TAIL_IMM drain
+  and LogTokenDiag. Early returns/fallbacks count as draw attempts; admitted is
+  also printed. This does NOT measure guest command parsing outside Draw().
+- gpu_parse_snapshot_enqueue_exclusive subtracts measured nonempty drains nested
+  in that preparation region. gpu_draw_accounted = entry service + capacity +
+  inclusive preparation. Do not add reason-drain totals to this inclusive sum.
+- drain_reason rows: time nonempty FlushPendingDraw through ReturnTailOwnership,
+  before recursively servicing general GPU requests. Empty calls have zero FIFO
+  wait and keep their original call counters; their overhead stays in the parent
+  region. Rasterizer teardown has a separate gpu_teardown_drain final metric.
+
+Eight histogram buckets are [0,1), [1,2), [2,4), [4,8), [8,16), [16,32), [32,64),
+[64,infinity) microseconds; ge128 is an overlapping overflow SUBCOUNT, not a ninth
+bucket. Sum of the eight buckets equals capacity_waits. Max/total remain exact.
+
+Worker measurements reuse the existing enqueue-execution and tail timestamps:
+- worker_resolve_epoch_lock: execution entry through tail start; includes batch /
+  TLS setup, B/T acquisition, resolve, epoch and the pre-tail checker.
+- worker_resolve_body: existing ConfigureResolve interval; SUBSET of the above.
+- worker_tail: the existing tail interval, split at ConfigureTail return into
+  worker_tail_configure_bind and worker_tail_dynamic_query_draw_capture.
+  IMPORTANT: ConfigureTail itself emits binding/upload commands. This is the
+  permitted COARSE seam, not a claim of pure CPU-state versus pure capture time.
+  The measured helper executes the same operations/order as FinishDrawLocked;
+  the legacy helper and Stage-3 callback are preserved exactly.
+- worker_publish_handoff: tail end through residual/RAII cleanup, ReleaseCaptured,
+  completion-lock reacquisition, existing executed publication and notification.
+  It is WORKER sealing/handoff, not the GPU work_queue splice.
+- worker_idle_spin_park: prior handoff end to next execution entry, including
+  spin, park, wake and loop overhead; final idle is closed at worker stop.
+  worker_active = resolve + tail + publish. worker_cycle_including_idle adds idle.
+
+Worker TLS counters are updated under the ALREADY held completion mutex J. The
+cold LogTailPipelineDiag reader copies them under J, then logs AFTER releasing J;
+no new hot lock or atomic operation. The TLS pointer is cleared under J before
+thread exit and final counters retained. Existing log cadence is unchanged.
+GPU TLS emits scope=gpu_thread_final at thread exit (covers channel switches and
+avoids reading dead TLS when rasterizer destruction is on another thread).
+Worker destruction joins as before, then emits scope=worker_final with resolver
+identity. Do not sum periodic cumulative rows; use delta windows, or final rows
+(one GPU-thread total and one worker total per resolver). All rows start with
+DrawToken stage5 diag (the "diag" token keeps them inside bench_run.py's
+diag.txt extraction filter, which matches the substring "diag"; LogTailPipelineDiag's
+FIFO line likewise became "DrawToken tail FIFO diag") and use grep-friendly
+key=value fields, with counts, total_ns,
+total_us, us_per_call and us_per_draw. Rasterizer teardown emits its own final
+cold drain metric. Periodic worker idle may include the currently open idle
+interval; active-job measurements are complete-job totals.
+
+Static checks: delimiters and changed-source diff --check; 13 legacy/FIFO/helper
+bodies compared unchanged; measured-vs-legacy tail operation sequence compared
+identical after removing timing statements/comments. No scheduler Record/chunk,
+buffer-cache serial cuts, bindings or env parsing changes. MSVC compilation,
+measurement perturbation and runtime accounting remain unverified.
+
+Files: src/video_core/renderer_vulkan/vk_tail_pipeline_diag.h (new),
+vk_draw_resolver.cpp, vk_rasterizer.cpp, vk_rasterizer.h, plus PROFILE_PROGRESS.md.

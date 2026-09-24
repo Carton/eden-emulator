@@ -185,6 +185,8 @@ private:
     void LogTokenDiag(bool force_tail_diag = false);
     void FinishDrawLocked(Tegra::Engines::Maxwell3D& engine, GraphicsPipeline& pipeline,
                           DrawContext& ctx, bool is_indexed, u32 instance_count);
+    void FinishDrawLockedMeasured(Tegra::Engines::Maxwell3D& engine, GraphicsPipeline& pipeline,
+                                  DrawContext& ctx, bool is_indexed, u32 instance_count);
     void RecordDraw(Tegra::Engines::Maxwell3D& engine, bool is_indexed, u32 instance_count);
     void WaitForDrawResolve(DrawResolveReason reason = DrawResolveReason::GuestWrite) override;
 

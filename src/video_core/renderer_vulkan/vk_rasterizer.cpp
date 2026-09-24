@@ -42,6 +42,7 @@
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/renderer_vulkan/vk_state_tracker.h"
+#include "video_core/renderer_vulkan/vk_tail_pipeline_diag.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/shader_cache.h"
@@ -284,6 +285,7 @@ RasterizerVulkan::~RasterizerVulkan() {
             tail_drains[index] += pending_commit.load(std::memory_order_acquire);
         }
         if (resolver->tail_pipeline_enabled) {
+            const auto teardown_begin = TailPipelineDiag::Clock::now();
             try {
                 while (pending_commit.load(std::memory_order_acquire)) {
                     CommitPendingDraw();
@@ -293,6 +295,9 @@ RasterizerVulkan::~RasterizerVulkan() {
                 resolver->AbortTailPipeline(std::current_exception());
                 pending_commit.store(false, std::memory_order_release);
             }
+            TailPipelineDiag::Metric("rasterizer_final", resolver.get(), "gpu_teardown_drain",
+                                    1, TailPipelineDiag::Ns(TailPipelineDiag::Clock::now() - teardown_begin),
+                                    pipelined_draws);
         } else {
             while (pending_commit.load(std::memory_order_acquire)) {
                 CommitPendingDraw();
@@ -429,6 +434,24 @@ void RasterizerVulkan::EnsureResolver() {
             job.tail_ns = std::chrono::steady_clock::now() - tail_start;
             RecordWorkerTailDiag(token_check_enabled, equivalent);
         };
+        if (resolver->tail_pipeline_enabled) {
+            // Separate instrumented callback: Stage 3 retains its exact body.
+            resolver->worker_tail = [this](Tegra::Engines::Maxwell3D& shadow, DrawResolver::Job& job) {
+                bool equivalent = true;
+                if (token_check_enabled) {
+                    equivalent = job.expected_draw_inputs == DrawInputWords(MakeDrawParams(
+                        shadow.draw_manager.draw_state, job.instance_count, job.is_indexed));
+                }
+                auto& timing = TailPipelineDiag::worker_job;
+                timing.tail_begin = std::chrono::steady_clock::now();
+                timing.emitted = false;
+                FinishDrawLockedMeasured(shadow, *job.pipeline, job.ctx, job.is_indexed,
+                                         job.instance_count);
+                timing.tail_end = std::chrono::steady_clock::now();
+                job.tail_ns = timing.tail_end - timing.tail_begin;
+                RecordWorkerTailDiag(token_check_enabled, equivalent);
+            };
+        }
         if (!resolver->tail_pipeline_enabled) {
             LOG_INFO(Render_Vulkan,
                  "DrawToken tail worker: immediate rendezvous; implies JOB_BINDINGS, WORKER, BATCH; "
@@ -550,8 +573,12 @@ void RasterizerVulkan::FlushPendingDraw(DrawDrain reason) {
             throw std::runtime_error("DrawToken producer entry after session cancellation");
         }
         const auto index = static_cast<size_t>(reason);
+        static_assert(static_cast<size_t>(DrawDrain::Count) == TailPipelineDiag::DrainNames.size());
         ++tail_drain_calls[index];
-        if (pending_commit.load(std::memory_order_acquire)) {
+        const bool nonempty = pending_commit.load(std::memory_order_acquire);
+        const auto drain_begin = nonempty ? TailPipelineDiag::Clock::now()
+                                         : TailPipelineDiag::Clock::time_point{};
+        if (nonempty) {
             ++tail_drains[index];
         }
         while (pending_commit.load(std::memory_order_acquire)) {
@@ -559,6 +586,10 @@ void RasterizerVulkan::FlushPendingDraw(DrawDrain reason) {
             ++tail_drain_jobs[index];
         }
         resolver->ReturnTailOwnership(*maxwell3d);
+        if (nonempty) {
+            TailPipelineDiag::gpu.Drain(index,
+                TailPipelineDiag::Ns(TailPipelineDiag::Clock::now() - drain_begin));
+        }
         // Arbitrary GPU requests may mutate producer state. Service only at
         // an explicit handoff, never between reclaiming two queued tails.
         if (tail_maintenance_pending) {
@@ -623,6 +654,24 @@ void RasterizerVulkan::FinishDrawLocked(Tegra::Engines::Maxwell3D& engine,
 
     UpdateDynamicStates(engine, &pipeline);
 
+    query_cache.NotifySegment(true);
+    HandleTransformFeedback(engine);
+    query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64,
+                              engine.regs.zpass_pixel_count_enable);
+    RecordDraw(engine, is_indexed, instance_count);
+}
+
+void RasterizerVulkan::FinishDrawLockedMeasured(Tegra::Engines::Maxwell3D& engine,
+                                               GraphicsPipeline& pipeline, DrawContext& ctx,
+                                               bool is_indexed, u32 instance_count) {
+    // Stage 4 only. Keep the legacy helper untouched. This is a coarse seam:
+    // ConfigureTail includes upload/binding records, NOT pure state-only work.
+    if (!pipeline.ConfigureTail(ctx, is_indexed)) {
+        return;
+    }
+    TailPipelineDiag::worker_job.emit_begin = TailPipelineDiag::Clock::now();
+    TailPipelineDiag::worker_job.emitted = true;
+    UpdateDynamicStates(engine, &pipeline);
     query_cache.NotifySegment(true);
     HandleTransformFeedback(engine);
     query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64,
@@ -776,44 +825,61 @@ void RasterizerVulkan::DrawPipelined(bool is_indexed, u32 instance_count) {
 }
 
 void RasterizerVulkan::DrawTailPipelined(bool is_indexed, u32 instance_count) {
+    auto& timing = TailPipelineDiag::gpu;
+    ++timing.draws;
+    const auto poll_begin = TailPipelineDiag::Clock::now();
     resolver->PollResolveSync();
     while (resolver->TailFrontReady()) {
         CommitPendingDraw(); // publication/reclaim only; worker advances independently
     }
+    auto parse_begin = TailPipelineDiag::Clock::now();
+    timing.poll_ns += TailPipelineDiag::Ns(parse_begin - poll_begin);
+    ++timing.poll_blocks;
     if (resolver->PipelineFull()) {
         ++resolver->diag_pipeline_backpressure;
         CommitPendingDraw();
+        const auto capacity_end = TailPipelineDiag::Clock::now();
+        timing.Capacity(TailPipelineDiag::Ns(capacity_end - parse_begin));
+        parse_begin = capacity_end;
     }
+    {
+        const u64 drains_before = timing.all_drain_ns;
+        SCOPE_EXIT {
+            timing.parse_ns += TailPipelineDiag::Ns(TailPipelineDiag::Clock::now() - parse_begin);
+            timing.parse_drain_ns += timing.all_drain_ns - drains_before;
+        };
 #ifdef __ANDROID__
-    constexpr u32 flush_interval = 512;
+        constexpr u32 flush_interval = 512;
 #else
-    constexpr u32 flush_interval = 4096;
+        constexpr u32 flush_interval = 4096;
 #endif
-    if (draw_counter >= flush_interval - 1) {
-        FlushPendingDraw(DrawDrain::Submit);
+        if (draw_counter >= flush_interval - 1) {
+            FlushPendingDraw(DrawDrain::Submit);
+        }
+        FlushWork(); // dispatch is publication-only; submit above requires handoff
+        gpu_memory->FlushCaching(); // real invalidations still synchronously drain
+        auto* pipeline = pipeline_cache.TryGraphicsPipelineForParser();
+        if (!pipeline) {
+            FlushPendingDraw(DrawDrain::ColdPipeline);
+            pipeline = pipeline_cache.CurrentGraphicsPipeline();
+        }
+        if (!pipeline) {
+            return;
+        }
+        if (!resolver->SnapshotAndEnqueue(*maxwell3d, pipeline, is_indexed, instance_count)) {
+            ++fallback_draws;
+            ++resolver->diag_fallbacks;
+            FlushPendingDraw(DrawDrain::Fallback);
+            PrepareDraw(is_indexed, [this, is_indexed, instance_count] {
+                RecordDraw(*maxwell3d, is_indexed, instance_count);
+            });
+            return;
+        }
+        resolver->ExecuteResolve(scheduler);
+        pending_commit.store(true, std::memory_order_release);
+        ++pipelined_draws;
+        ++timing.admitted;
     }
-    FlushWork(); // dispatch is publication-only; submit above requires handoff
-    gpu_memory->FlushCaching(); // real invalidations still synchronously drain
-    auto* pipeline = pipeline_cache.TryGraphicsPipelineForParser();
-    if (!pipeline) {
-        FlushPendingDraw(DrawDrain::ColdPipeline);
-        pipeline = pipeline_cache.CurrentGraphicsPipeline();
-    }
-    if (!pipeline) {
-        return;
-    }
-    if (!resolver->SnapshotAndEnqueue(*maxwell3d, pipeline, is_indexed, instance_count)) {
-        ++fallback_draws;
-        ++resolver->diag_fallbacks;
-        FlushPendingDraw(DrawDrain::Fallback);
-        PrepareDraw(is_indexed, [this, is_indexed, instance_count] {
-            RecordDraw(*maxwell3d, is_indexed, instance_count);
-        });
-        return;
-    }
-    resolver->ExecuteResolve(scheduler);
-    pending_commit.store(true, std::memory_order_release);
-    ++pipelined_draws;
     if (token_tail_immediate) {
         FlushPendingDraw();
     }
