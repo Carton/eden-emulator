@@ -82,6 +82,8 @@ public:
 
     bool ResolveInFlight() const;
     bool PipelineFull() const;
+    // GPU producer only. Completed but unpublished tails have installed their dirty marks.
+    bool HasUnexecutedTailWrites() const;
     void PollResolveSync();
     // Wait only an already armed head before GPU cache/scheduler preparation.
     void PreparePipelineEnqueue();

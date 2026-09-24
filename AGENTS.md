@@ -102,6 +102,13 @@ cmake.exe --build build-vs22     # RelWithDebInfo，产物在 build-vs22/bin/
    整数倍时要警惕是量化栅格不是真实负载（详见 PROFILE §23.4）。bench_run 有 VOID 检测
    （陈旧 CSV / 60fps 菜单签名）+ luma 协变量列，VOID 局不得进结论；**测试时段机器上
    有人 = 数据作废**（2026-09-19 golden6 截图铁证，归因详见 PROFILE §28.10）。
+   **token 实验臂 env 必须带 `EDEN_DRAW_TOKEN=inline`**——`EDEN_TOKEN_TAIL_PIPELINE=1`
+   等子开关不隐含启用 token 路径，漏了会静默跑 serial（2026-09-25 实锤，识别特征=
+   diag.txt 出现 SerialDraw 打点/零 token 行）。bench 归档的 diag.txt 只保留日志中含
+   "diag" 子串的行，新增诊断日志行务必带该子串。
+8. **场景漂移**：水塘测试场景的 luma/档位随游戏内时间推进漂移（2026-09-25 漂到黄昏
+   luma 56.8，serial med 23.33ms 非历史两档）——绝对值只与同日互比，跨时段结论一律
+   走交错对。
 
 ## 已知问题（仅列活跃项；结案过程与历史见 PROFILE_PROGRESS.md 对应章节）
 

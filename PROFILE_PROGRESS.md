@@ -4032,3 +4032,76 @@ measurement perturbation and runtime accounting remain unverified.
 
 Files: src/video_core/renderer_vulkan/vk_tail_pipeline_diag.h (new),
 vk_draw_resolver.cpp, vk_rasterizer.cpp, vk_rasterizer.h, plus PROFILE_PROGRESS.md.
+
+### 33.15 Stage 5 step 0 验收：开销分解定案——drain 舞步是节拍器，真凶 MustFlushRegion（2026-09-25 凌晨）
+
+**仪器化验收（f2342886b5 + 归因两轮 1a53c40693/d666510b2a）**：增量编译顺利，
+`s5i-d2/d4` 两臂 + `s5attr/s5attr2` 四局全部出数；worker/gpu 终账行进入 diag.txt
+（日志前缀补了 'diag' 子串才通过 bench_run 的 diag.txt 过滤——该过滤只保留含
+"diag" 的行，"DrawToken tail FIFO:" 历史 accounting 行从未进过 diag.txt，历史局
+分析都是从完整 eden_log.txt 直接读的，这点今晚才显性化）。
+
+**本日场景漂移警告**：水塘已漂到黄昏档（luma 56.7-56.8 vs 白天 60-61；serial
+med 23.33ms/42.3-42.6fps，不在 22.50/25.83 两档上）。游戏内时间随历次会话推进，
+本日所有绝对值只与本日互比；交错对消漂移。serial 黄昏参照：42.32/42.56fps。
+
+**第一轮实验作废教训**：bench 臂只传 EDEN_TOKEN_TAIL_PIPELINE=1 不够——token_mode
+只由 EDEN_DRAW_TOKEN 打开（vk_rasterizer.cpp EnsureResolver），两臂全跑了 serial
+（5000 条 SerialDraw 打点、零 token 行）。**token 实验臂必须同时带
+EDEN_DRAW_TOKEN=inline**。有效重跑：A=inline+TAIL_PIPELINE+depth2 vs B=depth4。
+
+**吞吐模型（d2 臂，13.99M draws/196s = 71.4K draws/s，TAIL_PIPELINE 23.1-23.9fps）**：
+- Worker 每 draw：resolve 1.38 + tail 2.98（ConfigureTail 2.78 + 发射段 0.20）
+  + publish 0.49 = **active 4.84µs**；**idle 7.30µs**；周期 12.14µs。
+- GPU 每 draw：poll 0.09 + capacity 等待 1.00 + parse/snapshot/enqueue 1.10
+  = 2.19µs；另 drain 服务 4.25µs（other 3.05 + guest_write 1.20）。
+- 捕获无害：613B/draw、chunks_per_draw=1.0、发射段 0.20µs/draw——**捕获瘦身除名**。
+- capacity wait 直方图：主体 2-8µs（峰 8.2ms 尾部 ge128=815 次）。
+- **depth 2 vs 4 交错 2 对中位 1.0009**：深度无关；d4 仅把 capacity_waits
+  3.64M→2.60M、GPU capacity 服务 1.00→0.64µs/draw，帧率不动——**背压是症状，
+  worker 侧无余量才是根**，加深 FIFO 无意义。
+
+**drain 归因（两轮 per-site 拆 enum，26 reasons）**：
+- **MustFlushRegion：613 万调用 / 608 万非空 / 99% 非空率 / 0.44 per draw——绝对主因**。
+  调用链 = 游戏指令流 MemoryManager::IsMemoryDirty（DMA/拷贝前查目标脏否）→
+  RasterizerVulkan::MustFlushRegion 开头 FlushPendingDraw() 全排空只为答布尔值。
+- 次要：fragment_barrier 43 万/32 万非空（流内 ordering）；query_counter 40 万/17.8 万；
+  cond_render 36 万/5.2 万；wait_for_idle 51 万/1.8 万；clear/cold_pipeline 小量。
+- guest_write：2630 万调用仅 230 万非空（真实数据 hazard，保留不动）；
+  flush_caching 456 万/0、invalidation 103 万/0（空检查，便宜，不用管）。
+
+**结论**：两线程单独都不饱和（worker-active 上限 ~207K draws/s = 现状 2.9 倍，
+理论上 drain 消除后 draws 侧天花板 >serial），系统被 0.65 次全排空/draw 的舞步
+锁死。stage1/2 把绑定翻译挪到 resolve/tail 时刻后，pending 写区域的 GPU-dirty
+标记时序推迟，MustFlushRegion 的排空就是在补偿这个时序——step 1 的任务就是把它
+换成不打断 FIFO 的保守答案（codex 设计中）。宽头文件纪律执行情况：vk_rasterizer.h
+改动均走 touch_includers 闭包（半径仅 4-8 TU），无 frankenbuild 复发。
+
+### Stage 5 step 1 — MustFlushRegion 无排空保守查询（待用户构建验收）
+
+仅 TAIL_PIPELINE 的 UsesGPUServiceHandoff 门内改变 Boolean 查询。enqueue 尚未安装完整
+GPU 写标记：SSBO、image-buffer、XFB 的 MarkWrittenBuffer 在 tail 绑定时发生；纹理附件及
+别名也没有现成的完整 pending-write 集。因此不采用直接删除 drain 后裸查 cache，也不在
+本轮提前做地址翻译/新写集维护；采用保守 true + 已执行 frontier 的精化。
+
+GPU 调用者以 acquire 读取 executed_tail，与 GPU 独占的 enqueue tail 比较。尚有未执行
+job 则返回 true；全部执行完成（包括尚未发布/回收）才使用原 B/T dirty 查询。worker 在
+Resolve+tail 成功返回、安装全部 dirty 标记后 release 推进 executed_tail；失败不会推进，
+仍由既有 poison 消费路径处理。不读取 pending_commit，不等待、不发布、不新增锁。
+外来线程对原实现关注的 cache 域返回 true，不读 resolver 私有状态；真实 FlushRegion
+保留 GPU-service handoff/drain。其他模式原函数体保留，guest_write、深度、fragment barrier
+均不动。后者需要独立流内命令的 FIFO 排序协议，不能把同步请求桥直接当作延迟命令队列。
+
+新增 TLS MustFlush 计数，每 65536 调用及线程退出输出 DrawToken stage5 diag：
+调用数、pending_conservative_true、foreign_conservative_true、cache_dirty、cache_clean、
+ignored_mask、fifo_drains=0。记录在 cache 锁外，无新计时器/同步锁。
+
+正确性范围：未执行 tail 可能写任意地址，true 只增加保守性；全部执行后 dirty 标记可见，
+GPU 查询期间无后续 enqueue。QueryCache/ShaderCache-only 仍按旧查询语义忽略。
+性能风险：保守 true 可能增加宏参数 dirty 路径工作，并非所有 IsMemoryDirty 调用者都立即
+FlushRegion（DMA 宏入口会传递 current_dirty）。因此不宣称已恢复吞吐；验收须观察 download/
+guest_write 等下游 drain 是否增长，worker idle 是否下降，以及交错 A/B。must_flush drain
+应归零，新查询计数应有覆盖；三个 checker 零 mismatch、FIFO 终态收敛仍是必要条件。
+
+未构建、运行或提交。静态确认执行 release 位于成功 tail 后，失败不推进；默认旧查询体与
+FlushRegion 未改。用户正在维护的 AGENTS/此前 PROFILE 增补保持原样。

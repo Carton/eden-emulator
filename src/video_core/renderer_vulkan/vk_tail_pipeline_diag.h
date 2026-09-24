@@ -122,8 +122,42 @@ struct WorkerJob {
     bool emitted{};
 };
 
+// Boolean dirty queries must not synchronize with the worker just to report
+// diagnostics. Each calling thread owns its counters, including foreign callers.
+struct MustFlush {
+    enum class Result { Pending, Foreign, Dirty, Clean, Ignored };
+    u64 calls{}, pending_true{}, foreign_true{}, cache_dirty{}, cache_clean{}, ignored{};
+
+    bool Record(Result result) {
+        switch (result) {
+        case Result::Pending: ++pending_true; break;
+        case Result::Foreign: ++foreign_true; break;
+        case Result::Dirty: ++cache_dirty; break;
+        case Result::Clean: ++cache_clean; break;
+        case Result::Ignored: ++ignored; break;
+        }
+        if ((++calls & 0xffff) == 0) {
+            Log("periodic");
+        }
+        return result == Result::Pending || result == Result::Foreign || result == Result::Dirty;
+    }
+
+    void Log(const char* scope) const {
+        if (calls) {
+            LOG_INFO(Render_Vulkan,
+                     "DrawToken stage5 diag: scope={} reason=must_flush calls={} "
+                     "pending_conservative_true={} foreign_conservative_true={} "
+                     "cache_dirty={} cache_clean={} ignored_mask={} fifo_drains=0",
+                     scope, calls, pending_true, foreign_true, cache_dirty, cache_clean, ignored);
+        }
+    }
+
+    ~MustFlush() { Log("thread_final"); }
+};
+
 inline thread_local Gpu gpu;
 inline thread_local Worker worker;
 inline thread_local WorkerJob worker_job;
+inline thread_local MustFlush must_flush;
 
 } // namespace Vulkan::TailPipelineDiag

@@ -1117,6 +1117,18 @@ bool DrawResolver::PipelineFull() const {
     return pipeline_state && pipeline_state->Full();
 }
 
+bool DrawResolver::HasUnexecutedTailWrites() const {
+    ASSERT(tail_pipeline_enabled);
+    if (!pipeline_state) {
+        return false;
+    }
+    ASSERT(std::this_thread::get_id() == pipeline_state->gpu_thread);
+    // tail includes snapshotted jobs not yet armed for execution. Do not use
+    // pending_commit or the publication/reclamation frontier here. The release
+    // at execution completion follows all cache dirty-mark updates in the tail.
+    return pipeline_state->executed_tail.load(std::memory_order_acquire) < pipeline_state->tail;
+}
+
 void DrawResolver::PollResolveSync() {
     if (pipeline_state) {
         pipeline_state->Poll();

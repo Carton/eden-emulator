@@ -1417,6 +1417,51 @@ void RasterizerVulkan::FlushRegion(DAddr addr, u64 size, VideoCommon::CacheType 
 }
 
 bool RasterizerVulkan::MustFlushRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
+    if (UsesGPUServiceHandoff()) {
+        using Result = TailPipelineDiag::MustFlush::Result;
+        auto& diag = TailPipelineDiag::must_flush;
+        const bool buffers = True(which & VideoCommon::CacheType::BufferCache);
+        const bool textures = Settings::IsGPULevelHigh() &&
+                              True(which & VideoCommon::CacheType::TextureCache);
+        if (!buffers && !textures) {
+            return diag.Record(Result::Ignored);
+        }
+        // Foreign callers (including resolver callbacks) must not inspect GPU
+        // producer-owned queue positions or wait while holding cache locks.
+        // Actual downloads still take FlushRegion's GPU-service handoff/drain.
+        if (!gpu.IsGPUThread()) {
+            return diag.Record(Result::Foreign);
+        }
+        // SSBO/image-buffer/XFB dirty marks are installed by the tail, not at
+        // enqueue. Without a complete pending write footprint, an unfinished
+        // tail can affect any queried region: conservatively answer true.
+        if (resolver && resolver->HasUnexecutedTailWrites()) {
+            return diag.Record(Result::Pending);
+        }
+        // All enqueued tails have executed. Their dirty marks are visible even
+        // before command publication; no new enqueue can race this GPU caller.
+        if (buffers) {
+            bool dirty;
+            {
+                std::scoped_lock lock{buffer_cache.mutex};
+                dirty = buffer_cache.IsRegionGpuModified(addr, size);
+            }
+            if (dirty) {
+                return diag.Record(Result::Dirty);
+            }
+        }
+        if (textures) {
+            bool dirty;
+            {
+                std::scoped_lock lock{texture_cache.mutex};
+                dirty = texture_cache.IsRegionGpuModified(addr, size);
+            }
+            if (dirty) {
+                return diag.Record(Result::Dirty);
+            }
+        }
+        return diag.Record(Result::Clean);
+    }
     FlushPendingDraw(DrawDrain::MustFlush);
     if ((True(which & VideoCommon::CacheType::BufferCache))) {
         std::scoped_lock lock{buffer_cache.mutex};
