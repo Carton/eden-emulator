@@ -21,7 +21,10 @@ inline constexpr std::array DrainNames{"other", "flush_caching", "guest_write", 
     "unmap", "cold_pipeline", "submit", "indirect", "fallback", "channel", "teardown",
     "invalidation", "sync_request", "download", "presentation", "capture",
     "draw_texture", "clear", "dispatch_compute", "reset_counter", "query_counter",
-    "uniform_bind", "signal_sync", "cond_render", "surface_copy", "inline_to_memory"};
+    "uniform_bind", "signal_sync", "cond_render", "surface_copy", "inline_to_memory",
+    "must_flush", "flush_area", "modify_gpu_mem", "release_fences", "flush_invalidate",
+    "wait_for_idle", "fragment_barrier", "tiled_cache_barrier", "flush_commands", "tick_frame",
+    "access_dma", "accel_display"};
 
 inline void Metric(const char* scope, const void* resolver, const char* segment,
                    u64 calls, u64 ns, u64 draws) {

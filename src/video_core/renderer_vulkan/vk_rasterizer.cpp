@@ -754,7 +754,10 @@ void RasterizerVulkan::LogTokenDiag(bool force_tail_diag) {
                 "unmap", "cold_pipeline", "submit", "indirect", "fallback", "channel", "teardown",
                 "invalidation", "sync_request", "download", "presentation", "capture",
                 "draw_texture", "clear", "dispatch_compute", "reset_counter", "query_counter",
-                "uniform_bind", "signal_sync", "cond_render", "surface_copy", "inline_to_memory"};
+                "uniform_bind", "signal_sync", "cond_render", "surface_copy", "inline_to_memory",
+                "must_flush", "flush_area", "modify_gpu_mem", "release_fences", "flush_invalidate",
+                "wait_for_idle", "fragment_barrier", "tiled_cache_barrier", "flush_commands",
+                "tick_frame", "access_dma", "accel_display"};
             for (size_t i = 0; i < names.size(); ++i) {
                 LOG_INFO(Render_Vulkan, "DrawToken tail drain: reason={} calls={} drains={} jobs={}",
                          names[i], tail_drain_calls[i], tail_drains[i], tail_drain_jobs[i]);
@@ -1414,7 +1417,7 @@ void RasterizerVulkan::FlushRegion(DAddr addr, u64 size, VideoCommon::CacheType 
 }
 
 bool RasterizerVulkan::MustFlushRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::MustFlush);
     if ((True(which & VideoCommon::CacheType::BufferCache))) {
         std::scoped_lock lock{buffer_cache.mutex};
         if (buffer_cache.IsRegionGpuModified(addr, size)) {
@@ -1432,7 +1435,7 @@ bool RasterizerVulkan::MustFlushRegion(DAddr addr, u64 size, VideoCommon::CacheT
 }
 
 VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64 size) {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::FlushArea);
     {
         std::scoped_lock lock{texture_cache.mutex};
         auto area = texture_cache.GetFlushArea(addr, size);
@@ -1552,7 +1555,7 @@ void RasterizerVulkan::ModifyGPUMemory(size_t as_id, GPUVAddr addr, u64 size) {
         gpu.RunGPUService([this, as_id, addr, size] { ModifyGPUMemory(as_id, addr, size); });
         return;
     }
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::ModifyGpuMem);
     {
         std::scoped_lock lock{texture_cache.mutex};
         texture_cache.UnmapGPUMemory(as_id, addr, size);
@@ -1580,13 +1583,13 @@ void RasterizerVulkan::SignalReference() {
 }
 
 void RasterizerVulkan::ReleaseFences(bool force) {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::ReleaseFences);
     fence_manager.WaitPendingFences(force);
 }
 
 void RasterizerVulkan::FlushAndInvalidateRegion(DAddr addr, u64 size,
                                                 VideoCommon::CacheType which) {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::FlushInvalidate);
     if (Settings::IsGPULevelHigh()) {
         FlushRegion(addr, size, which);
     }
@@ -1594,7 +1597,7 @@ void RasterizerVulkan::FlushAndInvalidateRegion(DAddr addr, u64 size,
 }
 
 void RasterizerVulkan::WaitForIdle() {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::WaitForIdle);
     // Everything but wait pixel operations. This intentionally includes FRAGMENT_SHADER_BIT because
     // fragment shaders can still write storage buffers.
     VkPipelineStageFlags flags =
@@ -1618,18 +1621,18 @@ void RasterizerVulkan::WaitForIdle() {
 }
 
 void RasterizerVulkan::FragmentBarrier() {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::FragmentBarrier);
     // We already put barriers when a render pass finishes
     scheduler.RequestOutsideRenderPassOperationContext();
 }
 
 void RasterizerVulkan::TiledCacheBarrier() {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::TiledCacheBarrier);
     // TODO: Implementing tiled barriers requires rewriting a good chunk of the Vulkan backend
 }
 
 void RasterizerVulkan::FlushCommands() {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::FlushCommands);
     if (draw_counter == 0) {
         return;
     }
@@ -1638,7 +1641,7 @@ void RasterizerVulkan::FlushCommands() {
 }
 
 void RasterizerVulkan::TickFrame() {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::TickFrame);
     draw_counter = 0;
     guest_descriptor_queue.TickFrame();
     compute_pass_descriptor_queue.TickFrame();
@@ -1675,7 +1678,7 @@ bool RasterizerVulkan::AccelerateSurfaceCopy(const Tegra::Engines::Fermi2D::Surf
 }
 
 Tegra::Engines::AccelerateDMAInterface& RasterizerVulkan::AccessAccelerateDMA() {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::AccessDMA);
     return accelerate_dma;
 }
 
@@ -1704,7 +1707,7 @@ void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_si
 
 std::optional<FramebufferTextureInfo> RasterizerVulkan::AccelerateDisplay(
     const Tegra::FramebufferConfig& config, DAddr framebuffer_addr, u32 pixel_stride) {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::AccelDisplay);
     if (!framebuffer_addr) {
         return {};
     }

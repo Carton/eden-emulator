@@ -176,7 +176,11 @@ private:
         Fallback, Channel, Teardown, Invalidation, SyncRequest, Download, Presentation, Capture,
         // (local-only) stage5 attribution splits of the former catch-all Other:
         DrawTexture, Clear, DispatchCompute, ResetCounter, QueryCounter, UniformBind,
-        SignalSync, CondRender, SurfaceCopy, InlineToMemory, Count
+        SignalSync, CondRender, SurfaceCopy, InlineToMemory,
+        // (local-only) stage5 attribution pass 2 (remaining bare call sites):
+        MustFlush, FlushArea, ModifyGpuMem, ReleaseFences, FlushInvalidate, WaitForIdle,
+        FragmentBarrier, TiledCacheBarrier, FlushCommands, TickFrame, AccessDMA, AccelDisplay,
+        Count
     };
     void FlushPendingDraw(DrawDrain reason = DrawDrain::Other);
     std::atomic_bool tail_service_enabled{};
