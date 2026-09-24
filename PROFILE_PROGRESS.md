@@ -4105,3 +4105,105 @@ guest_write 等下游 drain 是否增长，worker idle 是否下降，以及交�
 
 未构建、运行或提交。静态确认执行 release 位于成功 tail 后，失败不推进；默认旧查询体与
 FlushRegion 未改。用户正在维护的 AGENTS/此前 PROFILE 增补保持原样。
+
+### 33.16 Stage 5 step 1 验收：must_flush 排空清零、正确性全过、0.6542→0.6991，剩余主嫌转移到 guest_write（2026-09-25）
+
+**正确性（s5s1-check 局）**：FIFO 终态收敛 enqueued=executed=published=reclaimed=
+10,805,952；mismatches=0；**must_flush drain 608 万→0**；下游无爆点迁移
+（fragment_barrier 31.6 万非空持平、query_counter 15.5 万持平）。
+
+**MustFlush 结果分布**：539 万调用 = pending 保守 true 73% + cache_clean 27%
++ cache_dirty=0——**本场景全执行态查询 100% 干净**，老代码 608 万次排空全是白排。
+但保守 true 的下游（kepler_compute indirect_compute → DispatchIndirect +
+ObtainBuffer(FullSynchronize)）成为 guest_write 增长的嫌疑之一。
+
+**性能（交错 3/3 对，黄昏档）**：A=INLINE 36.4-37.1fps，B=TAIL_PIPELINE+step1
+25.6-26.1fps，**中位 0.6991**（stage-4 白天档 0.6542；同晚 s5i 前值 23.1-23.9
+→ 25.6-26.1 绝对 +9%）。排空总数 8.38M→4.9M（-41%）只买回 7%——排空不是
+线性节拍器，每次排空摧毁 worker run-ahead + 强制 wake/park 循环的系统性成本
+占主导。
+
+**step 1 后 B 臂分解（13.84M draws）**：guest_write 422 万非空、31.4s 服务 =
+2.27µs/draw（墙钟 16%）成为新主嫌；worker idle 仍 7.41µs/draw（52% 闲）；
+GPU capacity 1.26 + parse 1.13 余量大；fragment_barrier 38 万非空降为次要。
+guest_write 机制 = MemoryManager::WriteBlockImpl 写客人内存前
+WaitForDrawResolve() 全排空（"别改 pending tails 的输入"）——真实读序依赖，
+tail 在执行时读顶点/索引/制服客人内存。增长 230 万→422 万 = 曝光效应
+（must_flush 不再提前排干队列，写自己撞上 pending）+ DispatchIndirect 间接链
+两机制未区分。
+
+**结论与去向**：剩余 -30% 的钥匙是写序依赖——step 2 已交 codex 评估
+deferred write-behind（写效果延迟到 frontier 后）的可行性与正确边界；
+游戏 CPU 直读主机 RAM 的可见性风险是核心判题，不成立则止损归档。
+
+### 33.17 Stage 5 step 2 — deferred write-behind 正确性评估停损（2026-09-25）
+
+本轮不实现 deferred-write 队列，不改源代码、默认值或写前排空，不构建/运行/提交。
+仅基于现有读写入口核对：MemoryManager::WriteBlockImpl 在写前 WaitForDrawResolve，
+随后按原 which/unsafe 策略 InvalidateRegion 并 memcpy；其注释已明确延迟写还需后续读转发。
+
+否决的是当前约束下的局部 write-behind 方案，并非一切异步内存模型：
+1. GPU 解析侧存在 ReadBlockUnsafe 直接 memcpy，以及 GetPointer 模板直接返回物理内存
+   指针。流序 draw N -> W -> 后续解析/快照 N+k 中，即使 worker 在 N 与 N+k 之间
+   apply W，GPU 提前解析 N+k 仍可能读旧值。只按执行 frontier 应用 W 不足以保序。
+2. CPU 普通映射的 GetPointerImpl 快路径直接返回页表指针，没有统一 pending-write
+   查询；延迟窗口内可观察旧值。现有 rasterizer-cached 分类不等于 CPU 不可访问，
+   未跟踪页也不能证明 CPU 不会读。不能以水塘通常经 sync 访问替代内存可见性证明。
+3. 有界队列只限制积压，不解决上述读语义。除复制源字节，还必须保护目标映射/别名、
+   转发所有后续解析读取、把原失效策略和写事件置于正确序号，并覆盖 CPU 访问入口。
+   安全 fallback 在没有可证明的专用内存子集时仍是原来的写前等待，不能宣称优化完成。
+
+恢复此方向需要另立范围：完整读集/旧数据快照隔离，或可证明不可被 CPU 和提前解析
+访问的内存类别，或覆盖直接指针/unsafe 读的版本化与转发协议。它们均超出本轮局部队列。
+fragment_barrier 不顺带改：仍需独立命令 FIFO 排序，不以同步桥替代。
+
+间接计算嫌疑的静态边界：Kepler launch 的 IsMemoryDirty(true) 确实会设置
+indirect_compute；但 Vulkan DispatchCompute 开头已 FlushPendingDraw(DispatchCompute)，
+然后才 Configure 和 ObtainBuffer(FullSynchronize)。因此该 ObtainBuffer 不能直接撞上
+此前 pending tails 来解释非空 guest_write；间接工作/其他调用点可能有成本，未测量不
+作排除性结论。曝光效应与间接成本仍未定量分离。本次按用户“不成立则止损归档”指令，
+不额外添加计数、不缩窄 conservative-true，避免无完整 future-write 集时引入 false-negative。
+
+用户报告的 step1 数据沿用 §33.16：正确性全过，性能比值 0.6991，guest_write 4.22M
+非空/31.4s，worker idle 7.41us/draw。上述数据不是本轮新测量，未证明 step2 性能收益。
+
+### 33.18 Stage 5 终章：收益评估定案——2B 线关闭，0.6542→0.6991，剩余差距定性为 2A 类内存模型工程（2026-09-25）
+
+**最终收益表（同夜黄昏档水塘，同会话交错或紧邻背靠背）**：
+
+| 配置 | fps | med | vs INLINE | vs serial |
+|---|---|---|---|---|
+| serial | 42.32-42.56 | 23.33ms | 1.155 | 1.000 |
+| INLINE token | 36.40-37.06 | ~27.2ms | 1.000 | 0.867 |
+| S4 TAIL_PIPELINE（step5 前） | 23.12-23.88 | 40.8-42.5ms | ~0.64 | ~0.55 |
+| **S5 TAIL_PIPELINE+step1** | **25.59-26.07** | ~38.4ms | **0.6991**（3/3 中位） | ~0.61 |
+
+**Stage 5 三步全部落地**：
+1. step 0 仪器化（f2342886b5）+ 两轮 per-site 归因（1a53c40693/d666510b2a，26 reasons）——
+   把 -35% 拆成可归因的账本，定罪 MustFlushRegion（608 万次白排空/会话）；
+   同时洗清三个原嫌疑：捕获（613B/draw 发射仅 0.20µs）、FIFO 深度（d2 vs d4 中位 1.0009）、
+   capacity 背压（症状非根因）。
+2. step 1（313ee84d6e，codex）：无排空保守 MustFlushRegion——must_flush drain 清零，
+   正确性全过（FIFO 收敛 10.8M、mismatches=0），排空总数 -41%，性能 +9% 绝对。
+3. step 2 评估止损（§33.17，codex）：deferred write-behind 被正确性论证否决
+   （ReadBlockUnsafe/GetPointer 直读路径 + CPU 无统一拦截点），guest_write 写序依赖
+   需要 2A 类读转发/版本隔离工程，超出本线范围。
+
+**遗留定量事实**：guest_write 排空 422 万次/会话 = 2.27µs/draw（墙钟 16%）+
+worker idle 52%（其后果）+ fragment_barrier 类流内 ordering 命令 38 万次（次要，
+bridge 延迟序化两次评估均判定非局部改动，未做）。保守 true 的 indirect-compute
+下游成本未定量（codex 静态发现 DispatchCompute 先排空再 ObtainBuffer，该链
+不能解释 guest_write 增长；成本有界小）。
+
+**2B 线总结论（design → stage 1→4 → stage 5 全链）**：架构正确性目标全部达成
+（累计 4000 万+ draw 级 checker 零失配、FIFO 终态收敛、零所有权违规），但本机
+（5600X/12 逻辑核）水塘场景上跨线程 draw 发射的开销地板高于其重叠收益——
+最好测得状态仍落后 INLINE 30%、落后 serial 39%。**默认保持 INLINE；
+EDEN_TOKEN_TAIL_PIPELINE=1 归档为已验证实验开关（含 step-1 改进）**。
+若未来重启此线，钥匙不是等待/捕获，而是：客人写读转发（版本隔离）+
+流内 ordering 命令的 bridge 序化——设计文档的 2A 前提修正一以贯之。
+
+**本阶段副产品（比结论更值钱的部分）**：per-site drain 归因 enum（26 reasons）、
+stage5 双线程分解 diag、MustFlush 结果分布计数——tail 模式的任何后续实验
+从此有 10 分钟级的归因能力；EDEN_DRAW_TOKEN=inline 必带与 diag.txt 过滤规则
+两个工具坑已固化进 AGENTS。
