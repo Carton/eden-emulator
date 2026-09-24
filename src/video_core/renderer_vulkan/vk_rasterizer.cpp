@@ -752,7 +752,9 @@ void RasterizerVulkan::LogTokenDiag(bool force_tail_diag) {
             resolver->LogTailPipelineDiag();
             static constexpr std::array names{"other", "flush_caching", "guest_write", "map",
                 "unmap", "cold_pipeline", "submit", "indirect", "fallback", "channel", "teardown",
-                "invalidation", "sync_request", "download", "presentation", "capture"};
+                "invalidation", "sync_request", "download", "presentation", "capture",
+                "draw_texture", "clear", "dispatch_compute", "reset_counter", "query_counter",
+                "uniform_bind", "signal_sync", "cond_render", "surface_copy", "inline_to_memory"};
             for (size_t i = 0; i < names.size(); ++i) {
                 LOG_INFO(Render_Vulkan, "DrawToken tail drain: reason={} calls={} drains={} jobs={}",
                          names[i], tail_drain_calls[i], tail_drains[i], tail_drain_jobs[i]);
@@ -1049,7 +1051,7 @@ void RasterizerVulkan::DrawIndirect() {
 }
 
 void RasterizerVulkan::DrawTexture() {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::DrawTexture);
 
     SCOPE_EXIT {
         gpu.TickWork();
@@ -1097,7 +1099,7 @@ void RasterizerVulkan::DrawTexture() {
 }
 
 void RasterizerVulkan::Clear(u32 layer_count) {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::Clear);
     FlushWork();
     gpu_memory->FlushCaching();
 
@@ -1283,7 +1285,7 @@ void RasterizerVulkan::Clear(u32 layer_count) {
 }
 
 void RasterizerVulkan::DispatchCompute() {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::DispatchCompute);
     FlushWork();
     gpu_memory->FlushCaching();
 
@@ -1347,7 +1349,7 @@ void RasterizerVulkan::DispatchCompute() {
 }
 
 void RasterizerVulkan::ResetCounter(VideoCommon::QueryType type) {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::ResetCounter);
     switch (type) {
     case VideoCommon::QueryType::ZPassPixelCount64:
     case VideoCommon::QueryType::StreamingByteCount:
@@ -1363,7 +1365,7 @@ void RasterizerVulkan::ResetCounter(VideoCommon::QueryType type) {
 
 void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
                              VideoCommon::QueryPropertiesFlags flags, u32 payload, u32 subreport) {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::QueryCounter);
     query_cache.CounterReport(gpu_addr, type, flags, payload, subreport);
 }
 
@@ -1374,7 +1376,7 @@ void RasterizerVulkan::BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAd
         resolver->BindUniformInput(stage, index, gpu_addr, size);
         return;
     }
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::UniformBind);
     buffer_cache.BindGraphicsUniformBuffer(stage, index, gpu_addr, size);
 }
 
@@ -1383,7 +1385,7 @@ void Vulkan::RasterizerVulkan::DisableGraphicsUniformBuffer(size_t stage, u32 in
         resolver->DisableUniformInput(stage, index);
         return;
     }
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::UniformBind);
     buffer_cache.DisableGraphicsUniformBuffer(stage, index);
 }
 
@@ -1558,22 +1560,22 @@ void RasterizerVulkan::ModifyGPUMemory(size_t as_id, GPUVAddr addr, u64 size) {
 }
 
 void RasterizerVulkan::SignalFence(std::function<void()>&& func) {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::SignalSync);
     fence_manager.SignalFence(std::move(func));
 }
 
 void RasterizerVulkan::SyncOperation(std::function<void()>&& func) {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::SignalSync);
     fence_manager.SyncOperation(std::move(func));
 }
 
 void RasterizerVulkan::SignalSyncPoint(u32 value) {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::SignalSync);
     fence_manager.SignalSyncPoint(value);
 }
 
 void RasterizerVulkan::SignalReference() {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::SignalSync);
     fence_manager.SignalReference();
 }
 
@@ -1654,20 +1656,20 @@ void RasterizerVulkan::TickFrame() {
 }
 
 bool RasterizerVulkan::AccelerateConditionalRendering() {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::CondRender);
     gpu_memory->FlushCaching();
     return query_cache.AccelerateHostConditionalRendering();
 }
 
 bool RasterizerVulkan::HasDrawTransformFeedback() {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::QueryCounter);
     return device.IsTransformFeedbackDrawSupported();
 }
 
 bool RasterizerVulkan::AccelerateSurfaceCopy(const Tegra::Engines::Fermi2D::Surface& src,
                                              const Tegra::Engines::Fermi2D::Surface& dst,
                                              const Tegra::Engines::Fermi2D::Config& copy_config) {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::SurfaceCopy);
     std::scoped_lock lock{texture_cache.mutex};
     return texture_cache.BlitImage(dst, src, copy_config);
 }
@@ -1679,7 +1681,7 @@ Tegra::Engines::AccelerateDMAInterface& RasterizerVulkan::AccessAccelerateDMA() 
 
 void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_size,
                                                 std::span<const u8> memory) {
-    FlushPendingDraw();
+    FlushPendingDraw(DrawDrain::InlineToMemory);
     auto cpu_addr = gpu_memory->GpuToCpuAddress(address);
     if (!cpu_addr) [[unlikely]] {
         gpu_memory->WriteBlock(address, memory.data(), copy_size);

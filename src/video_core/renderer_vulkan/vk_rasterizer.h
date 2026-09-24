@@ -173,7 +173,10 @@ private:
     void CommitPendingDraw();
     enum class DrawDrain : size_t {
         Other, FlushCaching, GuestWrite, Map, Unmap, ColdPipeline, Submit, Indirect,
-        Fallback, Channel, Teardown, Invalidation, SyncRequest, Download, Presentation, Capture, Count
+        Fallback, Channel, Teardown, Invalidation, SyncRequest, Download, Presentation, Capture,
+        // (local-only) stage5 attribution splits of the former catch-all Other:
+        DrawTexture, Clear, DispatchCompute, ResetCounter, QueryCounter, UniformBind,
+        SignalSync, CondRender, SurfaceCopy, InlineToMemory, Count
     };
     void FlushPendingDraw(DrawDrain reason = DrawDrain::Other);
     std::atomic_bool tail_service_enabled{};

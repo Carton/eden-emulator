@@ -19,7 +19,9 @@ inline u64 Ns(Clock::duration duration) {
 
 inline constexpr std::array DrainNames{"other", "flush_caching", "guest_write", "map",
     "unmap", "cold_pipeline", "submit", "indirect", "fallback", "channel", "teardown",
-    "invalidation", "sync_request", "download", "presentation", "capture"};
+    "invalidation", "sync_request", "download", "presentation", "capture",
+    "draw_texture", "clear", "dispatch_compute", "reset_counter", "query_counter",
+    "uniform_bind", "signal_sync", "cond_render", "surface_copy", "inline_to_memory"};
 
 inline void Metric(const char* scope, const void* resolver, const char* segment,
                    u64 calls, u64 ns, u64 draws) {
