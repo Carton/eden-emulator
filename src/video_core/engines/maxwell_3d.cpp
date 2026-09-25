@@ -299,7 +299,14 @@ void Maxwell3D::ConsumeSinkImpl(Core::System& system) {
 }
 
 void Maxwell3D::ProcessDirtyRegisters(u32 method, u32 argument) {
+    // Games rewrite the same register values constantly (full state pushes per
+    // draw); identical writes can not change derived state, so skip both the
+    // store and the dirty flag marking.
+    if (regs.reg_array[method] == argument) [[likely]] {
+        return;
+    }
     regs.reg_array[method] = argument;
+    ++change_generation;
     for (auto const& table : dirty.tables)
         dirty.flags[table[method]] = true;
 }

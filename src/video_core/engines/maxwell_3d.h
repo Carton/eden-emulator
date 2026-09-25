@@ -3209,6 +3209,15 @@ private:
 
     void ProcessMethodCall(u32 method, u32 argument, u32 nonshadow_argument, bool is_last_call);
 
+public:
+    // (local-only) Bumps on every register write that actually changes the
+    // stored value (identical rewrites do not). Consumers can memoize
+    // register-derived state across draws keyed on this generation.
+    [[nodiscard]] u64 ChangeGeneration() const noexcept { return change_generation; }
+
+private:
+    u64 change_generation{1};
+
     /// Retrieves information about a specific TIC entry from the TIC buffer.
     Texture::TICEntry GetTICEntry(u32 tic_index) const;
 
