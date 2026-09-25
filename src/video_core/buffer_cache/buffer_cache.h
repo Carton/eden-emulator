@@ -14,6 +14,7 @@
 #include <numeric>
 
 #include "common/logging.h"
+#include "common/scope_exit.h"
 #include "common/range_sets.inc"
 #include "video_core/buffer_cache/buffer_cache_base.h"
 #include "video_core/guest_memory.h"
@@ -23,6 +24,26 @@
 namespace VideoCommon {
 
 using Core::DEVICE_PAGESIZE;
+
+// Count actual decisions, not hypothetical content comparisons. Stream copies
+// are unconditional; their optional existing shadow comparison is post-copy.
+struct UniformSyncDiag {
+    u64 syncs{}, stream_copies{}, stream_bytes{}, classic_clean{}, classic_uploaded{};
+    u64 compare_equal_uploaded{}, compare_differ_uploaded{}, bytes_compared{}, baseline_copies{};
+    void Finish() {
+        if (++syncs % 65536 == 0) {
+            LOG_INFO(Render_Vulkan,
+                     "UniformSync diag: syncs_total={} stream_copies={} stream_bytes={} "
+                     "tracker_clean_no_upload={} tracker_dirty_uploaded={} "
+                     "compare_equal_no_upload=0 compare_equal_uploaded={} "
+                     "compare_differ_uploaded={} bytes_compared={} comparison_baselines={} "
+                     "comparison_scope=existing_optional_stream_shadow",
+                     syncs, stream_copies, stream_bytes, classic_clean, classic_uploaded,
+                     compare_equal_uploaded, compare_differ_uploaded, bytes_compared, baseline_copies);
+        }
+    }
+};
+inline thread_local UniformSyncDiag uniform_sync_diag;
 
 // (local-only) gate for the uniform stream-path measurement counters
 static bool UniformStreamStatsEnabled() {
@@ -1173,6 +1194,8 @@ void BufferCache<P>::BindHostGraphicsUniformBuffers(size_t stage) {
 
 template <class P>
 void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 binding_index, bool needs_bind) {
+    auto& sync_diag = uniform_sync_diag;
+    SCOPE_EXIT { sync_diag.Finish(); };
     ++channel_state->uniform_cache_shots[0];
     const Binding& binding = channel_state->uniform_buffers[stage][index];
     const DAddr device_addr = binding.device_addr;
@@ -1223,6 +1246,8 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
         ++diag_epoch_classic;
     }
     if (use_fast_buffer) {
+        ++sync_diag.stream_copies;
+        sync_diag.stream_bytes += size;
         if constexpr (IS_OPENGL) {
             if (runtime.HasFastBufferSubData()) {
                 // Fast path for Nvidia
@@ -1277,9 +1302,16 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
                 uniform_shadows[stage * NUM_GRAPHICS_UNIFORM_BUFFERS + index];
             ++uniform_stream_copies;
             uniform_stream_bytes += size;
-            if (shadow.addr == device_addr && shadow.size == size &&
-                std::memcmp(span.data(), shadow.data.data(), size) == 0) {
-                ++uniform_stream_identical;
+            if (shadow.addr == device_addr && shadow.size == size) {
+                sync_diag.bytes_compared += size; // requested length, not memcmp's early-exit bytes
+                if (std::memcmp(span.data(), shadow.data.data(), size) == 0) {
+                    ++uniform_stream_identical;
+                    ++sync_diag.compare_equal_uploaded;
+                } else {
+                    ++sync_diag.compare_differ_uploaded;
+                }
+            } else {
+                ++sync_diag.baseline_copies;
             }
             shadow.addr = device_addr;
             shadow.size = size;
@@ -1290,6 +1322,9 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
     // Classic cached path
     if (SynchronizeBuffer(buffer, device_addr, size)) {
         ++channel_state->uniform_cache_hits[0];
+        ++sync_diag.classic_clean;
+    } else {
+        ++sync_diag.classic_uploaded;
     }
     // Skip binding if it's not needed and if the bound buffer is not the fast version
     // This exists to avoid instances where the fast buffer is bound and a GPU write happens
