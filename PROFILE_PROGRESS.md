@@ -4433,3 +4433,68 @@ bytes_compared ? memcmp ???????????????????? shadow ?????
 
 ????? buffer_cache/buffer_cache.h ?????diff --check ??????/??/???
 A ?????? B ??? stream ??????????????????????????
+
+
+### Serial step 4 - stream tracker gate blocked by replica coherence (source review only)
+
+Requested experiment: EDEN_UNIFORM_STREAM_GATE=1, skip clean matching stream copies,
+then clear CPU-modified state after stream uploads. No source changes or flag were
+introduced: the proposed correctness premises do not hold in the current code.
+
+1. Vulkan BufferCacheRuntime::BindMappedUniformBuffer requests a staging allocation
+   on every call, immediately adds that allocation to the descriptor queue, and
+   returns only its mapped span. GetStreamBuffer advances its iterator, wraps, or
+   falls back to a staging buffer. UniformShadow stores only guest addr/size/bytes;
+   it has no retained Vulkan allocation identity or recycling generation. CBPG is
+   source-page diagnostics, not destination-allocation lifetime tracking. Existing
+   region ticks protect GPU use, not cached uniform content validity across reuse.
+2. SynchronizeBuffer consumes CPU-modified ranges through ForEachUploadRange and
+   schedules UploadMemory into the canonical cached Buffer. A stream memcpy only
+   refreshes a temporary allocation. Clearing the shared tracker after that copy
+   can cause subsequent classic synchronization to skip a still-stale cached Buffer.
+   Conversely, another consumer clearing dirty state cannot certify that an older
+   stream replica is current. CPU-dirty is not a per-stream-copy version.
+3. Range tracking may be coarser than a uniform span; consuming upload ranges
+   without copying those ranges to the canonical destination loses its contract.
+   GPU-thread-only ownership removes a threading race, not replica-coherence errors.
+
+A correct reuse design needs retained allocation handles with allocator-supported
+lifetime extension/recycle generations AND non-consuming content versions covering
+CPU writes, GPU writes, remapping and invalidation, or synchronization of the canonical
+Buffer as well. This is beyond adding a predicate and clearing the existing tracker;
+it also changes the cost model. No fake gate or permanently-zero skip experiment was
+added. Therefore no measured performance rejection of host_uniform is claimed.
+
+Only this progress entry changed. No build, game run, tests or commit. User-supplied
+session counts (96.5% stream, 40.2GB copied) remain measurement evidence, not proof of
+safe reuse. Earlier suggestion that dirty gating could directly reuse existing host
+identity was too optimistic; the source review above supersedes it.
+
+### 34.4 step 3/4 终章：两个候选双双定案——resolve 不可行、host_uniform 被正确性阻塞（2026-09-25 下午）
+
+**占比实测（sc3 局，UniformSync diag）**：uniform 同步 1.056 亿次/会话
+（~4.6 次/draw），**96.5% 走 stream 路径无条件拷贝**（1.019 亿次、40.2GB、
+~400B/次、~1.76KB/draw）；经典 tracker 门控路径仅 3.4%（其中 98% 干净）。
+host_uniform 段 430ns 的主体 = 这些无条件拷贝 + 查找。
+
+**resolve 519ns：不可行，归档**。快路径（绑定未变跳过翻译）的输入集
+（CB 内纹理句柄、TIC/TSC、映射与缓存失效）无法被现有绑定快照或 stage-2
+修订号覆盖——连忠实的占比计数器都造不出来（计数开销必超收益）。与
+pipeline_lookup 同类判决：**输入覆盖问题，不是工程量问题**。
+
+**host_uniform 430ns：正确性阻塞，归档（未测性能上界）**。stream 路径
+tracker 门控被 codex 代码级否决：(1) 清 dirty 语义不兼容——经典路径清
+dirty 依赖"已同步进共享缓存 Buffer"，stream 只刷临时切片，照抄清位会让
+后续经典同步跳过真正需要的上传；(2) 宿主侧无内容版本——每次 BindMapped
+申请新切片，UniformShadow 无分配代际，环的 GPU-use tick 不是内容有效性。
+安全复用需要 staging 保留句柄+分配器代际+覆盖 CPU/GPU 写/重映射/失效的
+非消费型内容版本——是为 ~+1-2% fps 上限造新地基，不成立。
+**注意：这是正确性否决，不是性能否决**——stream 干净占比至今未知，
+若未来有人重建 uniform 同步地基（上游动这块时），40.2GB/会话的无条件
+拷贝是现成的靶子，此节的语义分析直接可用。
+
+**Serial 战役收官**。四步全记录（34.1-34.4）：三层成本树 + 双地板方法论 +
+一个干净负结果（prologue）+ 两个不可行/阻塞定案。最终结论：**当前 serial
+draw 路径在正确性约束下的可摘果实已摘完或证伪**——余下 300-500ns 级单体
+（resolve/host_uniform/stage_rem/host_geom/pipeline_lookup）每一个都需要
+地基级投入才能动，收益上限合计 ~+14%。战役关闭，仪器与判例全部留档。
