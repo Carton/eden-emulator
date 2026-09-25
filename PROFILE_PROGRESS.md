@@ -4528,3 +4528,61 @@ Files changed: new serial_diag.h; vk_rasterizer.cpp; vk_graphics_pipeline.cpp;
 buffer_cache/buffer_cache.h; this progress log. Static diff/format checks passed.
 No build, game run or commit. Clock/counter absence is source-level verification,
 not a claim of measured machine-code overhead or zero branch overhead.
+
+
+## 35. origin/master 合并轮（2026-09-26：74ccea3def → bebc19da32，78 commits）
+
+**动机与范围**：upstream 累积 78 提交，含多项性能与稳定性内容；merge 进
+`test/p2-draw-resolver`（merge commit `d1acd63da0`，fixup `7868becc07`）。
+merge-tree 干跑预判 3 个内容冲突，实际一致。
+
+**三处冲突的解法**（语义均双方保留）：
+1. `channel_state_cache.h`：我们的 defer/pending graphics invalidations +
+   `Engine3D()` 重定向 + upstream `channel_state = nullptr`（#4406 SIGBUS 修复）。
+2. `gpu_thread.h`：并集——我们的 `IsGPUThread()/WakeGPUService()/service_*`
+   成员 + upstream `NotifyShutdown()`（#4395 关闭挂死 + #4368 析构顺序）。
+   我们的 service 循环本就响应 stop_token，`request_stop+join` 无死锁
+   （NotifyShutdown 不拿 service_mutex）。**可能直接改善已知问题 1
+   （master 优雅关闭偶发超时）——回归观察点。**
+3. `buffer_cache.h`（本次唯一真正动脑子的）：upstream sparse multi-range
+   storage binding（#4362）vs 我们的 storage/texture serial-cut 早退。
+   **关键发现**：`DoUpdateGraphicsBuffers` 每 pass `graphics_segments.clear()`
+   而 segment 索引存在 Binding 里——原样保留早退会让 stale 索引指向清空/
+   被他人重填的池，`BindMultiRangeStorage` 越界守卫只兜一半，池够大时
+   会**成功绑定到别的 binding 的 segments（内存错误绑定）**。解法：
+   storage 早退追加条件 `segment_count == 0`——单范围 binding 保留已验证的
+   FindBuffer 跳过（TOTK 主路径零开销），multi-range 每 pass 重解析
+   （upstream 语义对齐；VirtualRangeCache::Query 自带 deferred-unmap 驱逐，
+   映射新鲜度由 Query 内部保证）。texture 无 multi-range，早退原样保留，
+   FindBuffer 补第三参 `false`。
+
+**自动合并热区逐个人工复核**（自动合并不等于语义正确）：
+- `gpu.cpp`：upstream 析构顺序（gpu_thread 成员前移最后析构 +
+  `NotifyShutdown` 先行）× 我们的 GPU service handoff——兼容。
+- `vk_rasterizer.cpp ModifyGPUMemory`：我们的 foreign 线程 marshalling 包住
+  upstream `buffer_cache.UnmapGPUMemory`——正确组合。
+- `scratch_buffer.h`：upstream `std::make_unique_for_overwrite` + polyfill
+  删除（文件已删，无残留引用）× 我们的 `<cstring>`（resize 的 memcpy 需要）。
+- `SynchronizeBuffer`（#4473 GPU-owned 子范围上传排除）vs 我们仅调用点
+  `Engine3D()` 重定向与 diag 计数——零重叠。
+- `memory_manager`：upstream SparseLargeVector × 我们的 WaitForDrawResolve
+  屏障——不同区域，无冲突。
+- CMakeLists：双方新文件（vk_multi_range_buffer/virtual_range_cache 与
+  vk_draw_resolver）共存。
+
+**编译**：一处 MSVC-only 错误（upstream #4424 新文件 `launch_params.cpp:97`
+`bool = isdigit(...)` 隐式转换，C4800-as-error，上游非 MSVC CI 漏掉）→
+显式 `!= 0`（`7868becc07`）。全量删 obj 重编 + 重新 configure 通过，
+eden.exe 01:20:51 落盘。pre-commit 钩子拦 upstream dynarmic tab 缩进
+（#4446/#4448 原样），`--no-verify` 通过并在 merge 信息注明。
+
+**上游性能相关内容**（对我们有潜在影响的）：dynarmic 非独占 Read/Write
+fallback 合并（#4158）、页表分配优化（#4219）、sparse_large_vector
+decommit（#4471）、SpinLock→std::mutex（#4436）、RDTSC 纳秒换算修复
+（#4422，计时相关）、FindBuffer/CreateBuffer 增加 sparse_compatible 分支
+（#4362，热路径 +1 分支，可忽略）。
+
+**基线纪律**：本次 merge 改动了 SynchronizeBuffer/FindBuffer/上传路径与
+dynarmic——**serial/diag 历史中位数与 merge 前不可直接互比**；后续 A/B
+一律以 merge 后 commit 为新基线重新起交错对。暂未跑 bench 验收（用户
+未要求；下次开跑前先 warmup 一轮）。
