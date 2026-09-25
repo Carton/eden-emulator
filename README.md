@@ -62,6 +62,10 @@ Main areas of improvement:
 Full design notes and validation data: [OPTIMIZATIONS.md](./OPTIMIZATIONS.md) (English) /
 [OPTIMIZATIONS_zh.md](./OPTIMIZATIONS_zh.md)（中文）。
 
+Nearly all of the optimization work was carried out by AI agents — Zcode driving the
+workflow with GLM-5.3 as the primary analysis/optimization model, and Codex reviewing
+parts of the code. See OPTIMIZATIONS.md for details of how the loop ran.
+
 ## Compatibility
 
 The emulator is capable of running most commercial games at full speed, provided you meet the necessary hardware requirements.
