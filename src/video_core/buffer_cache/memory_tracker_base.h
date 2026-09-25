@@ -58,6 +58,18 @@ public:
 
     /// Returns true if a region has been modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(VAddr query_cpu_addr, u64 query_size) noexcept {
+        static_assert(HIGHER_PAGE_SIZE % BYTES_PER_WORD == 0);
+        const u64 word_offset = query_cpu_addr % BYTES_PER_WORD;
+        if (query_size != 0 && query_size <= BYTES_PER_WORD - word_offset) [[likely]] {
+            // (local-only) A word cannot cross a manager boundary. Do not
+            // create absent managers.
+            auto* manager = top_tier[query_cpu_addr >> HIGHER_PAGE_BITS];
+            if (!manager) {
+                return false;
+            }
+            return manager->IsRegionModified(Type::GPU, query_cpu_addr & HIGHER_PAGE_MASK,
+                                             query_size);
+        }
         return IteratePages<false>(query_cpu_addr, query_size, [](Manager* manager, u64 offset, size_t size) {
             return manager->IsRegionModified(Type::GPU, offset, size);
         });

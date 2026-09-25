@@ -210,6 +210,20 @@ struct WordManager {
         //static_assert(type != Type::Untracked);
         const std::span<const u64> state_words = Span(type);
         const std::span<const u64> untracked_words = Span(Type::Untracked);
+        // (local-only) Query-only fast path. Clip nothing here: unusual ranges
+        // retain IterateWords semantics, including empty and overflowing ranges.
+        const u64 word_offset = offset % BYTES_PER_WORD;
+        if (type == Type::GPU && offset < size_bytes && size != 0 &&
+            size <= size_bytes - offset && size <= BYTES_PER_WORD - word_offset) {
+            const size_t index = offset / BYTES_PER_WORD;
+            const u64 first_page = word_offset / BYTES_PER_PAGE;
+            const u64 last_page = (word_offset + size - 1) / BYTES_PER_PAGE;
+            // Inclusive last byte rounds up to the same pages as IterateWords.
+            // Both shifts are 0..63, including an exactly full bitmap word.
+            const u64 mask = (~u64{0} << first_page) &
+                             (~u64{0} >> (PAGES_PER_WORD - 1 - last_page));
+            return (state_words[index] & ~untracked_words[index] & mask) != 0;
+        }
         bool result = false;
         IterateWords(offset, size, [&](size_t index, u64 mask) {
             if (type == Type::GPU)

@@ -713,7 +713,10 @@ void MemoryManager::FlushCaching() {
     if (accumulator.InvalidateAll([this](GPUVAddr addr, size_t size) {
         GetSubmappedRangeImpl<false>(addr, size, page_stash2);
     })) {
-        rasterizer->InnerInvalidation(VideoCommon::FixSmallVectorADL(page_stash2));
+        // (local-only) pass a span directly; FixSmallVectorADL copies the
+        // whole stash (heap when >32 entries) on every accumulator fire
+        rasterizer->InnerInvalidation(std::span<const std::pair<DAddr, std::size_t>>{
+            page_stash2.data(), page_stash2.size()});
         page_stash2.clear();
     }
 }

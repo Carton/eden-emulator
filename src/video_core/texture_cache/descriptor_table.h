@@ -7,6 +7,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstring>
 #include <vector>
 
 #include "common/alignment.h"
@@ -37,7 +38,21 @@ public:
         DEBUG_ASSERT(index <= current_limit);
         const GPUVAddr gpu_addr = current_gpu_addr + index * sizeof(T);
         std::pair<T, bool> result;
-        gpu_memory.ReadBlockUnsafe(gpu_addr, std::addressof(result.first), sizeof(T));
+        // (local-only) No translation survives this read. Maxwell mappings and
+        // device backing have a minimum granularity of one 4 KiB device page.
+        if (const u8* host = gpu_memory.GetPointer(gpu_addr)) [[likely]] {
+            const bool single_page =
+                sizeof(T) <= Core::DEVICE_PAGESIZE - (gpu_addr & (Core::DEVICE_PAGESIZE - 1));
+            if (single_page) [[likely]] {
+                std::memcpy(std::addressof(result.first), host, sizeof(T));
+            } else if (gpu_memory.GetPointer(gpu_addr + sizeof(T) - 1) == host + sizeof(T) - 1) {
+                std::memcpy(std::addressof(result.first), host, sizeof(T));
+            } else {
+                gpu_memory.ReadBlockUnsafe(gpu_addr, std::addressof(result.first), sizeof(T));
+            }
+        } else {
+            gpu_memory.ReadBlockUnsafe(gpu_addr, std::addressof(result.first), sizeof(T));
+        }
         if ((read_descriptors[index / 64] & (1ULL << (index % 64))) != 0) {
             result.second = result.first != descriptors[index];
         } else {

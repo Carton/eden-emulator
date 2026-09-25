@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <bit>
 #include <utility>
 #include <vector>
 
@@ -69,7 +70,10 @@ StagingBufferPool::StagingBufferPool(const Device& device_, MemoryAllocator& mem
                                      Scheduler& scheduler_)
     : device{device_}, memory_allocator{memory_allocator_}, scheduler{scheduler_},
       stream_buffer_size{GetStreamBufferSize(device)}, region_size{stream_buffer_size /
-                                                                   StagingBufferPool::NUM_SYNCS} {
+                                                                   StagingBufferPool::NUM_SYNCS},
+      // (local-only) normal path region_size = 256MiB/16 = 16MiB (pow2) -> shift
+      // replaces 4 non-CSE-able 64-bit divisions per GetStreamBuffer call
+      region_shift{std::has_single_bit(region_size) ? std::countr_zero(region_size) : -1} {
     VkBufferCreateInfo stream_ci = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .pNext = nullptr,
