@@ -51,7 +51,8 @@ using BufferId = Common::SlotId;
 struct GraphicsUpdateDiag {
     using Clock = std::chrono::steady_clock;
     Clock::time_point begin{}, geometry_end{}, end{};
-    bool active{}, geometry_seen{};
+    bool active{}, geometry_seen{}, time_host_uniform{};
+    u64 host_uniform_ns{};
     u64 calls{}, geometry_ns{}, remaining_ns{}, passes{};
 };
 inline thread_local GraphicsUpdateDiag graphics_update_diag;

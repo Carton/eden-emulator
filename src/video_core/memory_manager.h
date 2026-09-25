@@ -151,6 +151,8 @@ public:
                                size_t max_size = (std::numeric_limits<size_t>::max)()) const;
 
     void FlushCaching();
+    // GPU command producer only, like FlushCaching/WriteBlockCached.
+    [[nodiscard]] bool HasPendingCaching() const noexcept { return accumulator.HasPending(); }
 
     const u8* GetSpan(const GPUVAddr src_addr, const std::size_t size) const;
     u8* GetSpan(const GPUVAddr src_addr, const std::size_t size);

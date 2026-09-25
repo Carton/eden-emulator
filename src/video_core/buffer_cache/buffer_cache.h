@@ -535,7 +535,17 @@ void BufferCache<P>::BindHostGeometryBuffers(bool is_indexed) {
 
 template <class P>
 void BufferCache<P>::BindHostStageBuffers(size_t stage) {
+    auto& diag = graphics_update_diag;
+    GraphicsUpdateDiag::Clock::time_point uniform_begin;
+    if (diag.time_host_uniform) {
+        uniform_begin = GraphicsUpdateDiag::Clock::now();
+    }
     BindHostGraphicsUniformBuffers(stage);
+    if (diag.time_host_uniform) {
+        diag.host_uniform_ns += static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                GraphicsUpdateDiag::Clock::now() - uniform_begin).count());
+    }
     BindHostGraphicsStorageBuffers(stage);
     BindHostGraphicsTextureBuffers(stage);
 }

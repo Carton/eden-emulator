@@ -299,6 +299,8 @@ private:
     u64 diag_tail_calls{};
     std::chrono::nanoseconds diag_prepare_ns{};   // whole serial PrepareDraw
     u64 diag_prepare_calls{};
+    bool serial_prologue_fast{};
+    u64 diag_fast_prologue_calls{}, diag_flush_work_skips{}, diag_flush_caching_skips{};
     std::array<u64, 6> diag_prepare_phases_ns{};
     std::array<u64, 3> diag_prologue_ns{};
     u64 diag_prepare_null_pipeline{}, diag_prepare_tail_rejected{};

@@ -37,6 +37,9 @@ public:
         }
     }
 
+    // Exactly the condition used by InvalidateAll; same producer ownership.
+    [[nodiscard]] bool HasPending() const noexcept { return start_address > 0; }
+
     template <typename F>
     [[nodiscard]] bool InvalidateAll(F&& f) noexcept {
         if (start_address > 0) {

@@ -46,6 +46,7 @@ namespace {
 // Shared across pipeline specializations, private to each calling thread.
 struct ConfigureTailDiag {
     u64 calls{}, uniform_ns{}, texture_ns{}, other_ns{}, bindings_ns{}, update_ns{}, post_update_ns{};
+    u64 host_uniform_ns{}, geometry_ns{}, stage_remaining_ns{}, final_emit_ns{};
 };
 thread_local std::array<ConfigureTailDiag, 2> configure_tail_diag;
 
@@ -642,19 +643,25 @@ bool GraphicsPipeline::ConfigureImpl(DrawContext& ctx, bool is_indexed,
             std::chrono::duration_cast<std::chrono::nanoseconds>(now - tail_stamp).count());
         tail_stamp = now;
     };
+    auto post_update_start = tail_stamp;
     SCOPE_EXIT {
         const auto before = timing.bindings_ns;
         tail_boundary(timing.bindings_ns);
-        timing.post_update_ns += timing.bindings_ns - before;
+        timing.final_emit_ns += timing.bindings_ns - before;
+        timing.post_update_ns += static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(tail_stamp - post_update_start).count());
         if (++timing.calls % 5000 == 0) {
             LOG_INFO(Render_Vulkan,
                      "ConfigureTail diag: calls={} job_bindings={} uniform_apply_ns={} "
                      "texture_apply_ns={} bindings_upload_descriptors_ns={} other_ns={} "
-                     "update_graphics_ns={} post_update_bindings_descriptors_ns={}",
+                     "update_graphics_ns={} post_update_bindings_descriptors_ns={} "
+                     "host_uniform_ns={} host_geometry_ns={} stage_remaining_ns={} final_emit_ns={}",
                      timing.calls, job_bindings, timing.uniform_ns / timing.calls,
                      timing.texture_ns / timing.calls, timing.bindings_ns / timing.calls,
                      timing.other_ns / timing.calls, timing.update_ns / timing.calls,
-                     timing.post_update_ns / timing.calls);
+                     timing.post_update_ns / timing.calls, timing.host_uniform_ns / timing.calls,
+                     timing.geometry_ns / timing.calls, timing.stage_remaining_ns / timing.calls,
+                     timing.final_emit_ns / timing.calls);
         }
     };
     if (job_bindings) {
@@ -729,7 +736,16 @@ bool GraphicsPipeline::ConfigureImpl(DrawContext& ctx, bool is_indexed,
     timing.update_ns += update_ns;
     timing.bindings_ns += update_ns;
     tail_stamp = update_diag.end;
+    post_update_start = tail_stamp;
+    auto boundary_start = tail_stamp;
     buffer_cache.BindHostGeometryBuffers(is_indexed);
+    tail_boundary(timing.bindings_ns);
+    timing.geometry_ns += static_cast<u64>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(tail_stamp - boundary_start).count());
+    boundary_start = tail_stamp;
+    update_diag.host_uniform_ns = 0;
+    update_diag.time_host_uniform = true;
+    SCOPE_EXIT { update_diag.time_host_uniform = false; };
 
     guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);
 
@@ -763,6 +779,12 @@ bool GraphicsPipeline::ConfigureImpl(DrawContext& ctx, bool is_indexed,
     if constexpr (Spec::enabled_stages[4]) {
         prepare_stage(4);
     }
+    update_diag.time_host_uniform = false;
+    tail_boundary(timing.bindings_ns);
+    const auto stage_ns = static_cast<u64>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(tail_stamp - boundary_start).count());
+    timing.host_uniform_ns += update_diag.host_uniform_ns;
+    timing.stage_remaining_ns += stage_ns - update_diag.host_uniform_ns;
     if (buffer_cache.any_buffer_uploaded) {
         buffer_cache.runtime.PostCopyBarrier();
         buffer_cache.any_buffer_uploaded = false;

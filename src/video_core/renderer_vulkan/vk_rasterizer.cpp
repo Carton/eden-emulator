@@ -251,6 +251,8 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
     // Worker modes "sync"/"async" fall back to inline (scheduler re-entry).
     // EDEN_TOKEN_SNAPSHOT=full forces the depth-1 whole-register copy;
     // EDEN_TOKEN_CHECK=1 verifies the shadow register state bit-exactly.
+    const char* prologue_fast = std::getenv("EDEN_SERIAL_PROLOGUE_FAST");
+    serial_prologue_fast = prologue_fast && prologue_fast[0] == '1' && prologue_fast[1] == '\0';
     const char* token{std::getenv("EDEN_DRAW_TOKEN")};
     if (token && *token != '\0' && *token != '0') {
         token_mode = TokenMode::Inline;
@@ -362,14 +364,41 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
                      diag_prepare_calls, diag_prologue_ns[0] / diag_prepare_calls,
                      diag_prologue_ns[1] / diag_prepare_calls,
                      diag_prologue_ns[2] / diag_prepare_calls);
+            LOG_INFO(Render_Vulkan,
+                     "SerialDraw prologue fast diag: gate={} eligible_calls={} "
+                     "flush_work_skips={} flush_caching_skips={} pipeline_lookup_skips=0",
+                     serial_prologue_fast, diag_fast_prologue_calls,
+                     diag_flush_work_skips, diag_flush_caching_skips);
         }
     };
     SCOPE_EXIT {
         gpu.TickWork();
     };
-    FlushWork();
+    const bool fast = serial_prologue_fast && token_mode == TokenMode::Off;
+    if (fast) {
+        ++diag_fast_prologue_calls;
+        // Same check mask as FlushWork. Preserve every counter increment and
+        // dispatch/flush boundary; only avoid the call on non-dispatch draws.
+#ifdef __ANDROID__
+        constexpr u32 check_mask = 3;
+#else
+        constexpr u32 check_mask = 7;
+#endif
+        if (((draw_counter + 1) & check_mask) != check_mask) {
+            ++draw_counter;
+            ++diag_flush_work_skips;
+        } else {
+            FlushWork();
+        }
+    } else {
+        FlushWork();
+    }
     const auto work_end = std::chrono::steady_clock::now();
-    gpu_memory->FlushCaching();
+    if (fast && !gpu_memory->HasPendingCaching()) {
+        ++diag_flush_caching_skips;
+    } else {
+        gpu_memory->FlushCaching();
+    }
     const auto caching_end = std::chrono::steady_clock::now();
 
     GraphicsPipeline* const pipeline{pipeline_cache.CurrentGraphicsPipeline()};
