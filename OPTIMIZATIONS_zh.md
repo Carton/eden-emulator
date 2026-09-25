@@ -119,7 +119,7 @@ GPU 线程（命令解析 → 状态机 → 绑定解析 → 命令录制）是�
 IBS 采样证明它是执行吞吐瓶颈（不存在内存墙或分支墙），
 因此这里的优化全部是"删除冗余工作"。
 
-### 3.1 冗余状态与绑定工作消除 — `22a7e999e2`
+### 3.1 冗余状态与绑定工作消除 — `f7196e3675`
 
 原始提交：9aa4ce0921（GPU 命令线程微优化；ETW 验证 GPU 线程自耗时在
 100 秒窗口内从 105.9s 降到 102.4s）+ 5da3c43261（跨通道 buffer_id 失效修复）
@@ -148,7 +148,7 @@ IBS 采样证明它是执行吞吐瓶颈（不存在内存墙或分支墙），
 `AddTransition` 时预先存好键的哈希，查找先比哈希再逐字节比较；只有一个候选时
 直接做等值比较——这种场景先算哈希只会更慢。
 
-### 3.3 地址翻译冗余消除 — `0781b56252`
+### 3.3 地址翻译冗余消除 — `93ba41b490`
 
 原始提交：18aaa38cef（描述符直读初版）+ 74d5550276（串行优化第一批，
 帧率 +0.5-1%）+ e7c1484690/e43f875f75/814f80c107（描述符/SSBO/脏位图三项）+
@@ -210,7 +210,7 @@ c31cc64c1f）合入本系列。
 | `dc6f9e9f66` | f3b7712ae3 | 异步 ASTC 解码窗口的零填充。从 QueueAsyncDecode 到下一帧 TickAsyncDecode 上传之间，VkImage 处于未初始化状态，而绘制完全可能在这期间采样它，读到从未写入的显存——加载屏上的垃圾花块，单局观测到 2637 次排队解码。改为排队时立即通过 staging 上传全零，解码窗口内采样到的是黑色。ZeroUploadCopies 镜像 ConvertImage 的缓冲几何（含 BC1/BC3 重压缩分支） |
 | `e3a7dc82ba` | 568605ebf7 | 解锁模式下，显式帧间隔请求按硬件速率合成。暂停菜单这类以 30fps 设计的界面（交换间隔 1-4）此前被 0.01 的解锁倍率拖到全速，输入重复速率随之超速。只有游戏自己按动态帧率提交的情况（compose 倍率 >1）才走解锁倍率 |
 | `5d50effdf1` | a10393a9b0 | 退出游戏时恢复用户进游戏前的限速偏好。上游在 OnShutdownBegin 强制 `use_speed_limit=true`，等于每次退出游戏都悄悄把"限制速度"勾选回去 |
-| `c0eb6ef236` | eb2901fbc0 | settings 文件系统异常兜底。Windows 上 `rename(tmp, dat)` 在目标被并发占用时抛出 filesystem_error，而 StoreSettingsFile 运行在 TimeWorker 线程上无人捕获，直接 terminate，不定时以 0xC0000409 杀死进程。经 SIGABRT 调用栈定位：TimeWorker→SetNetworkSystemClockContext→SetSaveNeeded→StoreSettings；现场证据是存档目录里同时残留 tmp 与 dat 文件。改为函数级 try 块捕获、记日志并返回 false，成功路径逐字节不变 |
+| `c0eb6ef236` | eb2901fbc0 | settings 文件系统异常兜底。Windows 上 `rename(tmp, dat)` 在目标被并发占用时抛出 filesystem_error，而 StoreSettingsFile 运行在 TimeWorker 线程上无人捕获，直接 terminate，不定时以 0xC0000409 杀死进程。经 SIGABRT 调用栈定位：TimeWorker→SetNetworkSystemClockContext→SetSaveNeeded→StoreSettings；现场证据是存档目录里同时残留 tmp 与 dat 文件。Load/StoreSettingsFile 改为函数级 try 块捕获、记日志并返回 false，成功路径逐字节不变 |
 
 ---
 
