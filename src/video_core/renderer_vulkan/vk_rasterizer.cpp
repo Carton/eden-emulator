@@ -340,7 +340,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
         phase_start = now;
     };
     SCOPE_EXIT {
-        // Reuse the last phase boundary: seven clocks on a complete draw.
+        // Reuse the last phase boundary: nine clocks on a complete draw.
         // Excludes lock destruction and gpu.TickWork(), unlike the old outer timer.
         diag_prepare_ns += phase_start - prepare_start;
         if (++diag_prepare_calls % 5000 == 0) {
@@ -357,16 +357,29 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
                      diag_prepare_phases_ns[4] / diag_prepare_calls,
                      diag_prepare_phases_ns[5] / diag_prepare_calls,
                      diag_prepare_null_pipeline, diag_prepare_tail_rejected);
+            LOG_INFO(Render_Vulkan,
+                     "SerialDraw prologue diag: calls={} flush_work_ns={} flush_caching_ns={} pipeline_lookup_ns={}",
+                     diag_prepare_calls, diag_prologue_ns[0] / diag_prepare_calls,
+                     diag_prologue_ns[1] / diag_prepare_calls,
+                     diag_prologue_ns[2] / diag_prepare_calls);
         }
     };
     SCOPE_EXIT {
         gpu.TickWork();
     };
     FlushWork();
+    const auto work_end = std::chrono::steady_clock::now();
     gpu_memory->FlushCaching();
+    const auto caching_end = std::chrono::steady_clock::now();
 
     GraphicsPipeline* const pipeline{pipeline_cache.CurrentGraphicsPipeline()};
     phase_end(0);
+    const auto ns = [](auto duration) {
+        return static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count());
+    };
+    diag_prologue_ns[0] += ns(work_end - prepare_start);
+    diag_prologue_ns[1] += ns(caching_end - work_end);
+    diag_prologue_ns[2] += ns(phase_start - caching_end);
     if (!pipeline) {
         ++diag_prepare_null_pipeline;
         return;

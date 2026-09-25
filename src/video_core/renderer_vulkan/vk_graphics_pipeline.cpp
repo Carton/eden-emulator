@@ -45,7 +45,7 @@ namespace {
 
 // Shared across pipeline specializations, private to each calling thread.
 struct ConfigureTailDiag {
-    u64 calls{}, uniform_ns{}, texture_ns{}, other_ns{}, bindings_ns{};
+    u64 calls{}, uniform_ns{}, texture_ns{}, other_ns{}, bindings_ns{}, update_ns{}, post_update_ns{};
 };
 thread_local std::array<ConfigureTailDiag, 2> configure_tail_diag;
 
@@ -643,14 +643,18 @@ bool GraphicsPipeline::ConfigureImpl(DrawContext& ctx, bool is_indexed,
         tail_stamp = now;
     };
     SCOPE_EXIT {
+        const auto before = timing.bindings_ns;
         tail_boundary(timing.bindings_ns);
+        timing.post_update_ns += timing.bindings_ns - before;
         if (++timing.calls % 5000 == 0) {
             LOG_INFO(Render_Vulkan,
                      "ConfigureTail diag: calls={} job_bindings={} uniform_apply_ns={} "
-                     "texture_apply_ns={} bindings_upload_descriptors_ns={} other_ns={}",
+                     "texture_apply_ns={} bindings_upload_descriptors_ns={} other_ns={} "
+                     "update_graphics_ns={} post_update_bindings_descriptors_ns={}",
                      timing.calls, job_bindings, timing.uniform_ns / timing.calls,
                      timing.texture_ns / timing.calls, timing.bindings_ns / timing.calls,
-                     timing.other_ns / timing.calls);
+                     timing.other_ns / timing.calls, timing.update_ns / timing.calls,
+                     timing.post_update_ns / timing.calls);
         }
     };
     if (job_bindings) {
@@ -713,8 +717,18 @@ bool GraphicsPipeline::ConfigureImpl(DrawContext& ctx, bool is_indexed,
     // Includes buffer uploads/geometry, host stage bindings, image descriptors,
     // render targets/feedback and ConfigureDraw's descriptor/pipeline emission.
     // Every caller (serial, fallback, and token) installs the layout before uploads.
+    auto& update_diag = VideoCommon::graphics_update_diag;
+    update_diag.begin = tail_stamp;
+    update_diag.geometry_seen = false;
+    update_diag.active = true;
+    SCOPE_EXIT { update_diag.active = false; };
     buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks, &uniform_buffer_sizes);
     buffer_cache.UpdateGraphicsBuffers(is_indexed);
+    const auto update_ns = static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        update_diag.end - tail_stamp).count());
+    timing.update_ns += update_ns;
+    timing.bindings_ns += update_ns;
+    tail_stamp = update_diag.end;
     buffer_cache.BindHostGeometryBuffers(is_indexed);
 
     guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);

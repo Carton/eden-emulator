@@ -7,6 +7,7 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <cstdlib>
 #include <memory>
@@ -22,6 +23,17 @@
 namespace VideoCommon {
 
 using Core::DEVICE_PAGESIZE;
+
+// Vulkan tail lends its existing boundary; no clocks for uninstrumented callers.
+// Uniform/storage/texture updates are interleaved by stage and remain combined.
+struct GraphicsUpdateDiag {
+    using Clock = std::chrono::steady_clock;
+    Clock::time_point begin{}, geometry_end{}, end{};
+    bool active{}, geometry_seen{};
+    u64 calls{}, geometry_ns{}, remaining_ns{}, passes{};
+};
+inline thread_local GraphicsUpdateDiag graphics_update_diag;
+
 
 // (local-only) gate for the uniform stream-path measurement counters
 static bool UniformStreamStatsEnabled() {
@@ -424,6 +436,23 @@ void BufferCache<P>::UpdateGraphicsBuffers(bool is_indexed) {
         channel_state->has_deleted_buffers = false;
         DoUpdateGraphicsBuffers(is_indexed);
     } while (channel_state->has_deleted_buffers);
+    auto& diag = graphics_update_diag;
+    if (diag.active) {
+        diag.end = GraphicsUpdateDiag::Clock::now();
+        diag.geometry_ns += static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            diag.geometry_end - diag.begin).count());
+        diag.remaining_ns += static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            diag.end - diag.geometry_end).count());
+        diag.active = false;
+        if (++diag.calls % 5000 == 0) {
+            LOG_INFO(Render_Vulkan,
+                     "UpdateGraphicsBuffers diag: calls={} geometry_setup_ns={} "
+                     "uniform_storage_texture_indirect_retry_ns={} passes={} "
+                     "scope=first_geometry_then_combined_remainder",
+                     diag.calls, diag.geometry_ns / diag.calls,
+                     diag.remaining_ns / diag.calls, diag.passes);
+        }
+    }
 }
 
 template <class P>
@@ -1508,6 +1537,14 @@ void BufferCache<P>::DoUpdateGraphicsBuffers(bool is_indexed) {
         }
         UpdateVertexBuffers();
         UpdateTransformFeedbackBuffers();
+        auto& diag = graphics_update_diag;
+        if (diag.active) {
+            ++diag.passes;
+            if (!diag.geometry_seen) {
+                diag.geometry_end = GraphicsUpdateDiag::Clock::now();
+                diag.geometry_seen = true;
+            }
+        }
         for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
             UpdateUniformBuffers(stage);
             UpdateStorageBuffers(stage);
