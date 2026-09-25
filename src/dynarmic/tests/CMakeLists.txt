@@ -51,9 +51,21 @@ endif()
 if ("x86_64" IN_LIST ARCHITECTURE)
     target_link_libraries(dynarmic_tests PRIVATE xbyak::xbyak)
     target_architecture_specific_sources(dynarmic_tests "x86_64"
+        ir_cache.cpp
+        ir_cache_execution.cpp
         x64_cpu_info.cpp
         native/preserve_xmm.cpp
     )
+
+    # Separate processes are required: environment switches are read once.
+    foreach(mode IN ITEMS on off)
+        add_test(NAME dynarmic_ir_cache_${mode}
+            COMMAND dynarmic_tests "[ir-cache],[ir-cache-execution],[jit-policy]")
+    endforeach()
+    set_tests_properties(dynarmic_ir_cache_on PROPERTIES
+        ENVIRONMENT "EDEN_JIT_IRCACHE=1")
+    set_tests_properties(dynarmic_ir_cache_off PROPERTIES
+        ENVIRONMENT "EDEN_JIT_IRCACHE=0")
 
     if (NOT MSVC AND NOT MULTIARCH_BUILD)
         target_sources(dynarmic_tests PRIVATE
