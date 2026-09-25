@@ -114,7 +114,7 @@ s64 Conductor::GetNextTicks() const {
             // gameplay). Explicit pacing requests (interval 1..4, e.g. 30 fps
             // pause menus) keep hardware-accurate 60 Hz composition so paced
             // UIs stay at their intended rate and input repeat does not
-            // hyperscale.
+            // hyperscale. (local-only)
             speed_scale = m_compose_speed_scale > 1.f ? 0.1f : 1.f;
         }
     }
@@ -128,7 +128,15 @@ s64 Conductor::GetNextTicks() const {
     }
 
     const f32 effective_fps = 60.f / static_cast<f32>(m_swap_interval);
-    return static_cast<s64>(speed_scale * (1000000000.f / effective_fps));
+    const s64 ticks = static_cast<s64>(speed_scale * (1000000000.f / effective_fps));
+    // Never schedule guest vsync events faster than ~1200 Hz: multi-kHz
+    // conductor wakeups were measured burning a full core in HostTiming/VSync
+    // spin (v0.2.1 profiling, 2026-09-12). 1200 Hz (0.833 ms granularity) keeps
+    // present-time quantization loss below one ms when a frame's work lands
+    // just above a tick boundary (observed med flipping 21.67/23.33 ms =
+    // 13/14 x 1.667 ms at the former 600 Hz floor). (local-only)
+    constexpr s64 kMinVsyncTickNs = 1000000000LL / 1200;
+    return std::max<s64>(ticks, kMinVsyncTickNs);
 }
 
 s64 Conductor::GetFramePeriodNs() const {
