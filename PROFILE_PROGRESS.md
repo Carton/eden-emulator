@@ -4304,3 +4304,33 @@ configure_tail ????????????????????????
 ????????????????????????? diag????????diff --check
 ??????/??/?????? serial/checker ????????buffer_cache.h ????
 ???????????????????????????
+
+### 34.2 step 1：二层分解定案——1252ns 的 post_update 段是最大单体（2026-09-25 上午）
+
+仪器（267f534a53 + TLS 迁移修复 27cc023c20：buffer_cache_base.h 才是 vk 链可见的
+声明头）。sc1 局（22.4M draws；本局 med 25.83 比早晨校准档 23.33 慢一档，档位
+漂移或仪器扰动，比例分析有效；14 时钟/draw 扰动 ~8% 已知）。
+
+**三层成本树（ns/draw）**：
+- prologue 746（23%）：flush_work 211 + flush_caching 219 + **pipeline_lookup 315**
+- lock_setup 123 / resolve 519（16%）/ dynamic_query 153 / emit 51
+- configure_tail 1665：staging 65 + update_graphics 285
+  （geometry_setup 204 + uniform/storage/texture/indirect/retry 仅 80，passes≈1.0 无重试）
+  + **post_update_bindings_descriptors 1252（38%——最大单体）**
+- 合计 ~3262（与六段行 746+123+519+1665+153+51=3257 对账吻合）
+
+**post_update 内容**（UpdateGraphicsBuffers 之后的 ConfigureImpl 尾段）：
+BindHostGraphicsUniformBuffers（CBPG 链，历史 diag 显示 ~1 次/draw 的 host 绑定
+查询）+ 几何上传 + 描述符写 + 管线发射。缓冲缓存自身的更新逻辑极便宜（285ns），
+**贵的全在"取数+绑主机缓冲+写描述符"这段**。
+
+**靶点排序（更新）**：
+1. post_update 1252ns——需要第三层拆分（uniform host binds vs 几何 vs 描述符 vs
+   管线发射）；CBPG/uniform 取数链是头号嫌疑（与早期 SerialCuts/stream-cut 战役
+   的历史区域重叠，见 §19 系列）。
+2. prologue 746ns——三件套都是"每 draw 检查"：flush_caching 有 stage-4 实测
+   456 万次 0 排空证据可短路；pipeline_lookup 315ns 温查路径可缓存化；
+   flush_work 211ns 是 dispatch 预算检查。
+3. resolve 519ns——绑定查找翻译。
+**理论余量**：post_update 减半 + prologue 削 300 + resolve 削 200 ≈ -1.1µs/draw
+≈ 3.6ms/帧（draws/frame 实测 3300）≈ +15-18% fps。
