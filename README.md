@@ -41,6 +41,27 @@ Written in C++, with builds for Windows, Linux, macOS, Android, FreeBSD and more
   <a href="#license">License</a>
 </p>
 
+## About this fork
+
+This repository is my personal, PC-focused build of Eden, based on Eden's `master` branch.
+Most of the work here is a series of performance-optimization experiments driven by a single
+game — *The Legend of Zelda: Tears of the Kingdom* — profiled and validated on the
+Windows/Vulkan desktop build.
+
+Main areas of improvement:
+
+- **CPU (dynarmic JIT)**: a process-wide cross-core shared IR cache (eliminating 51% of
+  duplicate block compiles) and constant-time value lookup in register allocation.
+- **GPU thread (serial path)**: redundant per-draw address translations, register writes,
+  LRU touches and buffer re-resolutions removed; graphics-pipeline lookup memoization.
+- **Presentation timing**: a 1200 Hz vsync scheduling floor for unlocked framerate —
+  sub-millisecond present quantization without saturating a core.
+- **Correctness fixes**: async ASTC decode-window corruption, pause-menu pacing,
+  a nondeterministic settings-save crash, and more.
+
+Full design notes and validation data: [OPTIMIZATIONS.md](./OPTIMIZATIONS.md) (English) /
+[OPTIMIZATIONS_zh.md](./OPTIMIZATIONS_zh.md)（中文）。
+
 ## Compatibility
 
 The emulator is capable of running most commercial games at full speed, provided you meet the necessary hardware requirements.
