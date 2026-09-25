@@ -83,10 +83,10 @@ void LogDownloadBlockingDiagnostics(u64 calls, u64 area_hits, u64 oncpu_reads) {
 struct GPU::Impl {
     explicit Impl(Core::System& system_, bool is_async_, bool use_nvdec_)
         : system{system_}
+        , gpu_thread{system_}
         , use_nvdec{use_nvdec_}
         , shader_notify()
         , is_async{is_async_}
-        , gpu_thread{system_}
     {}
 
     ~Impl() = default;
@@ -254,6 +254,7 @@ struct GPU::Impl {
     }
 
     void NotifyShutdown() {
+        gpu_thread.NotifyShutdown();
         std::unique_lock lk{sync_mutex};
         shutting_down.store(true, std::memory_order::relaxed);
         sync_cv.notify_all();
@@ -394,6 +395,10 @@ struct GPU::Impl {
 
     Core::System& system;
 
+    // Destruction of thread must be done before all (non trivial)
+    // previous members has been destroyed
+    VideoCommon::GPUThread::ThreadManager gpu_thread;
+
     std::unique_ptr<VideoCore::RendererBase> renderer;
     const bool use_nvdec;
 
@@ -422,7 +427,6 @@ struct GPU::Impl {
 
     const bool is_async;
 
-    VideoCommon::GPUThread::ThreadManager gpu_thread;
     std::unique_ptr<Core::Frontend::GraphicsContext> cpu_context;
 
     Tegra::Control::Scheduler scheduler;

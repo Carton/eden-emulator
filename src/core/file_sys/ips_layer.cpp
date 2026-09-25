@@ -35,17 +35,20 @@ static IPSFileType IdentifyMagic(std::span<const u8> magic) {
 }
 
 static bool IsEOF(IPSFileType type, std::span<const u8> magic) {
-    return (type == IPSFileType::IPS && magic.size() > 3 && std::memcmp(magic.data(), "EOF", 3) == 0)
-        || (type == IPSFileType::IPS32 && magic.size() > 4 && std::memcmp(magic.data(), "EEOF", 4) == 0);
+    return (type == IPSFileType::IPS && magic.size() >= 3 && std::memcmp(magic.data(), "EOF", 3) == 0)
+        || (type == IPSFileType::IPS32 && magic.size() >= 4 && std::memcmp(magic.data(), "EEOF", 4) == 0);
 }
 
 VirtualFile PatchIPS(const VirtualFile& in, const VirtualFile& ips) {
     if (in == nullptr || ips == nullptr)
         return nullptr;
 
-    auto in_data = in->ReadAllBytes();
-    auto const type = IdentifyMagic(in_data);
+    const auto type = IdentifyMagic(ips->ReadBytes(0x5));
     if (type == IPSFileType::Error)
+        return nullptr;
+
+    auto in_data = in->ReadAllBytes();
+    if (in_data.size() == 0)
         return nullptr;
 
     std::vector<u8> temp(type == IPSFileType::IPS ? 3 : 4);
@@ -100,8 +103,7 @@ VirtualFile PatchIPS(const VirtualFile& in, const VirtualFile& ips) {
 
 
 struct IPSwitchRecord {
-    std::array<uint8_t, 256 - sizeof(size_t)> data;
-    size_t count;
+    std::vector<uint8_t> data;
 };
 struct IPSwitchCompiler::IPSwitchPatch {
     ::Common::unordered_map<u32, IPSwitchRecord> records;
@@ -120,24 +122,25 @@ std::array<u8, 32> IPSwitchCompiler::GetBuildID() const {
 
 static IPSwitchRecord EscapeStringSequences(std::string_view sv) {
     IPSwitchRecord r{};
-    for (auto it = sv.cbegin(); it != sv.cend(); ) {
+    for (auto it = sv.cbegin(); it < sv.cend(); ) {
         if (*it == '\\' && it + 1 < sv.cend()) {
-            switch (it[1]) {
-            case 'a': r.data[r.count] = '\a'; break;
-            case 'b': r.data[r.count] = '\b'; break;
-            case 'e': r.data[r.count] = '\e'; break;
-            case 'f': r.data[r.count] = '\f'; break;
-            case 'n': r.data[r.count] = '\n'; break;
-            case 'r': r.data[r.count] = '\r'; break;
-            case 't': r.data[r.count] = '\t'; break;
-            case 'v': r.data[r.count] = '\v'; break;
-            case '?': r.data[r.count] = '\?'; break;
-            default: r.data[r.count] = it[1]; break;
-            }
-            ++r.count;
+            r.data.push_back([it]() {
+                switch (it[1]) {
+                case 'a': return '\a';
+                case 'b': return '\b';
+                case 'e': return '\e';
+                case 'f': return '\f';
+                case 'n': return '\n';
+                case 'r': return '\r';
+                case 't': return '\t';
+                case 'v': return '\v';
+                case '?': return '\?';
+                default: return it[1];
+                }
+            }());
             it += 2;
         } else {
-            ++r.count;
+            r.data.push_back(*it);
             ++it;
         }
     }
@@ -198,6 +201,8 @@ void IPSwitchCompiler::Parse(std::span<u8 const> bytes) {
                 LOG_WARNING(Loader, "Unknown flag {}", line);
                 break;
             }
+        } else if (patches.empty()) {
+            LOG_WARNING(Loader, "Invalid line not in a patch {}", line);
         } else {
             size_t offset = size_t(std::strtoul(line.data(), nullptr, 16));
             offset += size_t(offset_shift);
@@ -221,8 +226,8 @@ void IPSwitchCompiler::Parse(std::span<u8 const> bytes) {
                 if (start <= line.cend() && end <= line.cend()) {
                     // Actually IPS wants ordering from {lsb, ..., msb} -- so LE and BE are inverted, fun!
                     auto const hs = Common::HexStringToVector({start, end}, is_little_endian);
+                    r.data.resize(hs.size());
                     std::memcpy(r.data.data(), hs.data(), hs.size());
-                    r.count = hs.size();
                     LOG_INFO(Loader, "[H] value @ {:#08X}", offset);
                     patches.back().records.insert_or_assign(u32(offset), std::move(r));
                 } else {
@@ -253,25 +258,30 @@ void IPSwitchCompiler::Parse(std::span<u8 const> bytes) {
             // now make a nominal preprocessed line: remove comments
             char quote = '\0';
             auto const sline_start = p;
+            auto last_char = p;
             for (; p < sline.cend(); ) {
                 // we dont check for "//", IPS checks for '/' only...
-                if ((!quote && p[0] == '/')
+                if (std::isspace(*p)) {
+                    ++p;
+                } else if ((!quote && p[0] == '/')
                 || (!quote && p[0] == '#')) {
                     break;
                 } else if (p[0] == '\"' || p[0] == '\'') {
                     quote = (p[0] == quote) ? '\0' : p[0];
                     ++p;
+                    last_char = p;
                 } else if (p + 1 < sline.cend() && p[0] == '\\') {
                     p += 2;
+                    last_char = p;
                 } else {
                     ++p;
+                    last_char = p;
                 }
             }
             // now we have the preprocessed string ;)
-            std::string_view pp_str(sline_start, p);
-            if (pp_str.size() > 0 && !parse_line(pp_str)) {
+            std::string_view const pp_str(sline_start, last_char);
+            if (pp_str.size() > 0 && !parse_line(pp_str))
                 break;
-            }
         }
     }
 }
@@ -286,7 +296,7 @@ VirtualFile IPSwitchCompiler::Apply(const VirtualFile& in) const {
         if (patch.enabled) {
             for (const auto& record : patch.records) {
                 if (record.first < in_data.size()) {
-                    auto replace_size = record.second.count;
+                    auto replace_size = record.second.data.size();
                     if (record.first + replace_size > in_data.size())
                         replace_size = in_data.size() - record.first;
                     std::memcpy(in_data.data() + record.first, record.second.data.data(), replace_size);

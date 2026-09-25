@@ -128,6 +128,7 @@ public:
     bool IsGPUThread() const { return std::this_thread::get_id() == thread.get_id(); }
     // Called under foreign callback locks: never wait for queue capacity.
     void WakeGPUService();
+    void NotifyShutdown();
 
 private:
     /// Pushes a command to be executed by the GPU thread

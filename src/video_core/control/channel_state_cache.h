@@ -101,7 +101,7 @@ protected:
         return VideoCommon::tls_engine_snapshot ? VideoCommon::tls_engine_snapshot : maxwell3d;
     }
 
-    P* channel_state;
+    P* channel_state = nullptr;
     size_t current_channel_id{UNSET_CHANNEL};
     size_t current_address_space{};
     Tegra::Engines::Maxwell3D* maxwell3d{};

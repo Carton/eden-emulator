@@ -388,6 +388,30 @@ struct Values {
                                                   true,
                                                   true};
 
+    SwitchableSetting<std::string> post_shader_chain{linkage,
+                                                     std::string(),
+                                                     "post_shader_chain",
+                                                     Category::Renderer,
+                                                     Specialization::Default,
+                                                     true,
+                                                     true};
+
+    SwitchableSetting<std::string> post_shader_preset{linkage,
+                                                      std::string(),
+                                                      "post_shader_preset",
+                                                      Category::Renderer,
+                                                      Specialization::Default,
+                                                      true,
+                                                      true};
+
+    SwitchableSetting<bool> post_shader_enabled{linkage,
+                                                true,
+                                                "post_shader_enabled",
+                                                Category::Renderer,
+                                                Specialization::Default,
+                                                true,
+                                                true};
+
     SwitchableSetting<bool> frame_gen{linkage, false, "frame_gen", Category::Renderer,
                                       Specialization::Default, true, false};
 
@@ -435,7 +459,7 @@ struct Values {
                                                       &frame_gen};
 
     SwitchableSetting<u32, true> frame_gen_queue_target{linkage,
-                                                        1,
+                                                        0,
                                                         0,
                                                         2,
                                                         "frame_gen_queue_target",
@@ -444,9 +468,6 @@ struct Values {
                                                         true,
                                                         false,
                                                         &frame_gen};
-
-    SwitchableSetting<bool> frame_gen_fp16{linkage,      true,  "frame_gen_fp16", Category::Renderer,
-                                           Specialization::Default, true, false, &frame_gen};
 
     SwitchableSetting<bool> frame_gen_dump_flow{linkage, false, "frame_gen_dump_flow",
                                                 Category::Renderer};
@@ -858,7 +879,7 @@ struct Values {
     SwitchableSetting<std::string> program_args{linkage,
                                                 std::string(),
                                                 "program_args",
-                                                Category::System,
+                                                Category::Debugging,
                                                 Specialization::Default,
                                                 true,    // save_ - persist in config file
                                                 false};  // runtime_modifiable_ - startup-only
@@ -904,7 +925,7 @@ struct Values {
                                            0,
                                            65535,
                                            "debug_knobs",
-                                           Category::System,
+                                           Category::Debugging,
                                            Specialization::Countable,
                                            true,
                                            true};
