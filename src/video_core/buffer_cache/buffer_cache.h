@@ -24,17 +24,6 @@ namespace VideoCommon {
 
 using Core::DEVICE_PAGESIZE;
 
-// Vulkan tail lends its existing boundary; no clocks for uninstrumented callers.
-// Uniform/storage/texture updates are interleaved by stage and remain combined.
-struct GraphicsUpdateDiag {
-    using Clock = std::chrono::steady_clock;
-    Clock::time_point begin{}, geometry_end{}, end{};
-    bool active{}, geometry_seen{};
-    u64 calls{}, geometry_ns{}, remaining_ns{}, passes{};
-};
-inline thread_local GraphicsUpdateDiag graphics_update_diag;
-
-
 // (local-only) gate for the uniform stream-path measurement counters
 static bool UniformStreamStatsEnabled() {
     static const bool enabled = [] {

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -42,6 +43,19 @@
 namespace VideoCommon {
 
 using BufferId = Common::SlotId;
+
+// (local-only) serial campaign diag: lives in the declaration header so TUs that
+// only see declarations (the vk_buffer_cache.h chain) can arm it; the timing in
+// buffer_cache.h's definitions reads it. No clocks for uninstrumented callers.
+// Uniform/storage/texture updates are interleaved by stage and remain combined.
+struct GraphicsUpdateDiag {
+    using Clock = std::chrono::steady_clock;
+    Clock::time_point begin{}, geometry_end{}, end{};
+    bool active{}, geometry_seen{};
+    u64 calls{}, geometry_ns{}, remaining_ns{}, passes{};
+};
+inline thread_local GraphicsUpdateDiag graphics_update_diag;
+
 
 using VideoCore::Surface::PixelFormat;
 using namespace Common::Literals;
