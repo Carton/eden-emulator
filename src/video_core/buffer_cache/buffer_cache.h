@@ -14,6 +14,7 @@
 #include <numeric>
 
 #include "common/logging.h"
+#include "video_core/serial_diag.h"
 #include "common/scope_exit.h"
 #include "common/range_sets.inc"
 #include "video_core/buffer_cache/buffer_cache_base.h"
@@ -1194,8 +1195,9 @@ void BufferCache<P>::BindHostGraphicsUniformBuffers(size_t stage) {
 
 template <class P>
 void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 binding_index, bool needs_bind) {
+    const bool serial_diag = SerialDiagEnabled();
     auto& sync_diag = uniform_sync_diag;
-    SCOPE_EXIT { sync_diag.Finish(); };
+    SCOPE_EXIT { if (serial_diag) sync_diag.Finish(); };
     ++channel_state->uniform_cache_shots[0];
     const Binding& binding = channel_state->uniform_buffers[stage][index];
     const DAddr device_addr = binding.device_addr;
@@ -1246,8 +1248,8 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
         ++diag_epoch_classic;
     }
     if (use_fast_buffer) {
-        ++sync_diag.stream_copies;
-        sync_diag.stream_bytes += size;
+        if (serial_diag) ++sync_diag.stream_copies;
+        if (serial_diag) sync_diag.stream_bytes += size;
         if constexpr (IS_OPENGL) {
             if (runtime.HasFastBufferSubData()) {
                 // Fast path for Nvidia
@@ -1303,15 +1305,15 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
             ++uniform_stream_copies;
             uniform_stream_bytes += size;
             if (shadow.addr == device_addr && shadow.size == size) {
-                sync_diag.bytes_compared += size; // requested length, not memcmp's early-exit bytes
+                if (serial_diag) sync_diag.bytes_compared += size; // requested length, not memcmp's early-exit bytes
                 if (std::memcmp(span.data(), shadow.data.data(), size) == 0) {
                     ++uniform_stream_identical;
-                    ++sync_diag.compare_equal_uploaded;
+                    if (serial_diag) ++sync_diag.compare_equal_uploaded;
                 } else {
-                    ++sync_diag.compare_differ_uploaded;
+                    if (serial_diag) ++sync_diag.compare_differ_uploaded;
                 }
             } else {
-                ++sync_diag.baseline_copies;
+                if (serial_diag) ++sync_diag.baseline_copies;
             }
             shadow.addr = device_addr;
             shadow.size = size;
@@ -1322,9 +1324,9 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
     // Classic cached path
     if (SynchronizeBuffer(buffer, device_addr, size)) {
         ++channel_state->uniform_cache_hits[0];
-        ++sync_diag.classic_clean;
+        if (serial_diag) ++sync_diag.classic_clean;
     } else {
-        ++sync_diag.classic_uploaded;
+        if (serial_diag) ++sync_diag.classic_uploaded;
     }
     // Skip binding if it's not needed and if the bound buffer is not the fast version
     // This exists to avoid instances where the fast buffer is bound and a GPU write happens

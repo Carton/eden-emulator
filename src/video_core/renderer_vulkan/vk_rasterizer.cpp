@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "video_core/serial_diag.h"
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -333,15 +334,19 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
 
     // (local-only) per-draw timing diag: whole serial draw path, averaged
     // over thousands of draws so scene load bands cancel out.
-    const auto prepare_start{std::chrono::steady_clock::now()};
+    const bool serial_diag = VideoCommon::SerialDiagEnabled();
+    const auto prepare_start = serial_diag ? std::chrono::steady_clock::now()
+                                          : std::chrono::steady_clock::time_point{};
     auto phase_start = prepare_start;
     const auto phase_end = [&](size_t index) {
+        if (!serial_diag) return;
         const auto now = std::chrono::steady_clock::now();
         diag_prepare_phases_ns[index] += static_cast<u64>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(now - phase_start).count());
         phase_start = now;
     };
     SCOPE_EXIT {
+        if (!serial_diag) return;
         // Reuse the last phase boundary: nine clocks on a complete draw.
         // Excludes lock destruction and gpu.TickWork(), unlike the old outer timer.
         diag_prepare_ns += phase_start - prepare_start;
@@ -376,7 +381,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
     };
     const bool fast = serial_prologue_fast && token_mode == TokenMode::Off;
     if (fast) {
-        ++diag_fast_prologue_calls;
+        if (serial_diag) ++diag_fast_prologue_calls;
         // Same check mask as FlushWork. Preserve every counter increment and
         // dispatch/flush boundary; only avoid the call on non-dispatch draws.
 #ifdef __ANDROID__
@@ -386,31 +391,35 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
 #endif
         if (((draw_counter + 1) & check_mask) != check_mask) {
             ++draw_counter;
-            ++diag_flush_work_skips;
+            if (serial_diag) ++diag_flush_work_skips;
         } else {
             FlushWork();
         }
     } else {
         FlushWork();
     }
-    const auto work_end = std::chrono::steady_clock::now();
+    const auto work_end = serial_diag ? std::chrono::steady_clock::now()
+                                       : std::chrono::steady_clock::time_point{};
     if (fast && !gpu_memory->HasPendingCaching()) {
-        ++diag_flush_caching_skips;
+        if (serial_diag) ++diag_flush_caching_skips;
     } else {
         gpu_memory->FlushCaching();
     }
-    const auto caching_end = std::chrono::steady_clock::now();
+    const auto caching_end = serial_diag ? std::chrono::steady_clock::now()
+                                       : std::chrono::steady_clock::time_point{};
 
     GraphicsPipeline* const pipeline{pipeline_cache.CurrentGraphicsPipeline()};
     phase_end(0);
     const auto ns = [](auto duration) {
         return static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count());
     };
-    diag_prologue_ns[0] += ns(work_end - prepare_start);
-    diag_prologue_ns[1] += ns(caching_end - work_end);
-    diag_prologue_ns[2] += ns(phase_start - caching_end);
+    if (serial_diag) {
+        diag_prologue_ns[0] += ns(work_end - prepare_start);
+        diag_prologue_ns[1] += ns(caching_end - work_end);
+        diag_prologue_ns[2] += ns(phase_start - caching_end);
+    }
     if (!pipeline) {
-        ++diag_prepare_null_pipeline;
+        if (serial_diag) ++diag_prepare_null_pipeline;
         return;
     }
     std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
@@ -428,7 +437,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
     const bool configured = pipeline->ConfigureTail(draw_ctx, is_indexed);
     phase_end(3);
     if (!configured) {
-        ++diag_prepare_tail_rejected;
+        if (serial_diag) ++diag_prepare_tail_rejected;
         return;
     }
 
@@ -965,7 +974,7 @@ void RasterizerVulkan::DrawTailPipelined(bool is_indexed, u32 instance_count) {
 }
 
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
-    ++diag_frame_draws;
+    if (VideoCommon::SerialDiagEnabled()) ++diag_frame_draws;
     if (token_mode == TokenMode::Off) {
         PrepareDraw(is_indexed, [this, is_indexed, instance_count] {
             RecordDraw(*maxwell3d, is_indexed, instance_count);
@@ -1064,7 +1073,7 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
 }
 
 void RasterizerVulkan::DrawIndirect() {
-    ++diag_frame_draws;
+    if (VideoCommon::SerialDiagEnabled()) ++diag_frame_draws;
     ++diag_draw_indirect_calls;
     FlushPendingDraw(DrawDrain::Indirect);
     const auto& params = maxwell3d->draw_manager.indirect_state;
@@ -1759,15 +1768,17 @@ void RasterizerVulkan::FlushCommands() {
 }
 
 void RasterizerVulkan::TickFrame() {
-    // draw_counter is a dispatch budget, reset mid-frame by FlushWork/FlushCommands.
-    diag_frame_total_draws += diag_frame_draws;
-    diag_frame_max_draws = (std::max)(diag_frame_max_draws, diag_frame_draws);
-    diag_frame_draws = 0;
-    if (++diag_frames % 500 == 0) {
-        LOG_INFO(Render_Vulkan,
-                 "SerialFrame diag: frames={} draws={} draws_per_frame_avg={} draws_per_frame_max={}",
-                 diag_frames, diag_frame_total_draws,
-                 static_cast<double>(diag_frame_total_draws) / diag_frames, diag_frame_max_draws);
+    if (VideoCommon::SerialDiagEnabled()) {
+        // draw_counter is a dispatch budget, reset mid-frame by FlushWork/FlushCommands.
+        diag_frame_total_draws += diag_frame_draws;
+        diag_frame_max_draws = (std::max)(diag_frame_max_draws, diag_frame_draws);
+        diag_frame_draws = 0;
+        if (++diag_frames % 500 == 0) {
+            LOG_INFO(Render_Vulkan,
+                     "SerialFrame diag: frames={} draws={} draws_per_frame_avg={} draws_per_frame_max={}",
+                     diag_frames, diag_frame_total_draws,
+                     static_cast<double>(diag_frame_total_draws) / diag_frames, diag_frame_max_draws);
+        }
     }
     FlushPendingDraw(DrawDrain::TickFrame);
     draw_counter = 0;

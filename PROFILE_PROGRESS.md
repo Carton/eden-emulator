@@ -4498,3 +4498,33 @@ dirty 依赖"已同步进共享缓存 Buffer"，stream 只刷临时切片，照�
 draw 路径在正确性约束下的可摘果实已摘完或证伪**——余下 300-500ns 级单体
 （resolve/host_uniform/stage_rem/host_geom/pipeline_lookup）每一个都需要
 地基级投入才能动，收益上限合计 ~+14%。战役关闭，仪器与判例全部留档。
+
+
+### Serial campaign cleanup - EDEN_SERIAL_DIAG (default off)
+
+All campaign timers/counters now require EDEN_SERIAL_DIAG exactly "1". The shared
+inline helper in video_core/serial_diag.h reads getenv once via a function-local
+static. Call sites cache the bool for their local timing/counting branches.
+PrepareDraw entry/phases/prologue and early-return counters, fast-prologue diagnostic
+counters, ConfigureTail TLS segments and arming, UniformSync counters, Draw/DrawIndirect
+frame counts and TickFrame ledger are guarded. Disabled arming leaves existing
+UpdateGraphicsBuffers and host-uniform timers inactive. No new locks/atomics.
+
+Default serial clocks for this campaign: PrepareDraw=0, ConfigureTail=0,
+UpdateGraphicsBuffers=0, host-uniform=0, UniformSync=0, SerialFrame=0.
+Enabled normal serial: PrepareDraw=9; ConfigureTail=5; UpdateGraphicsBuffers=2;
+host-uniform=2 per enabled shader stage; total=16+2*S. Job-binding tail mode keeps
+its existing two additional apply clocks. Early returns execute fewer clocks.
+No clocks were added to counters. All existing log format literals are unchanged;
+enabled timings will still include small instrumentation-guard overhead.
+
+EDEN_SERIAL_PROLOGUE_FAST remains independent: it still changes the eligible serial
+prologue with diagnostics off, but its diagnostic increments/logs are suppressed.
+Existing CBPG/SerialCuts/DLB and EDEN_UNIFORM_STATS remain unchanged; the latter may
+still do its historical optional shadow comparisons even with SERIAL_DIAG off.
+Stage-5 tail-pipeline instrumentation and token counters were not changed.
+
+Files changed: new serial_diag.h; vk_rasterizer.cpp; vk_graphics_pipeline.cpp;
+buffer_cache/buffer_cache.h; this progress log. Static diff/format checks passed.
+No build, game run or commit. Clock/counter absence is source-level verification,
+not a claim of measured machine-code overhead or zero branch overhead.

@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "video_core/serial_diag.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -635,9 +636,11 @@ bool GraphicsPipeline::ConfigureImpl(DrawContext& ctx, bool is_indexed,
 
     // Resolve-only calls returned above. Time the common tail without per-command clocks.
     using TailClock = std::chrono::steady_clock;
-    auto tail_stamp = TailClock::now();
+    const bool serial_diag = VideoCommon::SerialDiagEnabled();
+    auto tail_stamp = serial_diag ? TailClock::now() : TailClock::time_point{};
     auto& timing = configure_tail_diag[job_bindings ? 1 : 0];
     const auto tail_boundary = [&](u64& total) {
+        if (!serial_diag) return;
         const auto now = TailClock::now();
         total += static_cast<u64>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(now - tail_stamp).count());
@@ -645,6 +648,7 @@ bool GraphicsPipeline::ConfigureImpl(DrawContext& ctx, bool is_indexed,
     };
     auto post_update_start = tail_stamp;
     SCOPE_EXIT {
+        if (!serial_diag) return;
         const auto before = timing.bindings_ns;
         tail_boundary(timing.bindings_ns);
         timing.final_emit_ns += timing.bindings_ns - before;
@@ -725,27 +729,35 @@ bool GraphicsPipeline::ConfigureImpl(DrawContext& ctx, bool is_indexed,
     // render targets/feedback and ConfigureDraw's descriptor/pipeline emission.
     // Every caller (serial, fallback, and token) installs the layout before uploads.
     auto& update_diag = VideoCommon::graphics_update_diag;
-    update_diag.begin = tail_stamp;
-    update_diag.geometry_seen = false;
-    update_diag.active = true;
-    SCOPE_EXIT { update_diag.active = false; };
+    if (serial_diag) {
+        update_diag.begin = tail_stamp;
+        update_diag.geometry_seen = false;
+        update_diag.active = true;
+    }
+    SCOPE_EXIT { if (serial_diag) update_diag.active = false; };
     buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks, &uniform_buffer_sizes);
     buffer_cache.UpdateGraphicsBuffers(is_indexed);
-    const auto update_ns = static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-        update_diag.end - tail_stamp).count());
-    timing.update_ns += update_ns;
-    timing.bindings_ns += update_ns;
-    tail_stamp = update_diag.end;
-    post_update_start = tail_stamp;
     auto boundary_start = tail_stamp;
+    if (serial_diag) {
+        const auto update_ns = static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            update_diag.end - tail_stamp).count());
+        timing.update_ns += update_ns;
+        timing.bindings_ns += update_ns;
+        tail_stamp = update_diag.end;
+        post_update_start = tail_stamp;
+
+        boundary_start = tail_stamp;
+    }
     buffer_cache.BindHostGeometryBuffers(is_indexed);
-    tail_boundary(timing.bindings_ns);
-    timing.geometry_ns += static_cast<u64>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(tail_stamp - boundary_start).count());
-    boundary_start = tail_stamp;
-    update_diag.host_uniform_ns = 0;
-    update_diag.time_host_uniform = true;
-    SCOPE_EXIT { update_diag.time_host_uniform = false; };
+    if (serial_diag) {
+        tail_boundary(timing.bindings_ns);
+        timing.geometry_ns += static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(tail_stamp - boundary_start).count());
+        boundary_start = tail_stamp;
+        update_diag.host_uniform_ns = 0;
+        update_diag.time_host_uniform = true;
+    }
+    SCOPE_EXIT { if (serial_diag) update_diag.time_host_uniform = false; };
 
     guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);
 
@@ -779,12 +791,14 @@ bool GraphicsPipeline::ConfigureImpl(DrawContext& ctx, bool is_indexed,
     if constexpr (Spec::enabled_stages[4]) {
         prepare_stage(4);
     }
-    update_diag.time_host_uniform = false;
-    tail_boundary(timing.bindings_ns);
-    const auto stage_ns = static_cast<u64>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(tail_stamp - boundary_start).count());
-    timing.host_uniform_ns += update_diag.host_uniform_ns;
-    timing.stage_remaining_ns += stage_ns - update_diag.host_uniform_ns;
+    if (serial_diag) {
+        update_diag.time_host_uniform = false;
+        tail_boundary(timing.bindings_ns);
+        const auto stage_ns = static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(tail_stamp - boundary_start).count());
+        timing.host_uniform_ns += update_diag.host_uniform_ns;
+        timing.stage_remaining_ns += stage_ns - update_diag.host_uniform_ns;
+    }
     if (buffer_cache.any_buffer_uploaded) {
         buffer_cache.runtime.PostCopyBarrier();
         buffer_cache.any_buffer_uploaded = false;
