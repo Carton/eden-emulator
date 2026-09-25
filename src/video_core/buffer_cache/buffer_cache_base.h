@@ -86,7 +86,7 @@ struct Binding {
 };
 
 struct TextureBufferBinding : Binding {
-    PixelFormat format;
+    PixelFormat format = PixelFormat::Invalid;
 };
 
 static constexpr Binding NULL_BINDING{
