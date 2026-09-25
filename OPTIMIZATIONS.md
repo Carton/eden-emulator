@@ -81,6 +81,16 @@ Acceptance criteria: macro metrics (fps / median / p99) plus fine-grained local 
 change stays within ±2%, the local metrics plus "no regression" decide whether
 it stays.
 
+**How this work was produced (AI-agent-driven)**: nearly all of this series was
+carried out by AI agents — Zcode as the agent framework, with GLM-5.3 as the
+primary model for analysis and optimization, running the full loop of reading
+profiling data, locating bottlenecks, designing the fix, editing the code,
+building, benchmarking, interpreting the results and recording the outcome
+(the observation layers and benchmark rules above are that loop's method
+constraints). Codex (gpt astra) reviewed code and cross-checked design
+proposals at several stages. The human author set directions and acceptance
+criteria, and made the final calls.
+
 ---
 
 ## 2. CPU side: dynarmic JIT (2 commits)
