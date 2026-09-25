@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <filesystem>
 #include <fstream>
 
 #include "common/assert.h"
@@ -368,7 +369,7 @@ ISystemSettingsServer::~ISystemSettingsServer() {
     SetSaveNeeded();
 }
 
-bool ISystemSettingsServer::LoadSettingsFile(std::filesystem::path& path, auto&& default_func) {
+bool ISystemSettingsServer::LoadSettingsFile(std::filesystem::path& path, auto&& default_func) try {
     using settings_type = decltype(default_func());
 
     if (!Common::FS::CreateDirs(path)) {
@@ -434,9 +435,13 @@ bool ISystemSettingsServer::LoadSettingsFile(std::filesystem::path& path, auto&&
     file.close();
 
     return true;
+} catch (const std::filesystem::filesystem_error& e) {
+    LOG_ERROR(Service_SET, "Failed to load settings in '{}': {}",
+              Common::FS::PathToUTF8String(path), e.what());
+    return false;
 }
 
-bool ISystemSettingsServer::StoreSettingsFile(std::filesystem::path& path, auto& settings) {
+bool ISystemSettingsServer::StoreSettingsFile(std::filesystem::path& path, auto& settings) try {
     using settings_type = std::decay_t<decltype(settings)>;
 
     if (!Common::FS::IsDir(path)) {
@@ -474,6 +479,10 @@ bool ISystemSettingsServer::StoreSettingsFile(std::filesystem::path& path, auto&
     std::filesystem::rename(settings_tmp_file, settings_base.replace_extension("dat"));
 
     return true;
+} catch (const std::filesystem::filesystem_error& e) {
+    LOG_ERROR(Service_SET, "Failed to store settings in '{}': {}",
+              Common::FS::PathToUTF8String(path), e.what());
+    return false;
 }
 
 Result ISystemSettingsServer::SetLanguageCode(LanguageCode language_code) {
