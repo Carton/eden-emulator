@@ -4237,3 +4237,37 @@ Draw + DrawIndirect ???????TickFrame ???????? API ???????/??
 
 ????vk_rasterizer.cpp/.h?vk_graphics_pipeline.cpp??? diff/???????
 ???serial/checker ???????????????????????
+
+## 34. Serial 路径优化战役（2026-09-25 开幕）
+
+2B 线关闭后转向默认串行路径。验收规则（用户定）：**宏观（交错对中位）降级为回退
+护栏**——防局部优化造成整体明显劣化（>2% 拒）；**微观明确收益（超噪声地板）即可保留**，
+宏观中性不算失败。
+
+### 34.1 step 0：六段分解 + draws/frame 直测（a549837feb，codex）
+
+**仪器**：PrepareDraw 拆 prologue/lock_setup/resolve/configure_tail/dynamic_query/emit
+（7 时钟点，5000-draw 节奏累计均值）；ConfigureTail TLS 拆 uniform/texture apply
+（job-bindings 臂）/staging/合并的 uploads+descriptors（serial 臂）；SerialFrame diag
+在 Draw+DrawIndirect 入口计 draws/frame（draw_counter 有帧中复位不可用）。
+口径断点：新六段总和不含锁析构+TickWork，与旧 3.08µs 不同口径；~10 时钟/draw
+≈8% 扰动，段间比值有效。
+
+**噪声地板（sc0 同臂 5 局：warmup + 2 对交错，黄昏档 luma 56.7）**：
+- 段均值：总 2937-3057ns（±2%）；configure_tail 1504-1577（±2.4%）——**微观地板 ±2.5%**。
+- 宏观同臂：中位 0.9956 但单对见 1.0301——同日宏观地板 ±3%。
+
+**分解定案（每局 2400 万 draw）**：prologue 665（22%）/ lock_setup 115（4%）/
+resolve 490（16.5%）/ **configure_tail 1530（51%：bindings_upload_descriptors 1400
++ staging 61）**/ dynamic_query 137（4.6%）/ emit 42（1.4%）；合计 ~2980ns。
+null_pipeline=0 tail_rejected=0（干净场景）。
+
+**draws/frame 实测 3187-3340 avg（max 7368-8207）**——修正此前 ~5300 的反推
+（loading 污染）。帧换算修正：draw 处理 = 2.98µs × 3300 ≈ 9.8ms/帧 = 中位 23.33ms
+的 **42%**（非昨晚误估的 70%）。敏感度：0.1µs/draw = 0.33ms/帧 ≈ +1.4% fps
+（宏观带内，微观可测）；1µs/draw = 3.3ms/帧 ≈ +16% fps。
+
+**靶点排序**：① bindings_upload_descriptors 1400ns（47% of draw path，下一层拆
+UpdateGraphicsBuffers：uniform 更新/顶点索引/描述符）；② prologue 665ns（22%，
+低垂嫌疑——stage-4 实测 flush_caching 456 万次调用 0 排空、invalidation 103 万次
+0 drains，三件套多为纯检查开销）；③ resolve 490ns。emit 确认可忽略（42ns）。
