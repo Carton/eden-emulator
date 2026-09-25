@@ -108,8 +108,14 @@ s64 Conductor::GetNextTicks() const {
             // SpeedLimiter::DoSpeedLimiting.
             speed_scale = 100.f / Settings::SpeedLimit();
         } else {
-            // Run at unlocked framerate.
-            speed_scale = 0.01f;
+            // Run at unlocked framerate, but only for game-paced submissions:
+            // the yuzu extension maps nonpositive swap intervals to a speed
+            // multiplier (m_compose_speed_scale > 1, e.g. TOTK's dynamic-FPS
+            // gameplay). Explicit pacing requests (interval 1..4, e.g. 30 fps
+            // pause menus) keep hardware-accurate 60 Hz composition so paced
+            // UIs stay at their intended rate and input repeat does not
+            // hyperscale.
+            speed_scale = m_compose_speed_scale > 1.f ? 0.1f : 1.f;
         }
     }
 
