@@ -299,6 +299,9 @@ private:
     u64 diag_tail_calls{};
     std::chrono::nanoseconds diag_prepare_ns{};   // whole serial PrepareDraw
     u64 diag_prepare_calls{};
+    std::array<u64, 6> diag_prepare_phases_ns{};
+    u64 diag_prepare_null_pipeline{}, diag_prepare_tail_rejected{};
+    u64 diag_frames{}, diag_frame_draws{}, diag_frame_total_draws{}, diag_frame_max_draws{};
 };
 
 } // namespace Vulkan

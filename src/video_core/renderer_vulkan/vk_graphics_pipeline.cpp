@@ -5,6 +5,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cstring>
 #include <iostream>
 #include <span>
@@ -16,6 +18,7 @@
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 
 #include "common/bit_field.h"
+#include "common/scope_exit.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
@@ -39,6 +42,13 @@
 namespace Vulkan {
 
 namespace {
+
+// Shared across pipeline specializations, private to each calling thread.
+struct ConfigureTailDiag {
+    u64 calls{}, uniform_ns{}, texture_ns{}, other_ns{}, bindings_ns{};
+};
+thread_local std::array<ConfigureTailDiag, 2> configure_tail_diag;
+
 struct JobBindingsDiag {
     u64 events{};
     u64 last_reported{};
@@ -622,10 +632,32 @@ bool GraphicsPipeline::ConfigureImpl(DrawContext& ctx, bool is_indexed,
         }
     }
 
+    // Resolve-only calls returned above. Time the common tail without per-command clocks.
+    using TailClock = std::chrono::steady_clock;
+    auto tail_stamp = TailClock::now();
+    auto& timing = configure_tail_diag[job_bindings ? 1 : 0];
+    const auto tail_boundary = [&](u64& total) {
+        const auto now = TailClock::now();
+        total += static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(now - tail_stamp).count());
+        tail_stamp = now;
+    };
+    SCOPE_EXIT {
+        tail_boundary(timing.bindings_ns);
+        if (++timing.calls % 5000 == 0) {
+            LOG_INFO(Render_Vulkan,
+                     "ConfigureTail diag: calls={} job_bindings={} uniform_apply_ns={} "
+                     "texture_apply_ns={} bindings_upload_descriptors_ns={} other_ns={}",
+                     timing.calls, job_bindings, timing.uniform_ns / timing.calls,
+                     timing.texture_ns / timing.calls, timing.bindings_ns / timing.calls,
+                     timing.other_ns / timing.calls);
+        }
+    };
     if (job_bindings) {
         ApplyJobUniformBindings(buffer_cache,
                                 {ctx.uniform_records.data(), ctx.uniform_records.size()},
                                 *ctx.uniform_applied_versions, ctx.check_job_bindings);
+        tail_boundary(timing.uniform_ns);
         const bool equivalent = buffer_cache.ApplyGraphicsTextureBufferBindings(
             std::span<const VideoCommon::ResolvedTextureBufferBinding>{
                 ctx.texture_buffer_records.data(), ctx.texture_buffer_records.size()},
@@ -637,6 +669,7 @@ bool GraphicsPipeline::ConfigureImpl(DrawContext& ctx, bool is_indexed,
         }
         ++job_bindings_diag.events;
         LogJobBindingsDiag();
+        tail_boundary(timing.texture_ns);
     }
 
     if (regs.transform_feedback_enabled != 0) {
@@ -676,6 +709,9 @@ bool GraphicsPipeline::ConfigureImpl(DrawContext& ctx, bool is_indexed,
         bind_stage_storage(4);
     }
 
+    tail_boundary(timing.other_ns);
+    // Includes buffer uploads/geometry, host stage bindings, image descriptors,
+    // render targets/feedback and ConfigureDraw's descriptor/pipeline emission.
     // Every caller (serial, fallback, and token) installs the layout before uploads.
     buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks, &uniform_buffer_sizes);
     buffer_cache.UpdateGraphicsBuffers(is_indexed);

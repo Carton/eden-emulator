@@ -332,11 +332,31 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
     // (local-only) per-draw timing diag: whole serial draw path, averaged
     // over thousands of draws so scene load bands cancel out.
     const auto prepare_start{std::chrono::steady_clock::now()};
+    auto phase_start = prepare_start;
+    const auto phase_end = [&](size_t index) {
+        const auto now = std::chrono::steady_clock::now();
+        diag_prepare_phases_ns[index] += static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(now - phase_start).count());
+        phase_start = now;
+    };
     SCOPE_EXIT {
-        diag_prepare_ns += std::chrono::steady_clock::now() - prepare_start;
+        // Reuse the last phase boundary: seven clocks on a complete draw.
+        // Excludes lock destruction and gpu.TickWork(), unlike the old outer timer.
+        diag_prepare_ns += phase_start - prepare_start;
         if (++diag_prepare_calls % 5000 == 0) {
             LOG_INFO(Render_Vulkan, "SerialDraw diag: calls={} prepare_avg_ns={}",
                      diag_prepare_calls, diag_prepare_ns.count() / diag_prepare_calls);
+            LOG_INFO(Render_Vulkan,
+                     "SerialDraw phases diag: calls={} prologue_ns={} lock_setup_ns={} "
+                     "resolve_ns={} configure_tail_ns={} dynamic_query_ns={} emit_ns={} "
+                     "null_pipeline={} tail_rejected={}",
+                     diag_prepare_calls, diag_prepare_phases_ns[0] / diag_prepare_calls,
+                     diag_prepare_phases_ns[1] / diag_prepare_calls,
+                     diag_prepare_phases_ns[2] / diag_prepare_calls,
+                     diag_prepare_phases_ns[3] / diag_prepare_calls,
+                     diag_prepare_phases_ns[4] / diag_prepare_calls,
+                     diag_prepare_phases_ns[5] / diag_prepare_calls,
+                     diag_prepare_null_pipeline, diag_prepare_tail_rejected);
         }
     };
     SCOPE_EXIT {
@@ -346,7 +366,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
     gpu_memory->FlushCaching();
 
     GraphicsPipeline* const pipeline{pipeline_cache.CurrentGraphicsPipeline()};
+    phase_end(0);
     if (!pipeline) {
+        ++diag_prepare_null_pipeline;
         return;
     }
     std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
@@ -358,8 +380,13 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
     }
     // (local-only) P2 phase split: resolve (binding lookups) then tail
     // (uploads + scheduler records), synchronously.
+    phase_end(1);
     pipeline->ConfigureResolve(draw_ctx, is_indexed);
-    if (!pipeline->ConfigureTail(draw_ctx, is_indexed)) {
+    phase_end(2);
+    const bool configured = pipeline->ConfigureTail(draw_ctx, is_indexed);
+    phase_end(3);
+    if (!configured) {
+        ++diag_prepare_tail_rejected;
         return;
     }
 
@@ -369,7 +396,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
     HandleTransformFeedback(*maxwell3d);
     query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64,
                               maxwell3d->regs.zpass_pixel_count_enable);
+    phase_end(4);
     draw_func();
+    phase_end(5);
 }
 
 void RasterizerVulkan::EnsureResolver() {
@@ -894,6 +923,7 @@ void RasterizerVulkan::DrawTailPipelined(bool is_indexed, u32 instance_count) {
 }
 
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
+    ++diag_frame_draws;
     if (token_mode == TokenMode::Off) {
         PrepareDraw(is_indexed, [this, is_indexed, instance_count] {
             RecordDraw(*maxwell3d, is_indexed, instance_count);
@@ -992,6 +1022,7 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
 }
 
 void RasterizerVulkan::DrawIndirect() {
+    ++diag_frame_draws;
     ++diag_draw_indirect_calls;
     FlushPendingDraw(DrawDrain::Indirect);
     const auto& params = maxwell3d->draw_manager.indirect_state;
@@ -1686,6 +1717,16 @@ void RasterizerVulkan::FlushCommands() {
 }
 
 void RasterizerVulkan::TickFrame() {
+    // draw_counter is a dispatch budget, reset mid-frame by FlushWork/FlushCommands.
+    diag_frame_total_draws += diag_frame_draws;
+    diag_frame_max_draws = (std::max)(diag_frame_max_draws, diag_frame_draws);
+    diag_frame_draws = 0;
+    if (++diag_frames % 500 == 0) {
+        LOG_INFO(Render_Vulkan,
+                 "SerialFrame diag: frames={} draws={} draws_per_frame_avg={} draws_per_frame_max={}",
+                 diag_frames, diag_frame_total_draws,
+                 static_cast<double>(diag_frame_total_draws) / diag_frames, diag_frame_max_draws);
+    }
     FlushPendingDraw(DrawDrain::TickFrame);
     draw_counter = 0;
     guest_descriptor_queue.TickFrame();
