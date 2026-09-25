@@ -245,6 +245,29 @@ private:
     void EmitMove(BlockOfCode& code, const size_t bit_width, const HostLoc to, const HostLoc from) noexcept;
     void EmitExchange(BlockOfCode& code, const HostLoc a, const HostLoc b) noexcept;
 
+    // Reverse index for ValueLocation: inst name -> hostloc+1 (0 = untracked).
+    // Inst names are dense 1..N per block (Optimization::NamingPass), zeroed
+    // fresh per block since RegAlloc is placement-new'd per Emit. Stale
+    // entries only exist for values whose uses are exhausted; those are never
+    // looked up again, so no invalidation is needed beyond Move/Exchange
+    // retracking. Unnamed values and names outside the table fall back to the
+    // original linear scan. Debug builds check every indexed lookup against it.
+    static constexpr size_t kMaxTrackedNames = 4096;
+    static_assert(NonSpillHostLocCount + SpillCount <= 255);
+    std::array<u8, kMaxTrackedNames> name_to_hostloc{};
+
+    inline void TrackValueLoc(const IR::Inst* inst, HostLoc loc) noexcept {
+        const unsigned name = inst->GetName();
+        if (name != 0 && name < kMaxTrackedNames) {
+            name_to_hostloc[name] = u8(loc) + 1;
+        }
+    }
+    inline void RetrackLocation(HostLoc loc) noexcept {
+        for (IR::Inst* inst : LocInfo(loc).values) {
+            TrackValueLoc(inst, loc);
+        }
+    }
+
 //data
     alignas(64) std::array<HostLocInfo, NonSpillHostLocCount + SpillCount> hostloc_info;
     std::bitset<32> gpr_order;
