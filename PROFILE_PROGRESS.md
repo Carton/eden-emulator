@@ -4367,3 +4367,33 @@ feedback?????? ConfigureDraw ??????/????????????????
 invalidation_accumulator.h?memory_manager.h?vk_graphics_pipeline.cpp?vk_rasterizer.cpp/.h
 ????????? header ??????????diff --check ??????/??/???
 ????????? serial/checker ????????????? A/B ???????
+
+### 34.3 step 2 验收：prologue 削减实测零收益 + L3 拆分定案 + 测量地板教训（2026-09-25 午）
+
+**门控 A/B（sc2，交错 2 对，同一二进制）**：宏观中位 0.9966（护栏通过）；
+微观**零收益**——门控臂确实跳过 87.5% FlushWork 调用（2000 万次）和 68.6%
+FlushCaching 调用（1568 万次），但两臂段均值完全相同（flush_work 203-204ns、
+flush_caching 204-211ns）。**结论：这两个调用本来就是近乎免费的，L2 测到的
+~210ns 大头是测量地板（时钟对+簿记），不是内容**。EDEN_SERIAL_PROLOGUE_FAST
+保持默认关（已测无收益，代码保留归档）；pipeline_lookup（~300ns 真实内容）
+codex 论证不可安全跳过（dirty/generation 不覆盖 shader 失效/HLE/topology/channel）。
+
+**方法论教训（进三层法）**：分段均值有两道地板——相对 ±2.5%（同臂带宽）+
+**绝对 ~150-200ns/段**（时钟对+调用簿记）。≲250ns 的段读数不可当内容，
+<100ns/draw 的优化对现有微观仪器不可见。prologue 三件套的 746ns 实际内容
+≈300（lookup）+ ~100（两调用）+ ~250（地板）。
+
+**L3 拆分定案（post_update 1277-1303ns，两臂一致）**：
+- **host_uniform（CBPG 取数+主机绑定链）420-440ns——最大真实单体**；
+- stage_remaining（storage/texture 主机绑定+描述符准备）312ns；
+- host_geometry（顶点/索引绑定上传）309-311ns；
+- final_emit（barrier/RT/管线发射）234-238ns。
+
+**serial draw 最终成本树（~3.26µs，真实内容口径）**：
+resolve 519（内部未拆）> host_uniform 430 > stage_rem 312 ≈ host_geom 310 >
+pipeline_lookup 300 > final_emit 236 > update_graphics 275 > 杂项 ~390 > 地板 ~250。
+**剩余真靶**：① resolve 519（ConfigureResolve 内部未拆）；② host_uniform 430
+（CBPG 链，与 §19 SerialCuts/stream-cut 历史区域重叠，same_page_hits 历史仅
+~20% 有已知改进空间）；③ host_geometry/stage_remaining 各 ~310。
+理论余量下修：全部砍半 ≈ -0.9µs ≈ +14% fps（比上轮乐观估计的 +15-18% 略降，
+prologue 项已被实验除名）。
