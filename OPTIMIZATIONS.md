@@ -2,7 +2,7 @@
 
 > English edition. The Chinese original lives at [OPTIMIZATIONS_zh.md](./OPTIMIZATIONS_zh.md).
 >
-> This document is the complete companion to the optimization series: the motivation,
+> This document is the complete write-up of the optimization series: the motivation,
 > design, implementation and validation data of every change, plus how the series maps
 > onto the historical working branches. It is written for future maintainers (or a
 > future self) — no process log required to understand **why each patch in this series
@@ -19,18 +19,18 @@
 
 ## 0. Summary
 
-Using the TOTK (The Legend of Zelda: Tears of the Kingdom) pond scene as the benchmark,
-weeks of bottleneck hunting went into the emulator through three layers of observation:
-ETW (CPU sampling, thread scheduling), AMD uProf IBS (per-instruction memory-access
-sampling), and the emulator's built-in frame-time CSV. This series collects the changes
+Weeks of bottleneck hunting and optimization went into the emulator, using the TOTK
+(The Legend of Zelda: Tears of the Kingdom) pond scene as the benchmark and three
+layers of observation: ETW (CPU sampling, thread scheduling), AMD uProf IBS
+(per-instruction memory-access sampling), and the emulator's built-in frame-time CSV. This series collects the changes
 that were validated to be effective or necessary:
 
 | Category | Count | Representative gains |
 |---|---|---|
 | CPU (dynarmic JIT) | 2 | Eliminates 51% of cross-core duplicate compiles; register-allocation value lookup goes from linear scan to constant time |
 | GPU thread (serial path) | 3 | Redundant address translations removed per draw call (up to 100% hit rate); redundant register writes skipped; pipeline lookup memoized |
-| Presentation timing | 1 | Unlocked-mode present quantization error below 1 ms, without saturating a core |
-| Correctness fixes | 5 | Loading-screen garbage, menu pacing, nondeterministic process crashes, and more |
+| Presentation timing | 1 | Unlocked-mode presentation-time quantization error below 1 ms, without saturating a core |
+| Correctness fixes | 5 | Loading-screen garbage, broken menu pacing, nondeterministic process crashes, and more |
 | Build fixes | 3 | libc++ portability, static-Qt cross builds, MSVC CRT symbol shims |
 
 Overall effect (pond benchmark, unlocked mode, 90-second measurement window, at least
@@ -51,13 +51,14 @@ block dumps), and experimental A/B environment switches.
 
 ## 1. Methodology
 
-Observation came in three layers:
+Observation ran at three layers:
 1. **ETW (wpr capture + analyzer)**: CPU sample stacks, thread scheduling, kernel
    time — deciding whether the bottleneck is CPU- or GPU-side, and locating
    function-level hot spots (eden's thread names are directly readable: `GPU`,
    `CPUCore_*`, `VulkanWorker`, `HostTiming`).
 2. **AMD uProf IBS**: 160 seconds of per-instruction sampling in the rotation
-   scene — separating "execution-throughput bound" from "stall bound". Verdict:
+   scene — separating "execution-throughput bound" from "memory-/branch-stall
+   bound". Verdict:
    load-miss latency accounts for only 2.33% of GPU-thread cycles and branch
    mispredicts for 0.40% — a pure execution-throughput bottleneck. That decided
    the direction: delete redundant instructions rather than reshuffle data layouts
@@ -69,14 +70,14 @@ Benchmark rules (scene load varies with in-game time; see §7):
 - At least 2 runs per configuration before concluding anything;
 - Average picture brightness serves as a covariate to separate day/night and
   weather phases (day band ≈ 56.8, dusk band 36-48); absolute frame rates are
-  never compared across brightness bands;
+  not directly compared across brightness bands;
 - The frame-time median lands on steps that are multiples of 1.667 ms —
   distinguish "step change" from "real load change";
-- Every run is checked on three counts: the game was actually entered, screenshot
-  signature is normal, the emulator closed cleanly.
+- Every run is checked on three counts: the game was entered, the screenshot
+  signature was normal, and the emulator closed cleanly.
 
-Acceptance criteria: macro metrics (fps / median / p99) plus micro local metrics
-(fast-path hit rates, translations eliminated) as double evidence; when a single
+Acceptance criteria: macro metrics (fps / median / p99) plus fine-grained local metrics
+(e.g. fast-path hit rates, translations eliminated) as double evidence; when a single
 change stays within ±2%, the local metrics plus "no regression" decide whether
 it stays.
 
@@ -104,14 +105,14 @@ Design:
   keyed by IR LocationDescriptor.
 - Reuse is guarded by three checks: each entry pins the literal guest machine
   code (FNV hash plus word-by-word comparison), a translation-config tuple (any
-  difference in unpredictable-behaviour, wall clock, halt-on-access, cache hooks,
+  difference in unpredictable behavior, wall clock, halt-on-access, cache hooks,
   optimization flags, dczid, or polyfill options invalidates it), and the block's
   start/end PC. On any mismatch the path falls back to a full compile.
 - Lifetime: the cache is emptied when the last Jit instance dies, so config
   drift cannot leak across sessions.
 - Memory: 512 MiB budget with LRU eviction; TOTK steady state measured at
-  335 MiB, well under the cap.
-- Switches: on by default on Windows; `EDEN_JIT_IRCACHE=0` disables everywhere,
+  335 MiB, never reaching the cap.
+- Switches: on by default on Windows; `EDEN_JIT_IRCACHE=0` disables it globally,
   `EDEN_JIT_IRCACHE_MAXBYTES` tunes the budget. `IRCacheStats` keeps atomic
   counters (hits/stores/entries/bytes) on compile paths only, for unit-test
   assertions; steady-state execution never touches them.
@@ -128,8 +129,8 @@ host register location's value list; for large blocks this scan dominated
 register-allocation time during code generation.
 
 Design: IR instruction names are dense within a block (NamingPass guarantees
-1..N), so a 4096-entry u8 table `name → hostloc+1` answers directly. The table is
-zeroed per block (RegAlloc is placement-new'd per emit). Moves/exchanges re-track
+1..N), so a 4096-entry u8 table `name → hostloc+1` answers the lookup directly. The table is
+zeroed per block (RegAlloc is placement-new'd per emit). Moves and exchanges re-register
 the affected locations; unnamed values and out-of-range names fall back to the
 original scan, and debug builds cross-check every indexed lookup.
 
@@ -138,8 +139,8 @@ original scan, and debug builds cross-check every indexed lookup.
 ## 3. GPU-thread serial path (3 commits)
 
 The GPU thread (command parsing → state machine → binding resolution → command
-recording) is the emulator's main bottleneck. IBS sampling proved it
-execution-throughput bound (no memory wall, no branch wall), so everything here
+recording) is the emulator's main bottleneck thread. IBS sampling proved it to be
+execution-throughput-bound (no memory wall, no branch wall), so everything here
 is "delete redundant work".
 
 ### 3.1 Redundant state and binding work removed — `22a7e999e2`
@@ -166,7 +167,7 @@ Four changes:
 
 Note: on its own this commit does not move frame rate — all four hot threads were
 saturated and frame time was set by the slowest stage. Its value is lowering
-GPU-thread pressure, which made the later cuts possible.
+GPU-thread pressure, which freed headroom for the later optimizations.
 
 ### 3.2 Graphics pipeline lookup memoization — `fcac5d10fd`
 
@@ -174,10 +175,10 @@ Original commits: d900d7c2ad (generation memo) + be3e692dac/9af2007176
 (transition-key hashing).
 
 1. **Memoized by register generation**: `CurrentGraphicsPipeline` compares
-   Maxwell3D's change_generation against the generation the current pipeline was
-   last built at; if unchanged it returns current_pipeline directly, skipping
-   stage refresh, fixed-state refresh and the transition/map key compares.
-   Draws with no actually-changed registers are the norm — games rewrite the
+   Maxwell3D's change_generation against the generation recorded when the
+   current pipeline was last built; if unchanged it returns current_pipeline directly, skipping
+   stage refresh, fixed-state refresh and the transition/map key comparisons.
+   Draws whose registers did not actually change are the norm — games rewrite the
    same registers every draw.
 2. **Precomputed transition-key hashes**: `AddTransition` stores key hashes up
    front; lookups compare hashes before the byte-wise compare, and the
@@ -212,10 +213,10 @@ Six changes, with per-run elimination rates (or gains) from the pond scene:
    (92.8% of queries hit); only the query path changed, unusual ranges keep
    their original semantics.
 5. **Single-page memcpy fast path for uniforms**: guest-to-host streaming
-   copies bypass the ReadBlockUnsafe page walk and memcpy directly when both
+   copies bypass ReadBlockUnsafe's per-page dispatch and memcpy directly when both
    end pointers are contiguous (graphics and compute paths); FlushCaching now
-   passes its stash as a span instead of copying the whole invalidation list
-   every time the accumulator fires.
+   passes the span directly instead of copying the whole invalidation list every
+   time the accumulator fires.
 6. **StagingBufferPool::Region shift instead of division**: the normal-path
    region size is 16 MiB (a power of two), so the runtime 64-bit division
    becomes a precomputed shift (shift=24). Each GetStreamBuffer carried 4 such
@@ -233,9 +234,9 @@ frame-time median; elimination rates as listed.
 ### 4.1 Vsync scheduling frequency floor in unlocked mode — `28415c31f9`
 
 Original commits: edcd160726 (600 Hz floor, adapted from v0.2.1's c8b0c853f8) →
-the quantization halving inside 18aaa38cef (600 → 1200 Hz).
+the granularity halving inside 18aaa38cef (600 → 1200 Hz).
 
-Problem chain: with the frame limiter off, the conductor scheduled guest vsync
+Problem chain: with the frame rate unlocked, the conductor scheduled guest vsync
 events with no minimum period; in practice multi-kHz wakeup storms kept the
 HostTiming/VSync thread burning a full core. Raising the floor to 600 Hz fixed
 the burn, but present times were quantized onto a 1.667 ms grid — when a frame's
@@ -254,18 +255,18 @@ full-core HostTiming saturation is gone.
 
 | Commit | Original | Content |
 |---|---|---|
-| `ccd22ee643` | 9e8edc411a | TextureBufferBinding::format gets an explicit Invalid default. Default-initialized channel bindings read an uninitialized enum during the first empty-binding comparison; ships with a regression test using poisoned storage |
+| `ccd22ee643` | 9e8edc411a | TextureBufferBinding::format gets an explicit Invalid default. Default-initialized channel bindings read an uninitialized enum during the first empty-binding comparison; adds a regression test using poisoned storage |
 | `dc6f9e9f66` | f3b7712ae3 | Zero-fill the async ASTC decode window. Between QueueAsyncDecode and the TickAsyncDecode upload a frame later, the VkImage is uninitialized while draws can sample it, reading never-written VRAM — garbage tiles on loading screens, 2637 queued decodes observed in one run. Zeros are now uploaded through staging immediately at queue time, so the decode window samples black. ZeroUploadCopies mirrors ConvertImage's buffer geometry, including the BC1/BC3 recompression branches |
-| `e3a7dc82ba` | 568605ebf7 | In unlocked mode, explicit frame-interval requests compose at hardware rate. Pause menus designed for 30 fps (swap interval 1-4) were previously dragged to full speed by the 0.01 unlocked multiplier, hyperscaling input repeat. Only game-paced submissions (compose multiplier > 1, dynamic-FPS gameplay) take the unlocked scale |
-| `5d50effdf1` | a10393a9b0 | Restore the pre-boot speed-limiter preference when the game exits. Upstream forced `use_speed_limit=true` in OnShutdownBegin, silently re-checking "Limit Speed Percent" after every game exit |
-| `c0eb6ef236` | eb2901fbc0 | Contain settings filesystem exceptions. On Windows, `rename(tmp, dat)` throws filesystem_error when the target is concurrently held; StoreSettingsFile runs on the TimeWorker thread where nothing catches it, terminating the process at 0xC0000409 at unpredictable moments. Root-caused via the SIGABRT stack: TimeWorker→SetNetworkSystemClockContext→SetSaveNeeded→StoreSettings; the physical evidence was leftover tmp + dat file pairs in save data. Load/Store now use function try blocks that catch, log and return false; the success path is byte-identical |
+| `e3a7dc82ba` | 568605ebf7 | In unlocked mode, explicit frame-interval requests are composed at hardware rate. Pause menus designed for 30 fps (swap interval 1-4) were previously dragged to full speed by the 0.01 unlocked multiplier, overclocking the input repeat rate. Only game-paced submissions (compose multiplier > 1) take the unlocked multiplier |
+| `5d50effdf1` | a10393a9b0 | Restore the speed-limiter preference from before the game was launched. Upstream forced `use_speed_limit=true` in OnShutdownBegin, silently re-checking "Limit Speed Percent" after every game exit |
+| `c0eb6ef236` | eb2901fbc0 | Contain settings filesystem exceptions. On Windows, `rename(tmp, dat)` throws filesystem_error when the target is concurrently held; StoreSettingsFile runs on the TimeWorker thread where nothing catches it, terminating the process at 0xC0000409 at unpredictable moments. Root-caused via the SIGABRT stack: TimeWorker→SetNetworkSystemClockContext→SetSaveNeeded→StoreSettings; the physical evidence was leftover tmp + dat file pairs in save data. LoadSettingsFile/StoreSettingsFile now use function-level try blocks that catch, log and return false; the success path is byte-identical |
 
 ---
 
 ## 6. Build fixes (3 commits) and archived negative results
 
-Build: `bcdf43e3ad` (explicit standard-library includes for libc++ and stricter
-STL configurations), `87498a196d` (skip windeployqt for static-Qt and cross
+Build: `bcdf43e3ad` (explicitly including the standard headers missing under
+libc++ and stricter STL configurations), `87498a196d` (skip windeployqt for static-Qt and cross
 builds), `056bcbddd2` (MSVC CRT `__std_*` vector-symbol shim needed by CPM's
 static Qt 6.11.1; attach via `CMAKE_EXE_LINKER_FLAGS` when recreating the build
 directory — see the file header).
@@ -276,8 +277,8 @@ PROFILE_PROGRESS.md):
   depth-1 DrawResolver (single resolver thread) was net −10 fps — snapshot plus
   cross-thread handoff costs exceed the ~1 µs/draw parallelizable work; the draw
   token stages 1A/1B/2A/2B all terminated early, the best variant still 14.3%
-  slower than straightforward inline execution; the tail-on-worker FIFO was also
-  validated negative. Conclusion: draw-level binding-resolution parallelism is
+  slower than straightforward inline execution; the tail-on-worker FIFO also came out
+  negative. Conclusion: draw-level binding-resolution parallelism is
   arithmetically blocked by handoff cost in this architecture, and a survey of
   RPCS3, PCSX2, Dolphin and peers found no precedent either.
 - **Diagnostic facilities**: JIT counters, instruction-mix statistics, the block
@@ -288,7 +289,7 @@ PROFILE_PROGRESS.md):
 - **Experimental switches**: the EDEN_JIT_NOLINK/NORSB/NOFASTDISPATCH
   dispatch-path A/B gates.
 - **Zero gain**: the serial-34.3 FlushWork/FlushCaching skip gates (measured
-  change: none); the epoch/memcmp content-comparison cache (bound to the token
+  change: none); the epoch/memcmp content-comparison cache (tied to the draw-token
   line).
 
 ---
