@@ -7,6 +7,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstring>
 #include <memory>
 #include <numeric>
 
@@ -974,7 +975,14 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
         channel_state->uniform_buffer_binding_sizes[stage][binding_index] = size;
         // Stream buffer path to avoid stalling on non-Nvidia drivers or Vulkan
         const std::span<u8> span = runtime.BindMappedUniformBuffer(stage, binding_index, size);
-        device_memory.ReadBlockUnsafe(device_addr, span.data(), size);
+        // (local-only) uniforms are small and single-page in practice; the
+        // generic ReadBlockUnsafe page walk costs more than the copy itself
+        u8* const src_pointer = device_memory.GetPointer<u8>(device_addr);
+        if (src_pointer + size == device_memory.GetPointer<u8>(device_addr + size)) [[likely]] {
+            std::memcpy(span.data(), src_pointer, size);
+        } else {
+            device_memory.ReadBlockUnsafe(device_addr, span.data(), size);
+        }
         return;
     }
     // Classic cached path
@@ -1126,7 +1134,13 @@ void BufferCache<P>::BindHostComputeUniformBuffers() {
             if (needs_alignment_stream) {
                 const std::span<u8> span =
                     runtime.BindMappedUniformBuffer(0, binding_index, size);
-                device_memory.ReadBlockUnsafe(binding.device_addr, span.data(), size);
+                u8* const src_pointer = device_memory.GetPointer<u8>(binding.device_addr);
+                if (src_pointer + size ==
+                    device_memory.GetPointer<u8>(binding.device_addr + size)) [[likely]] {
+                    std::memcpy(span.data(), src_pointer, size);
+                } else {
+                    device_memory.ReadBlockUnsafe(binding.device_addr, span.data(), size);
+                }
                 return;
             }
         }
@@ -1930,7 +1944,19 @@ void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
 template <class P>
 Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
                                              bool is_written) const {
-    const GPUVAddr gpu_addr = gpu_memory->Read<u64>(ssbo_addr);
+    // (local-only) ssbo_addr and ssbo_addr+8 qwords live in one device page in
+    // practice; one translation covers both (page granularity is host-contiguous)
+    constexpr GPUVAddr page_mask = Core::DEVICE_PAGESIZE - 1;
+    const bool qwords_in_one_page =
+        (ssbo_addr & page_mask) <= Core::DEVICE_PAGESIZE - 2 * sizeof(u64);
+    const u8* const qword_pointer =
+        qwords_in_one_page ? gpu_memory->GetPointer(ssbo_addr) : nullptr;
+    GPUVAddr gpu_addr;
+    if (qword_pointer) {
+        std::memcpy(&gpu_addr, qword_pointer, sizeof(gpu_addr));
+    } else {
+        gpu_addr = gpu_memory->Read<u64>(ssbo_addr);
+    }
 
     if (gpu_addr == 0) {
         return NULL_BINDING;
@@ -1939,7 +1965,13 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
     const auto size = [&]() {
         const u32 memory_layout_size =
             static_cast<u32>(gpu_memory->GetMemoryLayoutSize(gpu_addr));
-        const u64 next_qword = gpu_memory->Read<u64>(ssbo_addr + 8);
+        // Keep the second load after the layout query and the null-address exit.
+        u64 next_qword;
+        if (qword_pointer) {
+            std::memcpy(&next_qword, qword_pointer + sizeof(u64), sizeof(next_qword));
+        } else {
+            next_qword = gpu_memory->Read<u64>(ssbo_addr + 8);
+        }
         const u32 packed_size = static_cast<u32>(next_qword);
         const bool next_qword_is_size = static_cast<u32>(next_qword >> 32) == 0 &&
                                         packed_size != 0 &&
@@ -1960,7 +1992,13 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
         LOG_DEBUG(HW_GPU, "Failed to find storage buffer for cbuf index {}", cbuf_index);
         return NULL_BINDING;
     }
-    const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
+    std::optional<DAddr> device_addr;
+    // (local-only) Same-page translation is affine; never infer continuity across a page.
+    if ((aligned_gpu_addr >> Core::DEVICE_PAGEBITS) == (gpu_addr >> Core::DEVICE_PAGEBITS)) {
+        device_addr = *aligned_device_addr + (gpu_addr - aligned_gpu_addr);
+    } else {
+        device_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
+    }
     ASSERT_MSG(device_addr, "Unaligned storage buffer address not found for cbuf index {}",
                cbuf_index);
     // The end address used for size calculation does not need to be aligned
