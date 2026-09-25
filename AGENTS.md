@@ -188,6 +188,9 @@ cmake.exe --build build-vs22     # RelWithDebInfo，产物在 build-vs22/bin/
 - 性能优化全流程 skill：`.agents/skills/eden-bench`；崩溃取证 skill：`.agents/skills/eden-crash-triage`
 - **profiling 脚本集：`tools/prof/`**（清单/用法/淘汰名单见其 README；数据归档仍为
   `F:\prof`，新脚本一律放仓库）
+- 诊断开关速记：`EDEN_SERIAL_DIAG=1` 开 serial 战役全部仪器（**默认关 = 零时钟零计数，
+  默认构建即性能最优**，实测默认局七个 diag 家族零输出）；token 各臂开关见
+  PROFILE §33 开关矩阵，实验臂必带 `EDEN_DRAW_TOKEN=inline`
 - 基准历史：`F:\prof\bench_results.csv`（含 luma 列）；交错 A/B：`tools/prof/bench_ab.py`；
   静置自动轮：`tools/prof/quiet_watch.py`+sequence 文件；图像 QA：`tools/prof/shot_compare.py`；
   新局结果与 diag 留档：`F:\prof\runs\<label>-<id>\`（历史 bench_results.csv 不再改写）
