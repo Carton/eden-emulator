@@ -529,6 +529,9 @@ private:
 
     // Whether emulation is currently running in yuzu.
     bool emulation_running = false;
+    // Speed-limit setting as configured before the current game booted;
+    // restored on shutdown instead of forcing the limiter back on. (local-only)
+    bool pre_boot_use_speed_limit = true;
     // The path to the game currently running
     QString current_game_path;
     // Whether a user was set on the command line (skips UserSelector if it's forced to show up)
