@@ -4619,3 +4619,15 @@ false + ini 被某次优雅退出重写成 `\default=true`+`=false`（AGENTS 双
 **worktree 坑（自伤）**：user 目录须拷到 `build-ab/bin/user`（portable 模式找 exe
 旁的 user/）；拷错位置的症候=秒弹 "Derivation Components Missing" 模态框
 （空 profile 无 keys/nand）。worktree 保留作 pre-merge 对照（A 臂）。
+
+
+### §35.2 §35.1 勘误（2026-09-26 用户复核）
+
+昨晚 A/B 期间机器处于**累积退化状态**（用户次日手动测试确认：合并版 ~44 fps，
+与历史持平）——§35.1 的 **B/A=+7.5% 中位比值作废**，不可引用。修正结论：
+**merge 无性能回归（44 fps 保持）**；交错对在退化机器上放大了 A 臂慢侧，
+方向性参考仅"无回归"一点成立。教训入档：跨夜长会话（多轮构建+多局 bench）
+后机器状态不可信，宏观 A/B 前若无当日静置手测锚点，结论挂起待复核。
+
+上游 78 提交的分类总结（性能项详注）另立 `UPSTREAM_MERGE_NOTES.md`，
+后续主线合并按该文档格式追加。
