@@ -292,3 +292,26 @@ Qt 6.11.1 静态 / RelWithDebInfo。
 | 22a7e999e2 | perf | 状态与绑定冗余消除 | 9aa4ce0921 5da3c43261 |
 | fcac5d10fd | perf | 管线查找缓存 | d900d7c2ad be3e692dac 9af2007176 |
 | 0781b56252 | perf | 地址翻译冗余消除 | 18aaa38cef 74d5550276 e7c1484690 e43f875f75 814f80c107 8398d87199 |
+
+---
+
+## 9. GPU 线程提交的 review 轮（2026-09-26，5 个 fix 提交）
+
+六个 GPU 线程相关提交（§3.1-§3.3 及 TBO 格式、ASTC 零填、vi 配速三个 fix）
+经静态 review + 两轮验证。结论全部先对照代码核实再修复：
+
+| 提交 | 修复内容 |
+|---|---|
+| 71ca85a403 | §3.1 保留的 buffer id 跳过了 `WaitForGpuFenceIfNeeded`（它在 FindBuffer 内部）；保留路径重新应用，Accurate/Strict fence 模式下重复绑定不再丢等待。 |
+| cb3c71e1de + 9aaf1c5e85 | §3.2 的 memo 在查找失败后会返回**上一个**管线（null 结果记下了新代数而 `current_pipeline` 还是旧管线）；跨 channel 计数相撞也可能拿错。现改为失败永不记忆化（下一 draw 走全路径重试，能接住刚编完的管线；失败路径完全不改动任何状态），且 memo 命中同时比较所属 engine 指针。 |
+| b1f2a2eb17 | §5 的 ASTC 零填无条件执行，动态纹理 re-decode 时会把现役有效内容抹成零，直到解码落地前所有采样都读到黑——首解码仍零填，re-decode 保留旧内容（`HostInitialized` 标志）。这是游玩中偶发单帧黑闪的最可能来源。 |
+| 1fe2d40d39 + 9aaf1c5e85 | §3.3 uniform 流式快路径原来比较端点翻译；改为单页界判定（`(addr % page) + size <= page`，数学上证明无中间页）+ 空指针检查。成本不变，多页 uniform 走页游走。 |
+
+备注：
+- "shader 内存被改写但寄存器未变"场景维持上游原生 `RefreshStages` 的
+  dirty 门控语义，memo 并未扩大该窗口，故未加额外失效钩子。
+- 暂缓的同形机会：compute 侧 SSBO/TBO id 保留（需先补非活跃 channel 的
+  失效覆盖）、真正的一次翻译 uniform 路径、DMA 图像重复 touch 守卫、
+  ZeroUploadCopies 与 ConvertImage 布局计算去重。
+- vi 配速中 game-paced 解锁提交的因子（0.01→0.1）确认为原提交的有意
+  行为，非缺陷。

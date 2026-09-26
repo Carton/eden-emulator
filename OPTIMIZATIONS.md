@@ -344,3 +344,29 @@ static Qt 6.11.1 / RelWithDebInfo.
 | 22a7e999e2 | perf | state/binding redundancy removal | 9aa4ce0921 5da3c43261 |
 | fcac5d10fd | perf | pipeline lookup memoization | d900d7c2ad be3e692dac 9af2007176 |
 | 0781b56252 | perf | address-translation redundancy elimination | 18aaa38cef 74d5550276 e7c1484690 e43f875f75 814f80c107 8398d87199 |
+
+---
+
+## 9. Review round on the GPU-thread commits (2026-09-26, 5 fix commits)
+
+The six GPU-thread-related commits (§3.1-§3.3 plus the TBO-format, ASTC
+zero-fill and vi-pacing fixes) went through a static review with two
+verification rounds. Findings, all confirmed against the code before fixing:
+
+| Commit | Fixes |
+|---|---|
+| 71ca85a403 | §3.1's retained buffer ids skipped `WaitForGpuFenceIfNeeded` (it lives inside FindBuffer); the retained path re-applies it, so Accurate/Strict fence modes keep their wait on repeated bindings. |
+| cb3c71e1de + 9aaf1c5e85 | §3.2's memo could return the PREVIOUS pipeline after a failed lookup (null result stored the new generation while `current_pipeline` kept the old pipeline), and equal per-channel counters could collide across a channel switch. Failures are now never memoized (next draw retries the full path and picks up builds that finished meanwhile; failure paths mutate no state at all), and the memo also compares the owning engine pointer. |
+| b1f2a2eb17 | The ASTC zero-fill (§5) ran unconditionally, so a re-decode of a dynamic texture replaced its valid host contents with zeros for the frame(s) until the decode landed — every draw sampling it read black. First decodes still zero-fill; re-decodes keep the previous contents (`HostInitialized` flag). This was the most likely source of the occasional single-frame black flash observed during gameplay. |
+| 1fe2d40d39 + 9aaf1c5e85 | §3.3's uniform stream fast path compared endpoint translations; now guarded by a single-page bound (`(addr % page) + size <= page`), which proves no middle page exists, plus a null check. Cost unchanged; multi-page uniforms take the page walk. |
+
+Notes:
+- The "shader memory rewritten without a register change" scenario keeps
+  upstream's pre-existing `RefreshStages` dirty-gate semantics; the memo does
+  not widen that window, so no extra invalidation hook was added.
+- Parked same-shape opportunities (not taken): compute-side SSBO/TBO id
+  retention (needs inactive-channel invalidation coverage first), a true
+  one-translation uniform path, the redundant DMA-image touch guard, and
+  deduplicating ZeroUploadCopies against ConvertImage's layout math.
+- The vi-pacing factor for game-paced unlocked submissions (0.01 -> 0.1) was
+  confirmed as intentional behavior from the original commit, not a defect.
