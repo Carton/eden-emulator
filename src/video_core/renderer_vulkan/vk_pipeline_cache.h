@@ -162,10 +162,13 @@ private:
 
     GraphicsPipelineCacheKey graphics_key{};
     GraphicsPipeline* current_pipeline{};
-    // (local-only) Maxwell3D register generation that current_pipeline (or the
-    // last failed build) was keyed at; identical across draws lets us skip
-    // stage refresh, fixed-state refresh and the transition/map key compares.
+    // (local-only) Maxwell3D register generation (plus the owning engine, so
+    // equal per-channel counters cannot collide across a channel switch) that
+    // current_pipeline was keyed at; identical across draws lets us skip stage
+    // refresh, fixed-state refresh and the transition/map key compares.
+    // Failures are never memoized - only successful resolutions are.
     u64 key_build_gen{0};
+    Tegra::Engines::Maxwell3D* key_build_engine{};
 
     ::Common::unordered_map<ComputePipelineCacheKey, std::unique_ptr<ComputePipeline>> compute_cache;
     ::Common::unordered_map<GraphicsPipelineCacheKey, std::unique_ptr<GraphicsPipeline>> graphics_cache;

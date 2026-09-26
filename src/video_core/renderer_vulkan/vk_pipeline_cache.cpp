@@ -552,16 +552,20 @@ PipelineCache::~PipelineCache() {
 
 GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
 
-    // (local-only) No register value changed since the key was last built:
-    // stages, fixed state and therefore the resulting pipeline are identical.
+    // (local-only) No register value changed on the same engine since the key
+    // was last built: stages, fixed state and therefore the resulting pipeline
+    // are identical. The engine pointer guards against equal per-channel
+    // generation counters colliding across a channel switch.
     const u64 generation{maxwell3d->ChangeGeneration()};
-    if (generation == key_build_gen) [[likely]] {
+    if (generation == key_build_gen && maxwell3d == key_build_engine) [[likely]] {
         return current_pipeline ? BuiltPipeline(current_pipeline) : nullptr;
     }
 
     if (!RefreshStages(graphics_key.unique_hashes)) {
+        // Shader memory is unreadable; do not memoize the failure - the next
+        // draw must retry the full path instead of being skipped until the
+        // registers change.
         current_pipeline = nullptr;
-        key_build_gen = generation;
         return nullptr;
     }
     graphics_key.state.Refresh(*maxwell3d, dynamic_features);
@@ -571,11 +575,19 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
         if (next) {
             current_pipeline = next;
             key_build_gen = generation;
+            key_build_engine = maxwell3d;
             return BuiltPipeline(current_pipeline);
         }
     }
     GraphicsPipeline* const pipeline{CurrentGraphicsPipelineSlowPath()};
-    key_build_gen = generation;
+    if (pipeline) {
+        // Only memoize successful resolution. A null result (async build in
+        // flight or a cache miss) must retry the full path next draw, both to
+        // pick up the finished build and to avoid returning the remembered
+        // previous pipeline under the new generation.
+        key_build_gen = generation;
+        key_build_engine = maxwell3d;
+    }
     return pipeline;
 }
 
