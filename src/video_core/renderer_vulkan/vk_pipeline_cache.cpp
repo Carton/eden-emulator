@@ -562,10 +562,10 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
     }
 
     if (!RefreshStages(graphics_key.unique_hashes)) {
-        // Shader memory is unreadable; do not memoize the failure - the next
-        // draw must retry the full path instead of being skipped until the
-        // registers change.
-        current_pipeline = nullptr;
+        // Shader memory is unreadable; skip this draw but mutate nothing -
+        // neither the memo token nor current_pipeline. The next draw retries
+        // the full path (the failure is never memoized), and a later hit of
+        // the untouched memo still returns the correct previous pipeline.
         return nullptr;
     }
     graphics_key.state.Refresh(*maxwell3d, dynamic_features);

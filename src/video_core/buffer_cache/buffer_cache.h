@@ -977,10 +977,11 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
         const std::span<u8> span = runtime.BindMappedUniformBuffer(stage, binding_index, size);
         // (local-only) uniforms are small and single-page in practice; the
         // generic ReadBlockUnsafe page walk costs more than the copy itself.
-        // Null-check both translations before the pointer arithmetic.
+        // The single-page bound proves no middle page can be skipped or
+        // unmapped; multi-page uniforms take the page walk.
         u8* const src_pointer = device_memory.GetPointer<u8>(device_addr);
-        u8* const end_pointer = device_memory.GetPointer<u8>(device_addr + size);
-        if (src_pointer && end_pointer && src_pointer + size == end_pointer) [[likely]] {
+        if (src_pointer &&
+            (device_addr % Core::DEVICE_PAGESIZE) + size <= Core::DEVICE_PAGESIZE) [[likely]] {
             std::memcpy(span.data(), src_pointer, size);
         } else {
             device_memory.ReadBlockUnsafe(device_addr, span.data(), size);
@@ -1137,9 +1138,8 @@ void BufferCache<P>::BindHostComputeUniformBuffers() {
                 const std::span<u8> span =
                     runtime.BindMappedUniformBuffer(0, binding_index, size);
                 u8* const src_pointer = device_memory.GetPointer<u8>(binding.device_addr);
-                u8* const end_pointer =
-                    device_memory.GetPointer<u8>(binding.device_addr + size);
-                if (src_pointer && end_pointer && src_pointer + size == end_pointer) [[likely]] {
+                if (src_pointer && (binding.device_addr % Core::DEVICE_PAGESIZE) + size <=
+                                       Core::DEVICE_PAGESIZE) [[likely]] {
                     std::memcpy(span.data(), src_pointer, size);
                 } else {
                     device_memory.ReadBlockUnsafe(binding.device_addr, span.data(), size);
