@@ -4586,3 +4586,36 @@ decommit（#4471）、SpinLock→std::mutex（#4436）、RDTSC 纳秒换算修�
 dynarmic——**serial/diag 历史中位数与 merge 前不可直接互比**；后续 A/B
 一律以 merge 后 commit 为新基线重新起交错对。暂未跑 bench 验收（用户
 未要求；下次开跑前先 warmup 一轮）。
+
+
+### §35.1 Merge 回归验收（2026-09-26 深夜：性能 A/B + 图像 QA）
+
+**方法**：pre-merge 二进制用独立 worktree 重建（`F:\devel\opensource\eden-premerge`，
+`ff899c98f1`，build-ab 目录，CPM 缓存共享，EDEN_DIR 指向其 bin）；warmup 局丢弃后
+`bench_ab --pairs 3`（A=mpre / B=mpost，黄昏档 luma 56.8，同段互比）。
+
+**性能：无回归，反而 +7.5%**。逐对比值 1.0516 / 1.1005 / 1.0747，中位 **1.0747**
+（远超 ±2% 噪声带）。绝对 fps：mpre 35.4-36.7（med 26.67-27.50ms）vs
+mpost 38.6-39.0（med 25.00-25.83ms）。归因推测 = 上游 dynarmic 系（#4158/#4446/
+#4448/#4219）CPU 侧收益；后续 serial diag 基线以 merge 后为准。
+
+**图像：无异常**。三层验证：
+1. bench 浮层 shots 交错对 diff（mean 2.0-2.7 / bad% 4.7-6.3）vs 同二进制地板
+   （mean 1.4-2.1 / bad% 3.2-5.0）——噪声带内；
+2. **新工具 `tools/prof/game_shot.py`**：抓真实渲染面（按标题 eden 的最大子窗口，
+   PrintWindow），双臂背靠背各 3 张；视觉检查（MCP）双臂同一夜间水塘/卡卡利科场景、
+   水面/植被/HUD/右缘元素齐全、无黑块花屏、色彩正常；
+3. 游戏画面跨臂像素 diff（mean 3.95-6.80 / bad% 0.93-4.77）落在同局相位噪声
+   包络内（gpost 自身 0vs2 = 7.80 / 5.73%）。
+（坑：bench QA 截图抓的是 225×250 性能浮层小部件（performance_overlay.ui 标题
+"Form"），证明不了游戏画面——图形路径验收必须补 game_shot.py。）
+
+**QA 采集中断事故（已修复，非 merge 回归）**：warmup 局 VOID "Required QA capture
+failed"。排查链：Form 窗口=perf 浮层 → 合并版/premerge 版均无 Form → 浮层编译默认
+false + ini 被某次优雅退出重写成 `\default=true`+`=false`（AGENTS 双行规则的活案例）
+→ 按 `show_perf_overlay\default=false` + `=true` 双行修复后 Form 恢复、采集通过。
+**注意：浮层开关是 bench QA 的生命线，任何 VOID-on-capture 先查这两行。**
+
+**worktree 坑（自伤）**：user 目录须拷到 `build-ab/bin/user`（portable 模式找 exe
+旁的 user/）；拷错位置的症候=秒弹 "Derivation Components Missing" 模态框
+（空 profile 无 keys/nand）。worktree 保留作 pre-merge 对照（A 臂）。
