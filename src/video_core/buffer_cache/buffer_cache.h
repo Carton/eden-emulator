@@ -1734,7 +1734,10 @@ void BufferCache<P>::UpdateStorageBuffers(size_t stage) {
     ForEachEnabledBit(channel_state->enabled_storage_buffers[stage], [&](u32 index) {
         Binding& binding = channel_state->storage_buffers[stage][index];
         if (binding.buffer_id) {
-            // Already resolved; the writer resets this when the target changes
+            // Already resolved; the writer resets this when the target changes.
+            // FindBuffer applied the GPU-fence policy when it resolved this id;
+            // keep applying it on the retained path.
+            WaitForGpuFenceIfNeeded(slot_buffers[binding.buffer_id]);
             return;
         }
         binding.buffer_id = FindBuffer(binding.device_addr, binding.size);
@@ -1746,7 +1749,10 @@ void BufferCache<P>::UpdateTextureBuffers(size_t stage) {
     ForEachEnabledBit(channel_state->enabled_texture_buffers[stage], [&](u32 index) {
         Binding& binding = channel_state->texture_buffers[stage][index];
         if (binding.buffer_id) {
-            // Already resolved; the writer resets this when the target changes
+            // Already resolved; the writer resets this when the target changes.
+            // FindBuffer applied the GPU-fence policy when it resolved this id;
+            // keep applying it on the retained path.
+            WaitForGpuFenceIfNeeded(slot_buffers[binding.buffer_id]);
             return;
         }
         binding.buffer_id = FindBuffer(binding.device_addr, binding.size);
