@@ -45,6 +45,9 @@ enum class ImageFlagBits : u32 {
 
     AsynchronousDecode = 1 << 16,
     IsDecoding = 1 << 17, ///< Is currently being decoded asynchronously.
+    HostInitialized = 1 << 18, ///< Host image memory has been written at least
+                               ///< once (zero-fill or upload); sampling cannot
+                               ///< read never-written VRAM anymore.
 };
 DECLARE_ENUM_FLAG_OPERATORS(ImageFlagBits)
 
