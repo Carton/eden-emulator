@@ -976,9 +976,11 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
         // Stream buffer path to avoid stalling on non-Nvidia drivers or Vulkan
         const std::span<u8> span = runtime.BindMappedUniformBuffer(stage, binding_index, size);
         // (local-only) uniforms are small and single-page in practice; the
-        // generic ReadBlockUnsafe page walk costs more than the copy itself
+        // generic ReadBlockUnsafe page walk costs more than the copy itself.
+        // Null-check both translations before the pointer arithmetic.
         u8* const src_pointer = device_memory.GetPointer<u8>(device_addr);
-        if (src_pointer + size == device_memory.GetPointer<u8>(device_addr + size)) [[likely]] {
+        u8* const end_pointer = device_memory.GetPointer<u8>(device_addr + size);
+        if (src_pointer && end_pointer && src_pointer + size == end_pointer) [[likely]] {
             std::memcpy(span.data(), src_pointer, size);
         } else {
             device_memory.ReadBlockUnsafe(device_addr, span.data(), size);
@@ -1135,8 +1137,9 @@ void BufferCache<P>::BindHostComputeUniformBuffers() {
                 const std::span<u8> span =
                     runtime.BindMappedUniformBuffer(0, binding_index, size);
                 u8* const src_pointer = device_memory.GetPointer<u8>(binding.device_addr);
-                if (src_pointer + size ==
-                    device_memory.GetPointer<u8>(binding.device_addr + size)) [[likely]] {
+                u8* const end_pointer =
+                    device_memory.GetPointer<u8>(binding.device_addr + size);
+                if (src_pointer && end_pointer && src_pointer + size == end_pointer) [[likely]] {
                     std::memcpy(span.data(), src_pointer, size);
                 } else {
                     device_memory.ReadBlockUnsafe(binding.device_addr, span.data(), size);
