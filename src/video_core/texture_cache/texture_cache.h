@@ -1354,14 +1354,18 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
     decode->image_id = image_id;
     async_decodes.push_back(std::move(decode));
 
-    // (local-only) Zero-fill the image immediately: decoded contents are uploaded in a
-    // later frame by TickAsyncDecode, but draws can sample the image in between and
-    // would read never-written VRAM (stale garbage tiles, e.g. on loading screens).
-    {
-        auto zero_staging = runtime.UploadStagingBuffer(MapSizeBytes(image));
+    // Zero-fill the image before its first decode only: decoded contents are
+    // uploaded in a later frame by TickAsyncDecode, and until then draws
+    // would sample never-written VRAM (stale garbage tiles, e.g. on loading
+    // screens). A re-decode of an already-initialized image keeps the previous
+    // valid contents instead of exposing a black window for a frame (review
+    // finding P1-1).
+    if (False(image.flags & ImageFlagBits::HostInitialized)) {
+       auto zero_staging = runtime.UploadStagingBuffer(MapSizeBytes(image));
         std::memset(zero_staging.mapped_span.data(), 0, zero_staging.mapped_span.size_bytes());
         image.UploadMemory(zero_staging, FixSmallVectorADL(ZeroUploadCopies(image.info)));
         runtime.InsertUploadMemoryBarrier();
+        image.flags |= ImageFlagBits::HostInitialized;
     }
 
     std::vector<u8> local_unswizzle_data_buffer(image.unswizzled_size_bytes, 0);
