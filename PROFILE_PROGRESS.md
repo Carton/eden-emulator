@@ -4631,3 +4631,39 @@ false + ini 被某次优雅退出重写成 `\default=true`+`=false`（AGENTS 双
 
 上游 78 提交的分类总结（性能项详注）另立 `UPSTREAM_MERGE_NOTES.md`，
 后续主线合并按该文档格式追加。
+
+
+### §35.3 纯净优化版 rebase 到新 origin/master（2026-09-26）
+
+`master`（17 提交纯净系列）从 `74ccea3def` rebase 到 `bebc19da32`（本次 p2 merge
+的同一上游区间）。rerere 已开（repo config）；备份分支 `master-pre-rebase`。
+
+- 冲突仅 1 处：`22a7e999e2`（serial cuts）的 buffer_cache.h，解法直接复用 §35
+  判例（storage 早退追加 `segment_count == 0` + FindBuffer 第三参）。
+  `0781b56252` 干净套用（其 buffer_cache.h 改动与 upstream sparse 无重叠）。
+- range-diff 保真度：15/17 逐字节一致，3 个适配（headers/texture-format 仅
+  上下文平移，serial-cut 为语义适配）。
+- 新增提交 `cf3ec3ecac`：launch_params.cpp C4800（同 p2 的 7868becc07）。
+- 编译验证：独立 `build-master/` 全量通过（WERROR=ON，与 build-vs22 同参），
+  产物 11:03:48。build-vs22 未动（仍是 p2 merge 产物）。
+
+SHA 映射（历史 PROFILE/验收记录引用旧 SHA 时查此表）：
+
+- `bcdf43e3ad` -> `fe14df5312`  build: include standard library headers explicitly
+- `87498a196d` -> `f63e720d57`  build(qt): skip windeployqt for static Qt and cross builds
+- `056bcbddd2` -> `dfc3a671cf`  build: add MSVC CRT vector-algorithm shim source
+- `ccd22ee643` -> `4064777d4c`  fix(video): initialize texture buffer binding formats
+- `dc6f9e9f66` -> `e24281e589`  fix(video): zero-fill images queued for async ASTC decode
+- `e3a7dc82ba` -> `abd2f47100`  fix(vi): pace explicit frame-interval requests at hardware rate wh
+- `5d50effdf1` -> `004814c6dc`  fix(yuzu): restore pre-game speed limiter preference on shutdown
+- `c0eb6ef236` -> `39556d74eb`  fix(set): catch filesystem_error in settings load/store
+- `28415c31f9` -> `4d1ba35646`  perf(vi): floor unlocked conductor ticks at 1200 Hz
+- `d46d08038b` -> `189677f108`  perf(dynarmic): process-wide shared IR cache across cores
+- `1e6329e5d2` -> `f6f9fc510a`  perf(dynarmic): O(1) ValueLocation via name-indexed reverse table
+- `22a7e999e2` -> `2acfbf25bc`  perf(video): cut redundant per-draw state and binding work on the 
+- `fcac5d10fd` -> `c7ab87248d`  perf(vulkan): memoize graphics pipeline lookup on register generat
+- `0781b56252` -> `2503e804e4`  perf(video): eliminate redundant memory translations on draw paths
+- `3e530ed6c7` -> `ddb0f3664d`  docs: optimization series documentation (zh + en) and fork note in
+- `07df4bd8ae` -> `e834d37b79`  docs: apply bilingual review fixes to OPTIMIZATIONS (en/zh)
+- `997dc83b23` -> `9986d92796`  docs: note the AI-agent workflow behind the optimization series
+- （新增）`cf3ec3ecac`  C4800 修复（upstream #4424 MSVC 缺陷，随本轮 rebase 落地）
