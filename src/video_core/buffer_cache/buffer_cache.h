@@ -1827,7 +1827,10 @@ void BufferCache<P>::UpdateStorageBuffers(size_t stage) {
             // target changes. Multi-range bindings must re-resolve every pass:
             // the segment pool is cleared per pass, and the virtual mapping can
             // change underneath a binding whose target did not.
-            return;
+            // FindBuffer applied the GPU-fence policy when it resolved this id;
+            // keep applying it on the retained path.
+            WaitForGpuFenceIfNeeded(slot_buffers[binding.buffer_id]);
+           return;
         }
         const BufferId buffer_id = FindBuffer(binding.device_addr, binding.size, false);
         binding.buffer_id = buffer_id;
@@ -1841,7 +1844,10 @@ void BufferCache<P>::UpdateTextureBuffers(size_t stage) {
     ForEachEnabledBit(channel_state->enabled_texture_buffers[stage], [&](u32 index) {
         Binding& binding = channel_state->texture_buffers[stage][index];
         if (binding.buffer_id) {
-            // Already resolved; the writer resets this when the target changes
+            // Already resolved; the writer resets this when the target changes.
+            // FindBuffer applied the GPU-fence policy when it resolved this id;
+            // keep applying it on the retained path.
+            WaitForGpuFenceIfNeeded(slot_buffers[binding.buffer_id]);
             return;
         }
         binding.buffer_id = FindBuffer(binding.device_addr, binding.size, false);
