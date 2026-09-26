@@ -1830,7 +1830,7 @@ void BufferCache<P>::UpdateStorageBuffers(size_t stage) {
             // FindBuffer applied the GPU-fence policy when it resolved this id;
             // keep applying it on the retained path.
             WaitForGpuFenceIfNeeded(slot_buffers[binding.buffer_id]);
-           return;
+            return;
         }
         const BufferId buffer_id = FindBuffer(binding.device_addr, binding.size, false);
         binding.buffer_id = buffer_id;
