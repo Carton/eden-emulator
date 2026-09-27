@@ -165,6 +165,16 @@ private:
 
     GraphicsPipelineCacheKey graphics_key{};
     GraphicsPipeline* current_pipeline{};
+    // (local-only) State current_pipeline was keyed at: the Maxwell3D register
+    // generation (plus the owning engine, so equal per-channel counters cannot
+    // collide across a channel switch) and the draw-manager topology (the one
+    // key input sourced from macro parameters rather than registers). When all
+    // of them are unchanged and the Shaders dirty flag is clean, draws can
+    // skip stage refresh, fixed-state refresh and the transition/map key
+    // compares. Failures are never memoized - only successful resolutions are.
+    u64 key_build_gen{0};
+    Tegra::Engines::Maxwell3D* key_build_engine{};
+    Tegra::Engines::Maxwell3D::Regs::PrimitiveTopology key_topology{};
 
     ::Common::unordered_map<ComputePipelineCacheKey, std::unique_ptr<ComputePipeline>> compute_cache;
     ::Common::unordered_map<GraphicsPipelineCacheKey, std::unique_ptr<GraphicsPipeline>> graphics_cache;

@@ -3282,6 +3282,12 @@ public:
     // register-derived state across draws keyed on this generation.
     [[nodiscard]] u64 ChangeGeneration() const noexcept { return change_generation; }
 
+    // (local-only) Force generation-memoized consumers to re-key. HLE macros
+    // that mutate pipeline-key-relevant registers through the journal
+    // (bypassing ProcessDirtyRegisters) must call this, or a memo taken before
+    // the change would keep resolving to the old derived state.
+    void BumpChangeGeneration() noexcept { ++change_generation; }
+
 private:
     u64 change_generation{1};
 

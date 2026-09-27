@@ -553,10 +553,28 @@ PipelineCache::~PipelineCache() {
 
 GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
 
-    // Shader invalidation, HLE writes, topology and channel changes are not
-    // all represented by Maxwell3D's register generation. Refresh the key
-    // before using the existing transition cache.
+    // (local-only) Nothing the pipeline key depends on has changed since it
+    // was last resolved: no register value (generation), same engine (channel
+    // switches carry independent per-channel counters), no pending
+    // out-of-band shader invalidation (HLE BindShader mutates stage config
+    // through the journal and only raises this flag), and the same draw
+    // topology (the one key input that reaches FixedPipelineState from the
+    // draw manager rather than the register file - HLE draw macros take it
+    // from macro parameters). Stage hashes, fixed state and therefore the
+    // resulting pipeline are identical; skip stage refresh, fixed-state
+    // refresh and the transition/map key compares.
+    const u64 generation{maxwell3d->ChangeGeneration()};
+    const auto topology{maxwell3d->draw_manager.draw_state.topology};
+    if (generation == key_build_gen && maxwell3d == key_build_engine &&
+        topology == key_topology &&
+        !maxwell3d->dirty.flags[VideoCommon::Dirty::Shaders]) [[likely]] {
+        return current_pipeline ? BuiltPipeline(current_pipeline) : nullptr;
+    }
+
     if (!RefreshStages(graphics_key.unique_hashes)) {
+        // Shader memory is unreadable; do not memoize the failure - the next
+        // draw must retry the full path instead of being skipped until the
+        // registers change.
         current_pipeline = nullptr;
         return nullptr;
     }
@@ -566,10 +584,23 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
         GraphicsPipeline* const next{current_pipeline->Next(graphics_key)};
         if (next) {
             current_pipeline = next;
+            key_build_gen = generation;
+            key_build_engine = maxwell3d;
+            key_topology = topology;
             return BuiltPipeline(current_pipeline);
         }
     }
-    return CurrentGraphicsPipelineSlowPath();
+    GraphicsPipeline* const pipeline{CurrentGraphicsPipelineSlowPath()};
+    if (pipeline) {
+        // Only memoize successful resolution. A null result (async build in
+        // flight or a cache miss) must retry the full path next draw, both to
+        // pick up the finished build and to avoid returning the remembered
+        // previous pipeline under the new generation.
+        key_build_gen = generation;
+        key_build_engine = maxwell3d;
+        key_topology = topology;
+    }
+    return pipeline;
 }
 
 GraphicsPipeline* PipelineCache::TryGraphicsPipelineForParser() {
