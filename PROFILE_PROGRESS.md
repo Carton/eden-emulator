@@ -4537,3 +4537,46 @@ fence 等待，`beafa57ef6`）+ `b1f2a2eb17`（ASTC 零填仅首次，`8cd199c71
 部分 `9aaf1c5e85`（注释，`2d1df9c1cf`）；跳过 `cb3c71e1de`（本分支无 memo）
 与 `1fe2d40d39`（uniform 守卫已以二轮形式存在）。删 obj 全量重编通过（15:34）。
 性能评估待用户放行（参考 exe 存 F:/prof/archive/premerge_ff899c98f1_bin/）。
+
+
+### §34.7 管线 lookup memo 移植 + 两轮 astra review（2026-09-27 深夜）
+
+**任务**：以本分支为基线，把 master 的 memo 家族（fcac5d10fd 重实现 + cb3c71e1de
+review 修正）移植过来，验证 ~300ns/draw 的 serial 路径收割机会（§35.6 勘误留档）。
+
+**考古**：生产者侧早已就位——p2 的 ProcessDirtyRegisters 已有 identical-write 跳过 +
+change_generation bump（22a7e999e2 谱系），Next() 已有 transition hash 快路径（fcac5d10fd
+的另一半）。缺的只是 PipelineCache 消费侧 memo。墓碑注释（90ef63e00d）列出四类代数盲区
+（shader 失效/HLE 写入/topology/channel）。
+
+**移植（85fd6e38c4）** = master 核心 + cb3 两修正（engine 指针守卫、失败不记忆）+
+三项 p2 加固：
+1. Shaders-dirty-flag 守卫：HLE_BindShader 经 journal 改 pipelines[].offset 后只升
+   该 flag；memo 与 RefreshStages 早退信任同一信号，新鲜度等价；
+2. draw_state.topology 守卫：FixedPipelineState 的 key 里唯一非寄存器输入——HLE
+   draw 宏从宏参数直灌 topology，generation 不可见；
+3. HLE_TransformFeedbackSetup 补 BumpChangeGeneration()：xfb_enabled/start_offset
+   走 journal 不过 generation（注意 RefreshXfbState 实际只读 controls 与
+   stream_out_layout，enabled 位才是关键直写）。
+
+**astra review 轮一（thread 01a0e362…，MAJOR，三个真问题，全部采纳）**：
+① engine_state 漏网——key 的 app_stage 位段直接拷贝 maxwell3d.engine_state，
+   HLE extended draw 就地翻转 OnHLEMacro/None，generation 不可见（我审计 draw_manager
+   引用时漏了这个非 draw_manager 的非寄存器输入）；
+② TryGraphicsPipelineForParser 尾部有 current_pipeline = next（读代码截断在 590 行
+   漏看）——parser 侧重发布管线不动 memo 标签，topology A→B→A 链条可错回 A；
+③ 失败后旧标签复活——BindShader 同代数换 shader、重哈希成功清 flag、慢路径 null
+   （异步编译中）后，旧标签在下一局全过守卫返回旧管线（应为 null）。**master 的
+   cb3c71e1de 同样有此洞**（其 macro.cpp:328 等价直设 flag）。
+修复（a7f3730f0b）：engine_state 入守卫集（四值比较）；full path 入口先失效
+key_build_gen=0（任何非成功结局都不可能复活旧关联）；parser 重发布处同步失效。
+ReplayJournal 疑问闭环：只作用于 resolver 的 shadow 引擎实例，不触 live memo。
+**轮二复核 PASS**（两条精度注记不阻塞：last_shaders_valid 行为是既有设计；
+gen=0 是失效机制不是同步原语，正确性依赖既有 tail-pipeline 所有权交接）。
+
+**构建**：85fd6e38c4 全量（maxwell_3d.h 宽头 → 删 video_core/core CMakeFiles），
+a7f3730f0b 增量（vk_pipeline_cache 闭包 13 步），均通过；B 臂 exe 23:09。
+**A 臂**：F:/prof/ab_memo/bin（基线 619f1a2e05 冻结拷贝 + user 镜像，
+sha256 2743046e2bf7…）。
+
+**性能对比**：（机器有人连 VOID，等 hands-off 窗口——数据见下补）
