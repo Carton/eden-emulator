@@ -633,6 +633,26 @@ bool MemoryManager::IsContinuousRange(GPUVAddr gpu_addr, std::size_t size) const
     return result;
 }
 
+bool MemoryManager::IsBigPageContiguousRange(GPUVAddr gpu_addr, std::size_t size) const {
+    if (size == 0) {
+        return true;
+    }
+    const std::size_t first = PageEntryIndex(gpu_addr, true);
+    const std::size_t last = PageEntryIndex(gpu_addr + size - 1, true);
+    const u32 page_stride = static_cast<u32>(big_page_size >> cpu_page_bits);
+    const u32 previous = big_page_table_dev[first];
+    if (previous == 0 || !IsBigPageContinuous(first)) {
+        return false;
+    }
+    for (std::size_t index = first + 1; index <= last; ++index) {
+        const u32 current = big_page_table_dev[index];
+        if (current == 0 || !IsBigPageContinuous(index) || current - previous != page_stride) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool MemoryManager::IsFullyMappedRange(GPUVAddr gpu_addr, std::size_t size) const {
     bool result{true};
     auto fail = [&]([[maybe_unused]] std::size_t page_index, [[maybe_unused]] std::size_t offset,

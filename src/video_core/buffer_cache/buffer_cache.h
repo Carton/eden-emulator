@@ -1370,6 +1370,13 @@ void BufferCache<P>::ResolveMultiRangeStorage(Binding& binding, bool is_written,
         if (is_written && !runtime.PrefersSparseSources()) {
             return;
         }
+        if (gpu_memory->IsBigPageContiguousRange(binding.gpu_addr, binding.size)) {
+            // Single contiguous backing by construction (adjacent big pages map
+            // exactly big_page_size apart and no page has internal holes): the
+            // classic single-range binding path below is authoritative, so the
+            // submapped-range walk is skipped.
+            return;
+        }
         const VirtualSegments* found =
             virtual_ranges.Query(*gpu_memory, binding.gpu_addr, binding.size);
         if (!found || found->size() < 2) {
