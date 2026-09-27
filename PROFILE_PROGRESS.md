@@ -4528,3 +4528,12 @@ Files changed: new serial_diag.h; vk_rasterizer.cpp; vk_graphics_pipeline.cpp;
 buffer_cache/buffer_cache.h; this progress log. Static diff/format checks passed.
 No build, game run or commit. Clock/counter absence is source-level verification,
 not a claim of measured machine-code overhead or zero branch overhead.
+
+
+### §34.6 GPU 线程优化 review 修正回植（2026-09-27，见 merge 分支 PROFILE §35.6）
+
+master 系 review 修正五连回植本分支：全量 `71ca85a403`（retained buffer_id 补
+fence 等待，`beafa57ef6`）+ `b1f2a2eb17`（ASTC 零填仅首次，`8cd199c71e`），
+部分 `9aaf1c5e85`（注释，`2d1df9c1cf`）；跳过 `cb3c71e1de`（本分支无 memo）
+与 `1fe2d40d39`（uniform 守卫已以二轮形式存在）。删 obj 全量重编通过（15:34）。
+性能评估待用户放行（参考 exe 存 F:/prof/archive/premerge_ff899c98f1_bin/）。
