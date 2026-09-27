@@ -637,18 +637,30 @@ bool MemoryManager::IsBigPageContiguousRange(GPUVAddr gpu_addr, std::size_t size
     if (size == 0) {
         return true;
     }
+    if (gpu_addr >= address_space_size || size > address_space_size - gpu_addr) {
+        return false;
+    }
     const std::size_t first = PageEntryIndex(gpu_addr, true);
     const std::size_t last = PageEntryIndex(gpu_addr + size - 1, true);
-    const u32 page_stride = static_cast<u32>(big_page_size >> cpu_page_bits);
-    const u32 previous = big_page_table_dev[first];
+    const u64 page_stride = big_page_size >> cpu_page_bits;
+    if (GetEntry(gpu_addr, true) != EntryType::Mapped) {
+        return false;
+    }
+    u64 previous = big_page_table_dev[first];
     if (previous == 0 || !IsBigPageContinuous(first)) {
         return false;
     }
     for (std::size_t index = first + 1; index <= last; ++index) {
-        const u32 current = big_page_table_dev[index];
-        if (current == 0 || !IsBigPageContinuous(index) || current - previous != page_stride) {
+        const GPUVAddr page_addr = static_cast<GPUVAddr>(index) << big_page_bits;
+        if (GetEntry(page_addr, true) != EntryType::Mapped) {
             return false;
         }
+        const u64 current = big_page_table_dev[index];
+        if (current == 0 || !IsBigPageContinuous(index) ||
+            current != previous + page_stride) {
+            return false;
+        }
+        previous = current;
     }
     return true;
 }
