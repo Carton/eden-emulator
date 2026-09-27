@@ -4745,3 +4745,28 @@ sparse 游戏（MH Sunbreak 类）不满足闸门，照旧走上游 Query，语�
 - merge 引入 ENABLE_RESHADE 默认 ON：A/B 对比时显式 OFF 才是特性对等；若日后
   想启用 ReShade，需重估其对帧率的影响。
 - 工具：`tools/prof/ab_diag_diff.py`（两臂 diag 家族尾窗均值对比，本轮微观归因主力）。
+
+
+### §35.5 astra review 轮 + 修正落地（2026-09-27 午）
+
+用户要求对 §35.4 两枚修复补 astra review（codex-delegate gpt-6-astra，fresh
+read-only，thread `01a0e0e8-26d2-7da1-b161-b85dc4b1d4c2`）。结论：
+
+- **Fix 1（dense 大页表）PASS**，无需改动。备注：sparse 版 ResizeAndClear 同尺寸时
+  是 no-op 而 assign 会清零（我们仅在构造期调用一次，无影响）；vector 分配失败
+  会抛异常（sparse 版静默）；均不阻塞。
+- **Fix 2（连续性闸门）PASS-WITH-CHANGES，两个真问题**：
+  ① **stale 大页元数据可掩盖小页重映射**（Free 大 entry + 残留 dev 值/连续位时，
+  GetSubmappedRangeImpl 会走小页回退并可能返回 ≥2 段真 multi-range，闸门却被
+  stale 数据骗过）——需对每个覆盖大页显式 `GetEntry==Mapped`；
+  ② **循环里 previous 没有推进**（始终与首页比较：3 页以上既误放行
+  `0x100,0x110,0x110` 也误拒绝 `0x100,0x110,0x120`；TOTK SSBO 多 ≤2 页故未现形）。
+  另加：AS 边界守卫（PageEntryIndex 掩码回绕，我自审已疑）、u64 加法式步进比较
+  （替代 u32 模减）。全部采纳，落地 `0456e9fc40`（fix 分支镜像 `7f7d9ceee1`）。
+- astra 还纠正了我"O(1)"的说法：闸门是 O(覆盖大页数)（SSBO 尺寸下 ≤ 数次读）。
+- **修正后 sanity**（增量编译，仅 memory_manager.cpp 链）：1 有效对 B/A=0.9900
+  （A 35.59 vs B 35.23），与当日同二进制噪声底 0.9903 重合——正确性加固没有
+  吃掉收益；第 2 对 A 臂两次 VOID（一次进游戏失败、一次检测到用户输入）按纪律丢弃。
+- 教训：**自证等价论证（"gate pass ⇒ Query 必 <2 段"）在 stale 元数据+小页回退
+  组合下有洞**，且自己写的循环 bug 自己看不出——涉及映射语义的改动必须过
+  strong-model review。
