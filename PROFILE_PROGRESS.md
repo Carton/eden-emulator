@@ -4784,9 +4784,15 @@ read-only，thread `01a0e0e8-26d2-7da1-b161-b85dc4b1d4c2`）。结论：
   与 master 同源，套条件即可；flag 语义按二轮收窄为"零填已跑过"）。
 - **部分落入**：`9aaf1c5e85` 二轮中 image_base.h 的注释收窄（vk_pipeline_cache/
   buffer_cache 部分对两分支均为"目标代码不存在"故弃）。
-- **跳过两枚**：`cb3c71e1de`（管线 memo 修复——**两条 p2 分支根本没有 memo**，
-  那是 master 系优化且 p2 战役以 generation 不覆盖 shader 失效/HLE/topology/
-  channel 为由否决过同类跳过，"修不存在的优化"= 引特性，不做）；
+- **跳过两枚**：`cb3c71e1de`（管线 memo 修复——两条 p2 分支当前**没有 memo 代码可修**）。
+  谱系勘误（2026-09-27 补，git 考古）：memo 原本**诞生于 p2**（`d900d7c2ad`，
+  §19，rotation 尖刺 -79%/-70%），同日被 `90ef63e00d` 以 "remove incomplete
+  generation memoization" 移除；master 的 `fcac5d10fd`（9-25）是按 master serial
+  形态的重新实现，astra 修的失败记忆化/跨 channel 恰是当年 p2 版被拆的同类病。
+  §34 的 "pipeline_lookup skip REJECTED" 是拒绝**重新引入**的记录，非"没有"的起因。
+  推论：p2 serial 路径仍付 RefreshStages+state.Refresh+transition 查找
+  （~300ns/draw），若日后收割，应将 master 成品 memo 适配到 p2 形态单独走一轮，
+  而非 backport fix；
   `1fe2d40d39`（uniform 快路径空指针守卫——p2 的实现**已带等价且即二轮收敛
   形式的守卫** `src_pointer && 单页界判定`，语义已存在）。
 
