@@ -33,6 +33,29 @@ class System;
 
 namespace Tegra {
 
+// PROBE dense-bigtable: upstream #4219 swapped this table to SparseLargeVector,
+// whose Windows read path adds a bounds check plus a committed-pages dependent
+// atomic load before every element access. Every big-page GPU->CPU translation
+// (10+ hot sites: GpuToCpuAddress/ReadBlock/GetPointer/...) pays that tax.
+// Dense storage restores the pre-merge single-dereference read; cost is
+// 4B * big_page_table_size (32-64MiB), which the pre-merge VirtualBuffer
+// committed in full anyway.
+class DenseU32Table {
+public:
+    void ResizeAndClear(std::size_t count) {
+        storage.assign(count, 0);
+    }
+    void Set(std::size_t index, u32 value) noexcept {
+        storage[index] = value;
+    }
+    [[nodiscard]] u32 operator[](std::size_t index) const noexcept {
+        return storage[index];
+    }
+
+private:
+    std::vector<u32> storage;
+};
+
 class MemoryManager final {
 public:
     explicit MemoryManager(Core::System& system_, u64 address_space_bits_ = 40,
@@ -216,7 +239,7 @@ private:
 
     Common::MultiLevelPageTable<u32> page_table;
     Common::RangeMap<GPUVAddr, PTEKind> kind_map;
-    Common::SparseLargeVector<u32> big_page_table_dev;
+    DenseU32Table big_page_table_dev;
 
     std::vector<u64> big_page_continuous;
     boost::container::small_vector<std::pair<DAddr, std::size_t>, 32> page_stash{};
