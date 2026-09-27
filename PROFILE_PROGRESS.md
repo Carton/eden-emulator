@@ -4667,3 +4667,81 @@ SHA 映射（历史 PROFILE/验收记录引用旧 SHA 时查此表）：
 - `07df4bd8ae` -> `e834d37b79`  docs: apply bilingual review fixes to OPTIMIZATIONS (en/zh)
 - `997dc83b23` -> `9986d92796`  docs: note the AI-agent workflow behind the optimization series
 - （新增）`cf3ec3ecac`  C4800 修复（upstream #4424 MSVC 缺陷，随本轮 rebase 落地）
+
+
+### §35.4 Merge 回归第二轮：确认 + 定位 + 修复（2026-09-26 深夜 ~ 09-27 上午）
+
+**背景**：用户再次怀疑 merge 后性能回归。§35.1/35.2 首轮在退化机器上作废、
+用户手测 "~44fps 无回归" 存疑；本轮在当日条件下用独立 worktree 重建双臂严格复测。
+
+**构建（对等性清单）**：
+- A 臂 = pre-merge `ff899c98f1`（`eden-premerge` worktree，build-ab，§35.1 同一产物，
+  ninja no-op 确认）；B 臂 = `e3beaedc80`（worktree 由 `eden-emulator2` 改名
+  `eden-postmerge`，全新 build-ab，全量重编）。
+- 参数逐项对齐：Ninja/RelWithDebInfo/shim 链接/CPM 同版本（Qt 6.11.1、SDL3 3.4.14、
+  FFmpeg 9.0.1 等）；**B 臂 ENABLE_RESHADE=OFF**（merge 后该选项默认 ON 且 A 臂无此
+  子系统，保持二进制特性对等；后处理/post_process.cpp 全家在 RESHADE 开关下，
+  OFF 即不编入）。**Boost 1.90→1.92 是 merge 自带 cpmfile.json pin 变更，属于
+  "merge 本身"，保留并记录**。
+- user 目录：A 臂原样拷贝到 B 臂（同一存档/同一配置/同一 shader 缓存），
+  qt-config.ini 仅 6 处绝对路径改写（字节级校验 = A 逐字节等价 + 路径替换）。
+
+**宏观回归确认（bench_ab 交错对，默认 env，3/3 有效）**：
+B/A 逐对 0.9190/0.9269/0.9404，**中位 0.9269（-7.3%）**，远超 ±2% 噪声带。
+绝对值：A 34.3-35.3fps（med 28.3-29.2ms）vs B 31.8-32.5（med 30.0-30.8），
+luma 56.7-56.8 紧配对。med 帧时 +2.2~2.5ms —— 即本轮要追回的量。
+§35.1 作废的 +7.5% 正是本轮 -7.3% 的镜像（当时机器退化放大了 A 臂）。
+
+**微观归因（双臂 EDEN_SERIAL_DIAG=1 交错对，尾 20 稳态窗均值）**：
+- SerialDraw phases：resolve 581→709ns（**+22%**）、configure_tail 2039→2202（+8%）、
+  prologue 816→873；UpdateGraphicsBuffers：geometry_setup 225→270（+20%）。
+  合计 +~385ns/draw ≈ 1.1ms/帧（~2900 PrepareDraw/帧）——只解释回归的一半。
+- dynarmic 关机统计两臂几乎相同（block_compiles 1.304M/1.297M、
+  range_invalidations 同 15007、fastmem_faults 2963/2949、编译总时长 41.6/41.4s）
+  ——**排除 JIT 重编译风暴**；其余 ~1.2ms 在 PrepareDraw 之外。
+
+**根因一（主）：#4219 GPU 大页表 sparse 化的读税**。
+`big_page_table_dev` 从 `VirtualBuffer<u32>`（裸保留内存，operator[] = 单次解引用）
+换成 `SparseLargeVector<u32>`；Windows 读路径 `GetOrDefault` = bounds 检查 +
+committed_pages 位图**依赖原子 acquire 加载** + 分支。10+ 个热翻译点
+（GpuToCpuAddress/ReadBlock/GetPointer/WriteBlock/GetSubmappedRange...）每次
+大页翻译都付费——resolve 段 +22% 与非 draw 侧（pusher/上传链翻译）同源。
+修复：恢复 dense 存储（`DenseU32Table`，32-64MiB/AS —— pre-merge 的 VirtualBuffer
+本来就把这个量全量 commit，非新增负担；#4219 的低内存收益主要在 CPU 侧页表，保留）。
+
+**根因二（次）：#4362 multi-range 解析的每 pass Query**。
+`ResolveMultiRangeStorage` 在 compute 存储 binding 每 dispatch（无早退）与
+graphics 目标变更时跑 `VirtualRangeCache::Query`；缓存未命中/被 deferred-unmap
+驱逐时走 `GetSubmappedRange` 全程遍历。修复：入口加 **O(1) 大页连续性闸门**
+`MemoryManager::IsBigPageContiguousRange`（相邻大页 dev 基址差恰为 big_page_size、
+页内连续位为 1、且全部已映射 ⇒ 必然单段 backing ⇒ 跳过 Query 走经典单范围路径）；
+sparse 游戏（MH Sunbreak 类）不满足闸门，照旧走上游 Query，语义不变。
+
+**修复验收（fix/dense-bigtable → cherry-pick `b362a07ccd`+`c0cad6c673`；
+实测产物 = fix 分支 tip `8a273797d3`，sha256 887394a9...）**：
+- 微观：**draw 六段全回 parity**（resolve 709→594 vs A 581、configure_tail 2202→1997
+  vs A 2039、geometry_setup 270→221 vs A 225、prologue 783 vs 816）。
+- 宏观：修复臂 vs A 臂 5 对中位 **0.9692**（1.0104/0.9624/0.9692/0.9547/0.9738）。
+- **当日噪声底校准（同二进制 A/A）**：修复版复制第二安装位，同版本交错 3 对
+  0.9715/0.9914/0.9903 中位 **0.9903** —— 即当日条件下 B 位存在 ~1% 系统性偏低
+  + ±1-2% 档位翻转噪声；修正后真实残差 ≈ 0.9692/0.9903 ≈ **0.98（≤2%，
+  位于 PrepareDraw 之外）**。较原始 -7.3% 已收回约五分之四（~1.9ms/帧）。
+- 中间探针存档：multirange 盲旁路单独 = 0.9477（2 对）；旁路+dense 叠加 = 1.0153
+  （1 对，晨）。dense 单独 = 0.9516（3 对）。
+- 图像 QA：game_shot 双臂背靠背各 3 张（22:15 夜卡卡利科水塘）；shot_compare
+  WARN（mean 1.8-4.8 / bad% 1.8-9.5）但双臂 MCP 目检均干净（水面/植被/HUD/火把
+  正常，无黑块花屏；diff 来源=动画相位 + 角色装备随游戏内天数推进的正常变化）。
+
+**残留与后续（≤2%，PrepareDraw 外）**：候选 = ①小页映射的 SSBO 绑定不过闸门仍
+走 Query；②CPU 页表 #4219 8B 紧凑条目使 JIT 查表路径每次多 mask+符号扩展+marked
+测试（fastmem 命中不受影响，fastmem_faults 两臂持平可佐证）；③#4422 RDTSC 时基。
+均留档，性价比待估。
+
+**坑与教训**：
+- bench VOID "Required QA capture failed" 复现一次（§35.1 的 perf-overlay ini 病，
+  本次 ini 双行正常、重试即恢复，判定为窗口时序瞬态）。
+- 晨间档位摆动大（同臂 A 自身 33.3↔36.8 = ±5%），单对结论不可靠；**同二进制 A/A
+  校准噪声底**是判读 <3% 差异的新工具（本轮新增）。
+- merge 引入 ENABLE_RESHADE 默认 ON：A/B 对比时显式 OFF 才是特性对等；若日后
+  想启用 ReShade，需重估其对帧率的影响。
+- 工具：`tools/prof/ab_diag_diff.py`（两臂 diag 家族尾窗均值对比，本轮微观归因主力）。

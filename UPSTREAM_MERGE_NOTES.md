@@ -17,7 +17,7 @@
 | 提交 | PR | 内容 |
 |---|---|---|
 | `9a30172e45` | #4158 | **dynarmic 非独占读写 fallback 合并**。统一 u8/u16/u32/u64 四种尺寸的内存 Read/Write callback 为公共过程，减少不同尺寸访问间的代码跳转；多数尺寸可在一个 u64 寄存器内传递，改善 x64/ARM64 codegen。这是 guest 内存访问慢路径（fastmem miss / 越界兜底）的热点，对 CPU 重载场景有直接收益。 |
-| `5f142c7926` | #4219 | **页表分配优化**。page entry 32B→8B；`VirtualBuffer` 重写为对大零区高效的分配（即后来抽出 `SparseLargeVector` 的前身）；CPU 页表 reserve 4GiB→1GiB、实际 commit 至多 ~8MiB；GPU 侧 `big_page_table_dev` 同步换成 `SparseLargeVector<u32>`。副作用收益：Windows 低内存机器启动 committable 从 ~10GiB 降到实际用量，不再拖累其他进程。**本仓库影响**：与我们 memory_manager 里的 WaitForDrawResolve 屏障无冲突（不同区域）。 |
+| `5f142c7926` | #4219 | **页表分配优化**。page entry 32B→8B；`VirtualBuffer` 重写为对大零区高效的分配（即后来抽出 `SparseLargeVector` 的前身）；CPU 页表 reserve 4GiB→1GiB、实际 commit 至多 ~8MiB；GPU 侧 `big_page_table_dev` 同步换成 `SparseLargeVector<u32>`。副作用收益：Windows 低内存机器启动 committable 从 ~10GiB 降到实际用量，不再拖累其他进程。**本仓库影响**：与我们 memory_manager 里的 WaitForDrawResolve 屏障无冲突（不同区域）。**2026-09-27 实测**：GPU 侧 sparse 化是 merge 后 -7.3% 回归的主因（Windows 读路径每次翻译多 bounds 检查 + committed 位图原子依赖加载；详见 PROFILE §35.4），本地已用 dense `DenseU32Table` 恢复单次解引用读（`b362a07ccd`）；CPU 侧页表保留上游方案。 |
 | `38df54edfe` | #4471 | **SparseLargeVector decommit + 零区首页修复**（#4219 引入容器的跟进）：零区首页未正确清零的正确性修复 + 未用页物理内存归还（decommit）。 |
 | `4fe5f62c38` | #4446 | **A64 vaddr 查找符号扩展修复 + x64 优化**（#4415/#4444 的 A64 移植）。 |
 | `6374f7f51f` | #4448 | 上条的**部分回退**：回退破坏 MK8D 的 2 行（高地址边界处理）。净效果 = 符号扩展修复保留 + 部分查找优化保留。 |
@@ -29,11 +29,17 @@
 **本区间的实测结论**（PROFILE §35.1）：机器静置正常时合并版 ~44 fps 与历史持平，
 无回归。（首轮 A/B 的 +7.5% 是机器累积退化时段测的，作废。）
 
+> **2026-09-27 勘误（PROFILE §35.4）**：严格交错对复测证实该区间存在 **-7.3%
+> 宏观回归**（B/A 中位 0.9269），§35.2 的"无回归"结论作废。主因 = #4219 GPU 侧
+> `big_page_table_dev` sparse 化的翻译读税，次因 = #4362 的每 pass multi-range
+> Query；本地修复两枚（`b362a07ccd` dense 大页表 + `c0cad6c673` 连续性闸门），
+> 修复后 draw 路径微观全回 parity、宏观残差 ≤2%（当日 A/A 噪声底 0.9903 校准）。
+
 ### B. GPU / 视频核心（正确性为主，部分与我们改动面相交）
 
 | 提交 | PR | 内容 |
 |---|---|---|
-| `a538cd9aff` | #4362 | **sparse multi-range storage buffer**。修 SSBO 跨非连续 GPU 页时按连续缓冲读错字节（MH Sunbreak 顶点爆炸/z-fighting 的根因）。引入 `VirtualRangeCache`（惰性向 MemoryManager 查 submapped ranges + deferred unmap 驱逐）与 `vk_multi_range_buffer`（sparse VkBuffer 别名或 gather-copy 呈现给 shader）。**本仓库影响**：`FindBuffer/CreateBuffer` 增加 `sparse_compatible` 第三参；`Binding` 增加 `gpu_addr/segment_first/segment_count`；storage binding 每 pass 走 `ResolveMultiRangeStorage`。我们的 serial-cut 早退与它的交互解法 = 早退追加 `segment_count == 0` 条件（PROFILE §35 冲突 3，stale 池索引隐患）。 |
+| `a538cd9aff` | #4362 | **sparse multi-range storage buffer**。修 SSBO 跨非连续 GPU 页时按连续缓冲读错字节（MH Sunbreak 顶点爆炸/z-fighting 的根因）。引入 `VirtualRangeCache`（惰性向 MemoryManager 查 submapped ranges + deferred unmap 驱逐）与 `vk_multi_range_buffer`（sparse VkBuffer 别名或 gather-copy 呈现给 shader）。**本仓库影响**：`FindBuffer/CreateBuffer` 增加 `sparse_compatible` 第三参；`Binding` 增加 `gpu_addr/segment_first/segment_count`；storage binding 每 pass 走 `ResolveMultiRangeStorage`。我们的 serial-cut 早退与它的交互解法 = 早退追加 `segment_count == 0` 条件（PROFILE §35 冲突 3，stale 池索引隐患）。**2026-09-27 实测**：compute 存储 binding 每 dispatch 的 `ResolveMultiRangeStorage`→`Query`（miss 时 `GetSubmappedRange` 全程遍历）是回归次因；本地已加 O(1) 大页连续性闸门 `IsBigPageContiguousRange` 跳过必然单段的绑定（`c0cad6c673`，sparse 游戏照旧走上游路径；详见 PROFILE §35.4）。 |
 | `dbeb73ee01` | #4473 | **cpu buffer 修复 + kepler 上传 / maxwell 宏 dirty 跟踪修复**（UE5 崩溃向：Ender Magnolia 冲刺/野兽崩）。四件事：Kepler ComputeInline 的 dirty 跟踪跨 DMA continuation 与异步回读保留；Maxwell 宏在页粒度 CPU 上传期间保留 GPU-owned 子范围；DiscardWrite 不再用 64B 对齐范围清掉邻接宏参数；DMA Step 用 continuation 感知的 dirty 采样。**本仓库影响**：`SynchronizeBuffer` 上传循环改为排除 `gpu_modified_ranges` 中的 GPU-owned 子区——上传行为变化是我们 serial/uniform diag 重定基线的原因之一。 |
 | `9b64944480` | #4406 | channel_state 未初始化 SIGBUS 修复（`= nullptr`）。合并冲突点之一，双方保留。 |
 | `c95ad020fb` | #4395 | GPU 关闭/重置无限挂死修复（`NotifyShutdown` = request_stop + join）。**可能直接改善我们已知问题 1（master 优雅关闭偶发超时），值得回归观察。** |
