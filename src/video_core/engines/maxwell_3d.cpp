@@ -4,8 +4,11 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
 #include <cstring>
 #include <optional>
+#include <string>
+#include <utility>
 #include "common/assert.h"
 #include "common/bit_util.h"
 #include "common/scope_exit.h"
@@ -18,6 +21,7 @@
 #include "video_core/gpu.h"
 #include "video_core/memory_manager.h"
 #include "video_core/rasterizer_interface.h"
+#include "video_core/serial_diag.h"
 #include "video_core/textures/texture.h"
 
 namespace Tegra::Engines {
@@ -307,6 +311,36 @@ void Maxwell3D::ProcessDirtyRegisters(u32 method, u32 argument) {
     }
     regs.reg_array[method] = argument;
     ++change_generation;
+    // (local-only) EDEN_SERIAL_DIAG probe: histogram of value-changing
+    // register writes, to classify per-draw changers as key-relevant or not.
+    if (VideoCommon::SerialDiagEnabled()) {
+        static std::array<u64, Regs::NUM_REGS> diag_reg_writes{};
+        static u64 diag_writes{0};
+        ++diag_reg_writes[method];
+        if (++diag_writes % 1000000 == 0) {
+            std::array<std::pair<u64, u32>, 16> top{};
+            for (u32 index = 0; index < Regs::NUM_REGS; ++index) {
+                for (std::size_t slot = 0; slot < top.size(); ++slot) {
+                    if (diag_reg_writes[index] > top[slot].first) {
+                        for (std::size_t move_down = top.size() - 1; move_down > slot;
+                             --move_down) {
+                            top[move_down] = top[move_down - 1];
+                        }
+                        top[slot] = {diag_reg_writes[index], index};
+                        break;
+                    }
+                }
+            }
+            std::string out{"RegWrite diag: writes=" + std::to_string(diag_writes)};
+            for (const auto& [count, index] : top) {
+                if (count == 0) {
+                    break;
+                }
+                out += fmt::format(" {:04x}={}", index, count);
+            }
+            LOG_INFO(HW_GPU, "{}", out);
+        }
+    }
     RecordJournal(method, argument);
     for (auto const& table : dirty.tables) {
         const u8 flag = table[method];
