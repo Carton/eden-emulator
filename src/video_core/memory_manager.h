@@ -136,6 +136,15 @@ public:
     [[nodiscard]] bool IsContinuousRange(GPUVAddr gpu_addr, std::size_t size) const;
 
     /**
+     * Big-page fast check for the same property as IsContinuousRange, at 64KiB
+     * granularity: true when every big page covered by the range is mapped
+     * with an internally-continuous backing and adjacent pages are exactly
+     * big_page_size apart. Constant work per page via the dense dev table,
+     * so callers can skip a full submapped-range walk for the common case.
+     */
+    [[nodiscard]] bool IsBigPageContiguousRange(GPUVAddr gpu_addr, std::size_t size) const;
+
+    /**
      * Checks if a gpu region is mapped entirely.
      */
     [[nodiscard]] bool IsFullyMappedRange(GPUVAddr gpu_addr, std::size_t size) const;
