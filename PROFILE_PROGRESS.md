@@ -4580,3 +4580,48 @@ a7f3730f0b 增量（vk_pipeline_cache 闭包 13 步），均通过；B 臂 exe 2
 sha256 2743046e2bf7…）。
 
 **性能对比**：（机器有人连 VOID，等 hands-off 窗口——数据见下补）
+
+
+### §34.7 补全：memo 实测结论（2026-09-28 凌晨，黄昏水塘）
+
+**测量设置**：A 臂 = 冻结基线 619f1a2e05（F:/prof/ab_memo/bin，sha256 2743046e…），
+B 臂 = memo 移植+加固后（a7f3730f0b 二进制 c4de7f39…）。warmup 局后基线宏观
+35.16fps / luma 56.84；微观基线 pipeline_lookup_ns=337（1932 万次调用均值，
+SerialDraw prologue 家族）。
+
+**宏观 3 对交错：B/A = 1.0141 / 1.0160 / 1.0314，中位 1.0160**——看似 +1.6%。
+**但 A/A 定标（同二进制同位对 3 对）：1.0405 / 1.0220 / 0.9810，中位 1.0220，
+摆幅 ±4%**——A/B 差异完全落在当日噪声包络内（凌晨档位摆动大，与 §35.4 晨间
+教训同类）。**宏观结论：无可测量差异。**
+
+**微观 2 对交错（双臂 EDEN_SERIAL_DIAG=1）**：pipeline_lookup_ns 333 → 335
+（B/A=1.006，无变化）；其余段（resolve 0.979 / configure_tail 0.990 / prologue
+0.995）全在噪声带。null_pipeline 两臂均 0（无 memo 误命中 null 的回归信号）。
+
+**机制定位（本轮新增两个门控探针，见 050a4077b2）**：
+- PipelineMemo diag：17.07M 次调用命中 151,331，**命中率 0.89%**；未命中归因
+  miss_gen=98.7%、miss_state(engine_state)=0.4%、topo/flag/engine=0；
+  gen 每 5000 次调用涨 ~5.5 万——**每 draw ~11 个寄存器变值**。
+- RegWrite 直方图（+ 编译期 offsetof 映射）识别变值者：const_buffer(0x8E0-4，
+  47.6%)/draw 参数(0x5F3)/bind_groups(0x904/0x924)/zcull(0x7C1/3) = **key 无关**；
+  但 vertex_attrib_format(0x45A/0x45B/0x460)+vertex_streams[1-3](0x702/4/6) =
+  **每 draw ~1.3 次 key 输入真变值**。
+- ⇒ **"连续同 key 的 draw"在该 workload 根本不存在**：管线 key 每 draw 真的在变
+  （Next() transition 表正是为此设计）。memo 命中率为 workload 特性所限，非实现
+  缺陷。master 版"rotation 尖刺 -79%/-70%、median neutral"同源——收益只存在于
+  状态重复的尖刺时段，稳态水塘没有该模式。
+
+**key-relevant generation 方案的裁决：不做**。即便构造"仅 key 输入变值才 bump"的
+精细代数，每 draw ~1.3 次 key 真变值使命中率天花板仍≈0；要收割 state.Refresh 的
+~250ns/draw 只能走"Refresh 结果缓存+输入区哈希"路线（工程量与 key 完备性风险
+远超 memo，宏观上限 <1%），不立项。
+
+**分支处置**：memo 保留在 test/p2-draw-resolver（astra 两轮 PASS；守卫开销
+~2ns/draw；尖刺时段或有收益，稳态无害）。探针保留（EDEN_SERIAL_DIAG 门控，
+未来 memo 类工作直接观测面）。
+
+**master 侧留档（用户暂缓修复）**：fcac5d10fd+cb3c71e1de 存在三处 p2 版已堵、
+master 版未堵的洞——①HLE_BindShader 直设 Shaders flag 不 bump generation（memo
+不查 flag→陈旧管线窗口）；②topology/engine_state 经宏参数路径不可见；③失败后
+旧标签复活（同代数换 shader+异步编译未完成时返回旧管线）。且本轮证明其稳态收益
+≈0——修复价值与存在价值都待重估。
