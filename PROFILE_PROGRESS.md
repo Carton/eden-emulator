@@ -4627,6 +4627,13 @@ master 版未堵的洞——①HLE_BindShader 直设 Shaders flag 不 bump gener
 ≈0——修复价值与存在价值都待重估。
 
 
+**勘误（2026-09-28，revert 98a3bbce2d）**：上段"memo 保留在分支"的处置已被用户
+推翻——既然实测无收益（宏微观+命中率三链一致、根因为 workload 特性），memo 及
+其加固、探针全部从分支 revert（85fd6e38c4 / a7f3730f0b / 050a4077b2 三枚一并
+回退，src/ 回到与 619f1a2e05 逐字节一致）。探针如未来需要可从历史复活。调查
+数据与结论（本节主体）保留有效。
+
+
 ## 35. origin/master 合并轮（2026-09-26：74ccea3def → bebc19da32，78 commits）
 
 **动机与范围**：upstream 累积 78 提交，含多项性能与稳定性内容；merge 进
