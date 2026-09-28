@@ -389,10 +389,6 @@ void HLE_TransformFeedbackSetup::Execute(Core::System& system, Engines::Maxwell3
     maxwell3d.JournalWord(regs.transform_feedback.buffers[1].start_offset, 0);
     maxwell3d.JournalWord(regs.transform_feedback.buffers[2].start_offset, 0);
     maxwell3d.JournalWord(regs.transform_feedback.buffers[3].start_offset, 0);
-    // The journaled feedback state feeds FixedPipelineState (xfb_enabled bit
-    // and xfb_state) but bypasses ProcessDirtyRegisters, so the register
-    // generation cannot see it; force pipeline memos to re-key.
-    maxwell3d.BumpChangeGeneration();
     maxwell3d.JournalWord(regs.upload.line_length_in, 4u);
     maxwell3d.JournalWord(regs.upload.line_count, 1u);
     maxwell3d.JournalWord(regs.upload.dest.address_high, parameters[0]);

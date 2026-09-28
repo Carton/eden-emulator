@@ -11,7 +11,6 @@
 #include <memory>
 #include <span>
 #include <thread>
-#include <utility>
 #include <vector>
 #include <bit>
 #include <numeric>
@@ -25,7 +24,6 @@
 #include "shader_recompiler/frontend/maxwell/control_flow.h"
 #include "shader_recompiler/frontend/maxwell/translate_program.h"
 #include "shader_recompiler/program_header.h"
-#include "video_core/serial_diag.h"
 #include "video_core/dirty_flags.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
@@ -555,64 +553,9 @@ PipelineCache::~PipelineCache() {
 
 GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
 
-    // (local-only) memo probe counters, gated by EDEN_SERIAL_DIAG: hit rate
-    // and which guard rejects the hit. Zero cost and zero output when off.
-    static u64 diag_calls{0}, diag_hits{0}, diag_miss_gen{0}, diag_miss_engine{0},
-        diag_miss_topo{0}, diag_miss_state{0}, diag_miss_flag{0}, diag_last_gen{0};
-    const bool memo_diag = VideoCommon::SerialDiagEnabled();
-
-    // (local-only) Nothing the pipeline key depends on has changed since it
-    // was last resolved: no register value (generation), same engine (channel
-    // switches carry independent per-channel counters), no pending
-    // out-of-band shader invalidation (HLE BindShader mutates stage config
-    // through the journal and only raises this flag), the same draw topology
-    // (HLE draw macros take it from macro parameters rather than registers)
-    // and the same engine hint (extended HLE draws toggle it around the draw;
-    // it feeds the key's app_stage field). Stage hashes, fixed state and
-    // therefore the resulting pipeline are identical; skip stage refresh,
-    // fixed-state refresh and the transition/map key compares. A hit still
-    // runs BuiltPipeline, so async build completion is observed per draw.
-    const u64 generation{maxwell3d->ChangeGeneration()};
-    const auto topology{maxwell3d->draw_manager.draw_state.topology};
-    const auto engine_state{maxwell3d->engine_state};
-    const bool memo_hit = generation == key_build_gen && maxwell3d == key_build_engine &&
-                          topology == key_topology && engine_state == key_engine_state &&
-                          !maxwell3d->dirty.flags[VideoCommon::Dirty::Shaders];
-    if (memo_diag) {
-        ++diag_calls;
-        if (memo_hit) {
-            ++diag_hits;
-        } else {
-            if (generation != key_build_gen) {
-                ++diag_miss_gen;
-            } else if (maxwell3d != key_build_engine) {
-                ++diag_miss_engine;
-            } else if (topology != key_topology) {
-                ++diag_miss_topo;
-            } else if (engine_state != key_engine_state) {
-                ++diag_miss_state;
-            } else {
-                ++diag_miss_flag;
-            }
-        }
-        if (diag_calls % 5000 == 0) {
-            LOG_INFO(Render_Vulkan,
-                     "PipelineMemo diag: calls={} hits={} miss_gen={} miss_engine={} "
-                     "miss_topo={} miss_state={} miss_flag={} gen={} gen_delta={}",
-                     diag_calls, diag_hits, diag_miss_gen, diag_miss_engine, diag_miss_topo,
-                     diag_miss_state, diag_miss_flag, generation,
-                     generation - std::exchange(diag_last_gen, generation));
-        }
-    }
-    if (memo_hit) [[likely]] {
-        return current_pipeline ? BuiltPipeline(current_pipeline) : nullptr;
-    }
-    // The full path is committed: drop the memo tags before resolving, so any
-    // outcome other than a successful re-resolution (unreadable shader memory,
-    // async build in flight, cache miss) cannot reactivate the previous
-    // association on the next unchanged draw - the next draw retries in full.
-    key_build_gen = 0;
-
+    // Shader invalidation, HLE writes, topology and channel changes are not
+    // all represented by Maxwell3D's register generation. Refresh the key
+    // before using the existing transition cache.
     if (!RefreshStages(graphics_key.unique_hashes)) {
         current_pipeline = nullptr;
         return nullptr;
@@ -623,25 +566,10 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
         GraphicsPipeline* const next{current_pipeline->Next(graphics_key)};
         if (next) {
             current_pipeline = next;
-            key_build_gen = generation;
-            key_build_engine = maxwell3d;
-            key_topology = topology;
-            key_engine_state = engine_state;
             return BuiltPipeline(current_pipeline);
         }
     }
-    GraphicsPipeline* const pipeline{CurrentGraphicsPipelineSlowPath()};
-    if (pipeline) {
-        // Only memoize successful resolution. A null result (async build in
-        // flight or a cache miss) leaves the memo invalidated so the next
-        // draw retries the full path, both to pick up the finished build and
-        // to avoid returning a pipeline keyed at the previous state.
-        key_build_gen = generation;
-        key_build_engine = maxwell3d;
-        key_topology = topology;
-        key_engine_state = engine_state;
-    }
-    return pipeline;
+    return CurrentGraphicsPipelineSlowPath();
 }
 
 GraphicsPipeline* PipelineCache::TryGraphicsPipelineForParser() {
@@ -662,10 +590,6 @@ GraphicsPipeline* PipelineCache::TryGraphicsPipelineForParser() {
         return nullptr;
     }
     current_pipeline = next;
-    // The parser republished the pipeline for the token job's key; the
-    // association the memo tags describe is gone. Invalidate them - the GPU
-    // thread re-keys at its next full lookup.
-    key_build_gen = 0;
     return next;
 }
 
