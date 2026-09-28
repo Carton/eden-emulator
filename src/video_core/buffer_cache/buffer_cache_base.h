@@ -323,6 +323,7 @@ public:
 
     std::recursive_mutex mutex;
     Runtime& runtime;
+    u32 uniform_buffer_alignment_cache = 1;
     bool any_buffer_uploaded = false;
 
 private:
