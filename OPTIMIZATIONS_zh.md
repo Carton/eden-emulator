@@ -284,3 +284,23 @@ Qt 6.11.1 静态 / RelWithDebInfo。
 | f7196e3675 | perf | 状态与绑定冗余消除 | 9aa4ce0921 5da3c43261 |
 | 4a2deae2b6 | perf | transition 键哈希预计算 | be3e692dac 9af2007176 |
 | 93ba41b490 | perf | 地址翻译冗余消除 | 18aaa38cef 74d5550276 e7c1484690 e43f875f75 814f80c107 8398d87199 |
+
+---
+
+## 9. GPU 线程提交的 review 轮（2026-09-26，4 个 fix 提交）
+
+六个 GPU 线程相关提交（§3.1-§3.3 及 TBO 格式、ASTC 零填、vi 配速三个 fix）
+经静态 review + 两轮验证。结论全部先对照代码核实再修复：
+
+| 提交 | 修复内容 |
+|---|---|
+| 50e49b3062 | §3.1 保留的 buffer id 跳过了 `WaitForGpuFenceIfNeeded`（它在 FindBuffer 内部）；保留路径重新应用，Accurate/Strict fence 模式下重复绑定不再丢等待。 |
+| 33eac8c57d | §5 的 ASTC 零填无条件执行，动态纹理 re-decode 时会把现役有效内容抹成零，直到解码落地前所有采样都读到黑——首解码仍零填，re-decode 保留旧内容（`HostInitialized` 标志）。这是游玩中偶发单帧黑闪的最可能来源。 |
+| ca3b3a3efb + d27e9ab0f8 | §3.3 uniform 流式快路径原来比较端点翻译；改为单页界判定（`(addr % page) + size <= page`，数学上证明无中间页）+ 空指针检查。成本不变，多页 uniform 走页游走。 |
+
+备注：
+- 暂缓的同形机会：compute 侧 SSBO/TBO id 保留（需先补非活跃 channel 的
+  失效覆盖）、真正的一次翻译 uniform 路径、DMA 图像重复 touch 守卫、
+  ZeroUploadCopies 与 ConvertImage 布局计算去重。
+- vi 配速中 game-paced 解锁提交的因子（0.01→0.1）确认为原提交的有意
+  行为，非缺陷。

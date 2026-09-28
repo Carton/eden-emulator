@@ -334,3 +334,25 @@ static Qt 6.11.1 / RelWithDebInfo.
 | f7196e3675 | perf | state/binding redundancy removal | 9aa4ce0921 5da3c43261 |
 | 4a2deae2b6 | perf | transition-key hash precompute | be3e692dac 9af2007176 |
 | 93ba41b490 | perf | address-translation redundancy elimination | 18aaa38cef 74d5550276 e7c1484690 e43f875f75 814f80c107 8398d87199 |
+
+---
+
+## 9. Review round on the GPU-thread commits (2026-09-26, 4 fix commits)
+
+The six GPU-thread-related commits (§3.1-§3.3 plus the TBO-format, ASTC
+zero-fill and vi-pacing fixes) went through a static review with two
+verification rounds. Findings, all confirmed against the code before fixing:
+
+| Commit | Fixes |
+|---|---|
+| 50e49b3062 | §3.1's retained buffer ids skipped `WaitForGpuFenceIfNeeded` (it lives inside FindBuffer); the retained path re-applies it, so Accurate/Strict fence modes keep their wait on repeated bindings. |
+| 33eac8c57d | The ASTC zero-fill (§5) ran unconditionally, so a re-decode of a dynamic texture replaced its valid host contents with zeros for the frame(s) until the decode landed — every draw sampling it read black. First decodes still zero-fill; re-decodes keep the previous contents (`HostInitialized` flag). This was the most likely source of the occasional single-frame black flash observed during gameplay. |
+| ca3b3a3efb + d27e9ab0f8 | §3.3's uniform stream fast path compared endpoint translations; now guarded by a single-page bound (`(addr % page) + size <= page`), which proves no middle page exists, plus a null check. Cost unchanged; multi-page uniforms take the page walk. |
+
+Notes:
+- Parked same-shape opportunities (not taken): compute-side SSBO/TBO id
+  retention (needs inactive-channel invalidation coverage first), a true
+  one-translation uniform path, the redundant DMA-image touch guard, and
+  deduplicating ZeroUploadCopies against ConvertImage's layout math.
+- The vi-pacing factor for game-paced unlocked submissions (0.01 -> 0.1) was
+  confirmed as intentional behavior from the original commit, not a defect.
