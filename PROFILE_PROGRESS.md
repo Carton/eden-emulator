@@ -4632,3 +4632,65 @@ master 版未堵的洞——①HLE_BindShader 直设 Shaders flag 不 bump gener
 其加固、探针全部从分支 revert（85fd6e38c4 / a7f3730f0b / 050a4077b2 三枚一并
 回退，src/ 回到与 619f1a2e05 逐字节一致）。探针如未来需要可从历史复活。调查
 数据与结论（本节主体）保留有效。
+
+
+---
+
+## 35. PGO 构建管线首轮验证（2026-09-29，local-only）
+
+**动机**：官方 nightly 声称 "PGO builds usually perform ~10-30% better"（无公开
+方法论）；GitHub `eden-emulator/Releases` 仓库已被 DMCA（HTTP 451），Forgejo
+docker 仓库只覆盖 Linux/Android 且无 PGO 逻辑——官方 Windows PGO 构建脚本在
+私有基础设施，本地自建 MSVC 管线验证。
+
+**方法**：master@09ad7d0029（与 build-vs22 同源码同日）。基线臂 = build-vs22
+（RelWithDebInfo，无 /GL）；PGO 臂 = build-pgo（全局 /GL +
+`/LTCG:PGINSTRUMENT` 链接 → TOTK 训练 13min（boot/读档/站桩/转镜头，pgosweep
+×6 落盘 ~96MB）→ pgomgr /merge（0% 溢出）→ `/LTCG:PGOPTIMIZE` 重链接，无
+pgort 依赖，烟测通过）。两臂 user 目录基准前 /MIR 对齐（消训练期着色器漂移），
+patch_input 打测试键，bench_ab 3 对 × 90s AB/BA 交错，全程 EDEN_IGNORE_INPUT=1
+（见坑 3）。
+
+**数据**（runs 归档 `F:\prof\runs\base-p*\, pgo-p*`，result.json 齐）：
+
+| 对 | base fps | PGO fps | B/A | base p95 | PGO p95 |
+|---|---|---|---|---|---|
+| 1 | 42.14 | 44.85 | 1.0643 | 33.33ms | 25.01ms |
+| 2 | 43.65 | 44.25 | 1.0137 | 25.02ms | 25.01ms |
+| 3 | 42.09 | 44.31 | 1.0527 | 33.33ms | 25.01ms |
+
+- **B/A 中位 1.0527（+5.3%）**；PGO 臂 p95 三对全落 25.0ms 档，基线臂 25/33.3
+  跳档；close_seconds 17.3-18.2s → 15.6-15.9s；PGO 臂帧率聚拢（44.25-44.85），
+  基线臂散（42.09-43.65）。
+- 与 §11/§34 瓶颈画像自洽：GPU 线程分支误预测仅 0.40% cycles（执行吞吐瓶颈），
+  PGO 分支布局红利有限；官方 10-30% 未复现，不外推。绝对 fps 42-44.9 与历史
+  44.1-44.4 不同日不可比（§0 场景漂移纪律），只认配对比值。
+- **混杂变量**：PGO 臂含 /GL（LTCG 独立贡献未分离，LTCG-only 对照臂待做）。
+
+**坑（全部已沉淀进 tools/prof/PGO.md）**：
+1. **eden 退出不落盘 .pgc**：干净退出 rc=0 也无产物；WM_CLOSE 挂死路径更无。
+   pgosweep 定点 sweep 是管线地基（pgo_train.py 已固化）。
+2. CMake 只设总 `CMAKE_EXE_LINKER_FLAGS` 时 RelWithDebInfo 默认 `/INCREMENTAL`
+   与 `/LTCG:PGINSTRUMENT` 冲突——必须走每配置变量并显式 `/INCREMENTAL:NO
+   /OPT:REF /OPT:ICF`。
+3. **幻影输入实锤**：GameSir 手柄（VID_3537&PID_1040）固件心跳使
+   GetLastInputInfo 恒为"刚有输入"→ 首轮 bench 6/6 局 VOID、训练按键校验必抛。
+   空闲探针（20s 双采样恒 0.0s）确诊。本套件新增 `EDEN_IGNORE_INPUT=1` 门控
+   旁路（input_tick / window_input.ps1 / env 白名单三处），代价 = 用户干扰
+   检测完全失效，仅无人值守使用；根治 = 拔手柄。
+4. MSYS 路径转换吃掉 robocopy `/E`（→`E:/`）与 `/DWIN32`；
+   `MSYS_NO_PATHCONV=1` 解决但 `cmd //c` 写法在此模式下失效。
+5. bash `$!` 非 Windows PID，taskkill 找不到进程留僵尸（曾残留 200MB 裸窗实例）；
+   一律 python `subprocess.Popen().pid`。
+6. 插桩版加载慢 2-5 倍，进游戏时序全部放大 + 暴力连点（多按 A 无害）。
+
+**资产落位（本轮新增，随 git 维护）**：
+- `tools/prof/pgo_train.py`：训练驱动（pgosweep 兜底，时序按插桩版校准，全参数 CLI）；
+- `tools/prof/PGO.md`：完整管线文档（configure 标志/训练/合并/重链接/基准/坑清单）；
+- `tools/prof/`：EDEN_PROF_REPO（跨 worktree 跑基准）、EDEN_IGNORE_INPUT、
+  EDEN_PGOSWEEP 三个门控 env（回归测试 tests/test_pgo_env.py，82 passed）；
+- `build-pgo/`（master 仓库侧）：PGO 构建目录 + bin 下 pgo_*.pgc/eden.pgd
+  （可增量 merge 再训）。
+
+**后续**：LTCG-only 对照臂分离 /GL 贡献；更长/多场景训练预期边际有限；
+src 大改后 profile 需重训（有效性窗口未测）。

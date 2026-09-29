@@ -15,6 +15,12 @@ from prof_common import HERE, data_dir, eden_dir, require_no_eden, writable_targ
 
 
 def input_tick() -> int:
+    # EDEN_IGNORE_INPUT bypasses the phantom-input watchdog (e.g. a controller
+    # whose firmware streams keep-alive input). User-interference detection is
+    # then disabled for the whole run: only use on an unattended machine.
+    if os.environ.get("EDEN_IGNORE_INPUT"):
+        return 0
+
     class LastInput(ctypes.Structure):
         _fields_ = [("size", ctypes.c_uint32), ("tick", ctypes.c_uint32)]
 

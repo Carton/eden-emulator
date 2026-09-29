@@ -41,6 +41,9 @@ check-full 包括格式检查、Ruff、公共纯逻辑模块 prof_common.py 的 
 | EDEN_NSP | EDEN_PROF_DATA/TOTK.nsp |
 | EDEN_PYTHON | cmd/bat 包装器使用的 Python，默认 python |
 | PM_EXE | G:\Tools\PresentMon\PresentMon-2.5.1-x64.exe |
+| EDEN_PROF_REPO | 不设 = 脚本所在仓库；跨 worktree 跑基准时指向源码仓库根 |
+| EDEN_IGNORE_INPUT | 不设 = 正常用户输入看门狗；=1 完全关闭检测（幻影输入设备时才用，见 PGO.md） |
+| EDEN_PGOSWEEP | pgo_train.py 用的 pgosweep.exe；默认 VS2022 14.44 工具集路径 |
 
 F:\Switch\Yuzu 及其解析后子路径禁止写入/作为运行目录。
 启动前要求 portable 配置存在且没有其他 eden.exe；不会按进程名清理游戏。
@@ -51,6 +54,9 @@ NVIDIA Overlay 只 WARN，不阻止、不关闭。LosslessScaling 会在 preflig
 终止（2026-09-20 用户定规：无需确认，杀不掉才 FAIL）。
 自动化期间用户键鼠活动会使当前测量作废；窗口消息投递成功只代表消息入队，
 不证明游戏已经接收，因此仍须检查截图和场景。
+幻影输入设备（实测 GameSir VID_3537 手柄固件心跳）会让 GetLastInputInfo 恒为
+"刚有输入"，全部局 VOID、按键注入校验必抛；优先拔设备，无法拔时才
+EDEN_IGNORE_INPUT=1（用户干扰检测同时失效，仅限无人值守）。
 重启后先 warmup；图像验收和背靠背 A/B 纪律见根目录 AGENTS.md。
 
 ## 基准与留档
@@ -91,6 +97,16 @@ restore 恢复这些键后立即返回，保留其他设置，成功后删除键
 原始 .bak-autotest 全文件备份不自动恢复：先人工比对，以免回滚后来的其他配置。
 改配置前须关闭 Eden。
 
+## PGO 构建管线
+
+    python pgo_train.py [--hold 300 --rotate-every 45]
+
+对插桩构建（/GL + /LTCG:PGINSTRUMENT，构建目录 build-pgo）做 TOTK 训练，
+pgosweep 定点落盘 pgo_*.pgc——eden 退出路径不执行 pgort atexit dump（干净
+退出也无 .pgc），pgosweep 是唯一可靠落盘手段。时序按插桩版 2-5 倍慢校准。
+完整管线（configure 标志、pgomgr 合并、PGOPTIMIZE 重链接、基准两臂、坑清单）
+见本目录 [PGO.md](PGO.md)；首轮数据见 PROFILE_PROGRESS.md §35。
+
 ## 辅助命令
 
 | 命令 | 用途 |
@@ -107,6 +123,7 @@ restore 恢复这些键后立即返回，保留其他设置，成功后删除键
 | gpu_watch.py [SECONDS] [--output FILE] | 每 GPU 每采样一行，拒绝覆盖现有文件 |
 | query_crash.ps1 [-Count N] [-Days N] | 先按 Eden Application Error 过滤再截取数量 |
 | sym.exe MODULE HEX_RVA | PDB 符号定位；编译 sym.cpp，使用加载后的实际基址 |
+| pgo_train.py [--hold N ...] | PGO 训练驱动（pgosweep 兜底落盘），用法见 PGO.md |
 
 ## ETW 与卡顿哨兵
 

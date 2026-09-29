@@ -74,6 +74,7 @@ cmake.exe --build build-vs22     # RelWithDebInfo，产物在 build-vs22/bin/
 | `build-vs22/bin/eden-cli.exe` | 命令行版（**TOTK 勿用**，shader 编译段崩溃，见已知问题） |
 | `build-clang/` | 留待 clang 尝试 |
 | `eden-v0.2.1/build/bin/` | 冻结的历史基线（对照用） |
+| `../eden-emulator/build-pgo/bin/eden.exe` | PGO 优化版（+5.3% 中位，2026-09-29 首轮，§35）；插桩重训流程见 tools/prof/PGO.md；日常分析与 A/B golden 仍用 build-vs22 |
 
 ## 运行说明
 
@@ -195,4 +196,7 @@ cmake.exe --build build-vs22     # RelWithDebInfo，产物在 build-vs22/bin/
   静置自动轮：`tools/prof/quiet_watch.py`+sequence 文件；图像 QA：`tools/prof/shot_compare.py`；
   新局结果与 diag 留档：`F:\prof\runs\<label>-<id>\`（历史 bench_results.csv 不再改写）
 - trace 存档与脚本清单：PROFILE_PROGRESS.md §7
+- **PGO 构建管线：`tools/prof/PGO.md`**（插桩/训练/合并/重链接/基准全流程与坑）；
+  训练驱动 `tools/prof/pgo_train.py`；幻影输入（GameSer 心跳）绕行开关
+  `EDEN_IGNORE_INPUT=1` 仅限无人值守（代价：用户干扰检测失效）
 - 测试存档（水塘场景）在 build-vs22/bin/user/nand；同步自 F:\Switch\Yuzu（只读源）

@@ -42,5 +42,9 @@ function Send-EdenKey([IntPtr]$Window, [int]$Vk, [int]$Scan, [int]$Milliseconds)
             throw 'WM_KEYUP failed'
         }
     }
-    if ([EdenInput]::LastInput() -ne $mark) { throw 'User input invalidates test window' }
+    # EDEN_IGNORE_INPUT: skip the global-input check (phantom-input devices);
+    # same trade-off as eden_session.input_tick - detection is fully disabled.
+    if (-not $env:EDEN_IGNORE_INPUT -and [EdenInput]::LastInput() -ne $mark) {
+        throw 'User input invalidates test window'
+    }
 }
