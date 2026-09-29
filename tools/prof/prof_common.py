@@ -13,7 +13,9 @@ import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-REPO = HERE.parents[1]
+# EDEN_PROF_REPO lets a foreign checkout (e.g. the master worktree) run this
+# suite against its own builds while keeping scripts from one maintained home.
+REPO = Path(os.environ.get("EDEN_PROF_REPO", str(HERE.parents[1])))
 TITLE = "0100F2C0115B6000"
 
 
@@ -70,7 +72,14 @@ def positive_int(value: str) -> int:
 
 def experiment_env(overrides: dict[str, str]) -> dict[str, str]:
     """A/B arms must not inherit another experiment's EDEN switches."""
-    paths = {"EDEN_DIR", "EDEN_NSP", "EDEN_PROF_DATA", "EDEN_PYTHON"}
+    paths = {
+        "EDEN_DIR",
+        "EDEN_NSP",
+        "EDEN_PROF_DATA",
+        "EDEN_PYTHON",
+        "EDEN_PROF_REPO",
+        "EDEN_IGNORE_INPUT",
+    }
     result = {k: v for k, v in os.environ.items() if not k.startswith("EDEN_") or k in paths}
     result.update(overrides)
     return result
