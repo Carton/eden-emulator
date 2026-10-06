@@ -1345,20 +1345,19 @@ u64 TextureCache<P>::GetScaledImageSizeBytes(const ImageBase& image) {
 template <class P>
 void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
     UNIMPLEMENTED_IF(False(image.flags & ImageFlagBits::Converted));
-    LOG_INFO(HW_GPU, "Queuing async texture decode");
 
-    image.flags |= ImageFlagBits::IsDecoding;
-    auto decode = std::make_unique<AsyncDecodeContext>();
-    auto* decode_ptr = decode.get();
-    decode->image_id = image_id;
-    async_decodes.push_back(std::move(decode));
+    // Record the refresh demand before anything else: RefreshContents already
+    // cleared CpuModified, and every early return below must leave the demand
+    // so a later use retries the decode with the newest contents.
+    image.flags |= ImageFlagBits::NeedsDecode;
 
     // Zero-fill the image before its first decode only: decoded contents are
     // uploaded in a later frame by TickAsyncDecode, and until then draws
     // would sample never-written VRAM (stale garbage tiles, e.g. on loading
-    // screens). A re-decode of an already-initialized image keeps the previous
-    // valid contents instead of exposing a black window for a frame (review
-    // finding P1-1).
+    // screens). This runs before admission so a deferred first decode still
+    // exposes a defined placeholder. A re-decode of an already-initialized
+    // image keeps the previous valid contents instead of exposing a black
+    // window for a frame (review finding P1-1).
     if (False(image.flags & ImageFlagBits::HostInitialized)) {
         auto zero_staging = runtime.UploadStagingBuffer(MapSizeBytes(image));
         std::memset(zero_staging.mapped_span.data(), 0, zero_staging.mapped_span.size_bytes());
@@ -1367,24 +1366,96 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
         image.flags |= ImageFlagBits::HostInitialized;
     }
 
-    std::vector<u8> local_unswizzle_data_buffer(image.unswizzled_size_bytes, 0);
-    Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead> swizzle_data(*gpu_memory, image.gpu_addr, image.guest_size_bytes, &swizzle_data_buffer);
-    auto copies = UnswizzleImage(*gpu_memory, image.gpu_addr, image.info, swizzle_data, local_unswizzle_data_buffer);
+    // Merge with the in-flight task for this image instead of stacking
+    // duplicates: TickAsyncDecode keeps NeedsDecode set when newer writes
+    // arrived in the meantime, so the next use queues exactly one decode of
+    // the latest contents.
+    if (True(image.flags & ImageFlagBits::IsDecoding)) {
+        return;
+    }
+    if (async_decode_cooldown > 0) {
+        return; // NeedsDecode stays; retried on a later use
+    }
+
     const size_t out_size = MapSizeBytes(image);
+    const size_t reserved_bytes = static_cast<size_t>(image.guest_size_bytes) + out_size;
+    if (async_decode_bytes + reserved_bytes > MAX_ASYNC_DECODE_BYTES ||
+        async_decodes.size() >= MAX_ASYNC_DECODE_ENTRIES) {
+        if (reserved_bytes > MAX_ASYNC_DECODE_BYTES) {
+            // A single image larger than the whole budget can never be
+            // admitted; decode it synchronously instead of deferring forever.
+            SynchronousUploadContents(image);
+            image.flags &= ~ImageFlagBits::NeedsDecode;
+            return;
+        }
+        ++async_decode_diag_deferred;
+        return; // NeedsDecode stays; admission retries on a later use
+    }
 
-    auto func = [out_size, copies, info = image.info,
-                 input = std::move(local_unswizzle_data_buffer),
-                 async_decode = decode_ptr]() mutable {
-        async_decode->decoded_data.resize_destructive(out_size);
-        std::span copies_span{copies.data(), copies.size()};
-        ConvertImage(input, info, async_decode->decoded_data, copies_span);
+    // Prepare the task snapshot. Host allocations here can throw under memory
+    // pressure; defer instead of letting the exception escape the GPU thread
+    // (an uncaught exception aborts the process).
+    bool pushed{};
+    try {
+        std::vector<u8> local_unswizzle_data_buffer(image.unswizzled_size_bytes, 0);
+        Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead> swizzle_data(*gpu_memory, image.gpu_addr, image.guest_size_bytes, &swizzle_data_buffer);
+        auto copies = UnswizzleImage(*gpu_memory, image.gpu_addr, image.info, swizzle_data, local_unswizzle_data_buffer);
 
-        // TODO: Do we need this lock?
-        std::unique_lock lock{async_decode->mutex};
-        async_decode->copies = std::move(copies);
-        async_decode->complete = true;
-    };
-    texture_decode_worker.QueueWork(std::move(func));
+        auto decode = std::make_unique<AsyncDecodeContext>();
+        decode->image_id = image_id;
+        decode->reserved_bytes = reserved_bytes;
+        auto* decode_ptr = decode.get();
+
+        auto func = [out_size, copies, info = image.info,
+                     input = std::move(local_unswizzle_data_buffer),
+                     async_decode = decode_ptr]() mutable {
+            try {
+                if (async_decode->cancelled.load(std::memory_order_relaxed)) {
+                    // The image died while this task sat in the queue; publish
+                    // the final state without allocating the decoded output.
+                    std::unique_lock lock{async_decode->mutex};
+                    async_decode->complete = true;
+                    return;
+                }
+                async_decode->decoded_data.resize_destructive(out_size);
+                std::span copies_span{copies.data(), copies.size()};
+                ConvertImage(input, info, async_decode->decoded_data, copies_span);
+
+                // TODO: Do we need this lock?
+                std::unique_lock lock{async_decode->mutex};
+                async_decode->copies = std::move(copies);
+                async_decode->complete = true;
+            } catch (...) {
+                // Allocation failures here used to escape the worker thread
+                // and abort the process (std::bad_alloc -> std::terminate ->
+                // abort). Publish a failed final state instead; the tick drops
+                // the result, keeps the previous image contents and retries.
+                std::unique_lock lock{async_decode->mutex};
+                async_decode->failed = true;
+                async_decode->complete = true;
+            }
+        };
+
+        LOG_INFO(HW_GPU, "Queuing async texture decode");
+
+        // Transactional submit: the flag flip, budget charge and queueing
+        // either all happen or none, or a throwing step would strand
+        // IsDecoding or leak a reservation.
+        image.flags |= ImageFlagBits::IsDecoding;
+        image.flags &= ~ImageFlagBits::NeedsDecode;
+        async_decode_bytes += reserved_bytes;
+        async_decodes.push_back(std::move(decode));
+        pushed = true;
+        ++async_decode_diag_queued;
+        texture_decode_worker.QueueWork(std::move(func));
+    } catch (...) {
+        if (pushed) {
+            async_decodes.pop_back();
+            async_decode_bytes -= reserved_bytes;
+            image.flags &= ~ImageFlagBits::IsDecoding;
+        }
+        image.flags |= ImageFlagBits::NeedsDecode; // NeedsDecode stays; retry later
+    }
 }
 
 template <class P>
@@ -1403,7 +1474,11 @@ void TextureCache<P>::QueueAsyncUnswizzle(Image& image, ImageId image_id) {
 
 template <class P>
 void TextureCache<P>::TickAsyncDecode() {
+    if (async_decode_cooldown > 0) {
+        --async_decode_cooldown;
+    }
     bool has_uploads{};
+    size_t tick_upload_budget = MAX_ASYNC_UPLOAD_BYTES_PER_TICK;
     auto i = async_decodes.begin();
     while (i != async_decodes.end()) {
         auto* async_decode = i->get();
@@ -1417,24 +1492,91 @@ void TextureCache<P>::TickAsyncDecode() {
         // Observing complete under the entry lock means the worker is done
         // with this entry. Do not touch or erase it while holding that lock:
         // erasing destroys the mutex itself.
-        if (!async_decode->image_id) {
+        // Every final state returns the admission reservation.
+        async_decode_bytes -= async_decode->reserved_bytes;
+        if (!async_decode->image_id || async_decode->cancelled.load(std::memory_order_relaxed)) {
             // The image was deleted while this decode was in flight; drop the
             // result instead of dereferencing a freed or recycled slot.
+            ++async_decode_diag_cancelled;
             i = async_decodes.erase(i);
             continue;
         }
+        if (async_decode->failed) {
+            // The worker ran out of memory decoding; keep the previous image
+            // contents and retry later. Cool down submission after repeated
+            // failures so a tight retry loop cannot thrash allocations.
+            Image& failed_image = slot_images[async_decode->image_id];
+            failed_image.flags &= ~ImageFlagBits::IsDecoding;
+            failed_image.flags |= ImageFlagBits::NeedsDecode;
+            ++async_decode_diag_failed;
+            if (++async_decode_failures >= 8) {
+                async_decode_cooldown = 300; // ~5 s at 60 fps
+                async_decode_failures = 0;
+            }
+            i = async_decodes.erase(i);
+            continue;
+        }
+        if (tick_upload_budget == 0) {
+            // Per-tick upload byte quota exhausted: hand the reservation back
+            // and retry the entry next tick, so a single frame cannot
+            // materialize the whole backlog as staging buffers at once.
+            async_decode_bytes += async_decode->reserved_bytes;
+            break;
+        }
         Image& image = slot_images[async_decode->image_id];
-        auto staging = runtime.UploadStagingBuffer(MapSizeBytes(image));
+        const size_t upload_size = MapSizeBytes(image);
+        auto staging = runtime.UploadStagingBuffer(upload_size);
         std::memcpy(staging.mapped_span.data(), async_decode->decoded_data.data(),
                     async_decode->decoded_data.size());
         image.UploadMemory(staging, FixSmallVectorADL(async_decode->copies));
         image.flags &= ~ImageFlagBits::IsDecoding;
+        // NeedsDecode may have been re-set by writes that arrived while this
+        // task was in flight; leave it set so the next use queues a fresh
+        // decode of the newer contents instead of showing a stale snapshot.
+        async_decode_failures = 0;
         has_uploads = true;
+        tick_upload_budget -= std::min(tick_upload_budget, upload_size);
+        ++async_decode_diag_uploads;
         i = async_decodes.erase(i);
     }
     if (has_uploads) {
         runtime.InsertUploadMemoryBarrier();
     }
+    TickAsyncDecodeDiagnostics();
+}
+
+template <class P>
+void TextureCache<P>::TickAsyncDecodeDiagnostics() {
+    // One watermark line every 600 frames (~10 s at 60 fps) while the async
+    // decode path has traffic, for diagnosing queue growth vs. drain rate.
+    if (frame_tick % 600 != 0) {
+        return;
+    }
+    const u64 sum = async_decode_diag_queued + async_decode_diag_uploads +
+                    async_decode_diag_cancelled + async_decode_diag_failed +
+                    async_decode_diag_deferred;
+    if (async_decodes.empty() && sum == async_decode_diag_last_sum) {
+        return; // no traffic since the last report
+    }
+    async_decode_diag_last_sum = sum;
+    LOG_INFO(HW_GPU,
+             "Async decode watermark: {} entries, {:.1} MiB reserved of {} MiB, "
+             "totals queued={} uploaded={} cancelled={} failed={} deferred={}",
+             async_decodes.size(), static_cast<double>(async_decode_bytes) / 1048576.0,
+             static_cast<double>(MAX_ASYNC_DECODE_BYTES) / 1048576.0,
+             async_decode_diag_queued, async_decode_diag_uploads,
+             async_decode_diag_cancelled, async_decode_diag_failed,
+             async_decode_diag_deferred);
+}
+
+template <class P>
+void TextureCache<P>::SynchronousUploadContents(Image& image) {
+    // The pre-async-decode upload path: decode on the GPU thread into a
+    // staging buffer. Used when a single image exceeds the whole async budget
+    // and could otherwise be deferred forever.
+    auto staging = runtime.UploadStagingBuffer(MapSizeBytes(image));
+    UploadImageContents(image, staging);
+    runtime.InsertUploadMemoryBarrier();
 }
 
 template <class P>
@@ -2358,14 +2500,16 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
     // Null out any in-flight async decode/unswizzle entries for this image so
     // TickAsyncDecode/TickAsyncUnswizzle drop them once the worker finishes,
     // instead of dereferencing this freed (and possibly recycled) slot. The
-    // walk is unconditional because QueueAsyncDecode has no re-queue guard, so
-    // an image can own several entries while its IsDecoding flag is already
-    // cleared. The decode worker never touches image_id, and entries are only
-    // erased after completion, so no locking is needed beyond
-    // texture_cache.mutex.
+    // walk is unconditional because QueueAsyncDecode merges per-image instead
+    // of re-queue guarding, so an image can own entries in different states.
+    // The atomic cancel also lets queued-but-not-started decode tasks skip
+    // the decode and its output allocation entirely under backlog pressure.
+    // The decode worker never touches image_id, and entries are only erased
+    // after completion, so no locking is needed beyond texture_cache.mutex.
     for (auto& decode : async_decodes) {
         if (decode->image_id == image_id) {
             decode->image_id = ImageId{};
+            decode->cancelled = true;
         }
     }
     for (auto& task : unswizzle_queue) {
