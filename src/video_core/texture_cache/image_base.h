@@ -49,6 +49,12 @@ enum class ImageFlagBits : u32 {
                                ///< QueueAsyncDecode zero-fill has run for this
                                ///< image, so sampling cannot read never-written
                                ///< VRAM between a re-queue and its upload.
+    NeedsDecode = 1 << 19, ///< A refresh of this image still owes an async
+                           ///< decode: the request was deferred (budget cap,
+                           ///< in-flight task, cooldown) or the in-flight
+                           ///< snapshot was overtaken by newer writes. Kept
+                           ///< until a decode of the latest contents is
+                           ///< successfully submitted.
 };
 DECLARE_ENUM_FLAG_OPERATORS(ImageFlagBits)
 

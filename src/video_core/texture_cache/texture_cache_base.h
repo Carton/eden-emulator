@@ -67,6 +67,13 @@ struct AsyncDecodeContext {
     boost::container::small_vector<BufferImageCopy, 16> copies;
     std::mutex mutex;
     std::atomic_bool complete;
+    bool failed = false;        // The worker caught an exception; drop the result
+                                // and let the tick requeue a retry.
+    std::atomic_bool cancelled{false}; // The image was deleted while this task was
+                                // queued; the worker skips the decode entirely.
+    size_t reserved_bytes = 0;  // Input snapshot + decoded output bytes charged
+                                // against the admission cap until this entry is
+                                // consumed by the tick.
 };
 
 using TextureCacheGPUMap = ::Common::unordered_map<u64, std::vector<ImageId>, Common::IdentityHash<u64>>;
@@ -421,6 +428,8 @@ private:
 
     void QueueAsyncDecode(Image& image, ImageId image_id);
     void TickAsyncDecode();
+    void TickAsyncDecodeDiagnostics();
+    void SynchronousUploadContents(Image& image);
 
     void QueueAsyncUnswizzle(Image& image, ImageId image_id);
     void TickAsyncUnswizzle();
@@ -516,6 +525,28 @@ private:
     std::vector<std::unique_ptr<AsyncDecodeContext>> async_decodes;
     Common::ThreadWorker texture_decode_worker{1, "TextureDecoder", {},
                                                Common::ThreadPlacement::Efficiency};
+
+    // Async decode admission control (see QueueAsyncDecode). Each task's input
+    // snapshot and decoded output are charged against the byte cap from submit
+    // until the tick consumes the entry, so a queue burst that outruns the
+    // single decode worker cannot grow host memory without bound: excess
+    // requests are deferred (ImageFlagBits::NeedsDecode) and retried on later
+    // use. Entries are also capped by count, and each tick uploads at most
+    // MAX_ASYNC_UPLOAD_BYTES_PER_TICK of completed results so one frame cannot
+    // materialize the whole backlog as staging buffers at once.
+    static constexpr size_t MAX_ASYNC_DECODE_BYTES = 384ULL * 1024 * 1024;
+    static constexpr size_t MAX_ASYNC_DECODE_ENTRIES = 192;
+    static constexpr size_t MAX_ASYNC_UPLOAD_BYTES_PER_TICK = 96ULL * 1024 * 1024;
+    size_t async_decode_bytes = 0;
+    u32 async_decode_failures = 0;
+    u32 async_decode_cooldown = 0; // frames to defer async submits after failures
+    // Watermark diagnostics, logged every 600 frames while there is traffic.
+    u64 async_decode_diag_queued = 0;
+    u64 async_decode_diag_uploads = 0;
+    u64 async_decode_diag_cancelled = 0;
+    u64 async_decode_diag_failed = 0;
+    u64 async_decode_diag_deferred = 0;
+    u64 async_decode_diag_last_sum = 0;
 
     std::deque<PendingUnswizzle> unswizzle_queue;
     u8 current_unswizzle_frame{};
