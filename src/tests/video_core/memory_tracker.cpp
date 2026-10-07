@@ -45,7 +45,18 @@ public:
     }
 
     void UpdatePagesCachedBatch(std::span<const std::pair<DAddr, size_t>> ranges, s32 delta) {
-        // TODO: for now assume fine?
+        ++batch_calls;
+        for (const auto& [addr, size] : ranges) {
+            UpdatePagesCachedCount(addr, size, delta);
+        }
+    }
+
+    [[nodiscard]] size_t BatchCalls() const noexcept { return batch_calls; }
+
+    void ClearUpdateCalls() {
+        update_calls = 0;
+        batch_calls = 0;
+        calls.clear();
     }
 
     [[nodiscard]] size_t UpdateCalls() const noexcept { return update_calls; }
@@ -68,6 +79,7 @@ private:
     ::Common::unordered_map<u64, int> page_table;
     std::vector<std::tuple<DAddr, u64, int>> calls;
     size_t update_calls = 0;
+    size_t batch_calls = 0;
 };
 
 } // Anonymous namespace
@@ -561,29 +573,65 @@ TEST_CASE("MemoryTracker: FlushCachedWrites batching") {
     RasterizerInterface rasterizer;
     std::optional<MemoryTracker> memory_track(rasterizer);
     memory_track->UnmarkRegionAsCpuModified(c, WORD * 2);
-    memory_track->CachedCpuWrite(c + PAGE, PAGE);
-    memory_track->CachedCpuWrite(c + PAGE * 2, PAGE);
-    memory_track->CachedCpuWrite(c + PAGE * 4, PAGE);
-    REQUIRE(rasterizer.UpdateCalls() == 0);
+
+    std::vector<Range> expected_ranges;
+    SECTION("Adjacent pages merge without filling gaps") {
+        memory_track->CachedCpuWrite(c + PAGE, PAGE);
+        memory_track->CachedCpuWrite(c + PAGE * 2, PAGE);
+        memory_track->CachedCpuWrite(c + PAGE * 4, PAGE);
+        expected_ranges = {{c + PAGE, PAGE * 2}, {c + PAGE * 4, PAGE}};
+    }
+    SECTION("Adjacent pages merge across a word boundary") {
+        memory_track->CachedCpuWrite(c + WORD - PAGE, PAGE);
+        memory_track->CachedCpuWrite(c + WORD, PAGE);
+        expected_ranges = {{c + WORD - PAGE, PAGE * 2}};
+    }
+
+    // CachedCpuWrite already disables CPU tracking. Re-enable it while the
+    // cached-write bits remain pending, so flushing must issue a batch update.
+    memory_track->UnmarkRegionAsCpuModified(c, WORD * 2);
+    const auto count_before = rasterizer.Count();
+    rasterizer.ClearUpdateCalls();
     memory_track->FlushCachedWrites();
-    // Now we expect a single batch call (coalesced ranges) to the device memory manager
-    REQUIRE(rasterizer.UpdateCalls() == 1);
+    REQUIRE(rasterizer.BatchCalls() == 1);
     const auto& calls = rasterizer.UpdateCallsList();
-    REQUIRE(std::get<0>(calls[0]) == c + PAGE);
-    REQUIRE(std::get<1>(calls[0]) == PAGE * 3);
+    REQUIRE(calls.size() == expected_ranges.size());
+    u64 changed_pages = 0;
+    for (size_t i = 0; i < expected_ranges.size(); ++i) {
+        REQUIRE(std::get<0>(calls[i]) == expected_ranges[i].first);
+        REQUIRE(std::get<1>(calls[i]) == expected_ranges[i].second);
+        REQUIRE(std::get<2>(calls[i]) == -1);
+        changed_pages += expected_ranges[i].second / PAGE;
+    }
+    REQUIRE(rasterizer.Count() == count_before - changed_pages);
+    REQUIRE(rasterizer.Count(c + PAGE * 3) == 1);
+    memory_track->FlushCachedWrites();
+    REQUIRE(rasterizer.BatchCalls() == 1);
+    memory_track->MarkRegionAsCpuModified(c, WORD * 2);
+    REQUIRE(rasterizer.Count() == 0);
 }
 
-TEST_CASE("DeviceMemoryManager: UpdatePagesCachedBatch basic") {
+TEST_CASE("DeviceMemoryManager: UpdatePagesCachedBatch unmapped ranges") {
     Core::DeviceMemory device_memory;
     Tegra::MaxwellDeviceMemoryManager manager(device_memory);
-    // empty should be a no-op
-    std::vector<std::pair<DAddr, size_t>> empty;
-    manager.UpdatePagesCachedBatch(empty, 1);
-
-    // small ranges should be accepted and not crash
     std::vector<std::pair<DAddr, size_t>> ranges;
-    ranges.emplace_back(0, Core::Memory::YUZU_PAGESIZE);
-    ranges.emplace_back(Core::Memory::YUZU_PAGESIZE, Core::Memory::YUZU_PAGESIZE);
+    SECTION("Empty batch") {}
+    SECTION("Zero-length range") {
+        ranges = {{PAGE, 0}};
+    }
+    SECTION("Unsorted adjacent ranges") {
+        ranges = {{PAGE, PAGE}, {0, PAGE}};
+    }
+    SECTION("Separated ranges") {
+        ranges = {{PAGE * 4, PAGE}, {0, PAGE}};
+    }
+    // No mappings and no registered processes: both update APIs must skip
+    // these ranges before accessing a process interface.
     manager.UpdatePagesCachedBatch(ranges, 1);
-    SUCCEED("UpdatePagesCachedBatch executed without error");
+    manager.UpdatePagesCachedBatch(ranges, -1);
+    for (const auto& [addr, size] : ranges) {
+        manager.UpdatePagesCachedCount(addr, size, 1);
+        REQUIRE(manager.GetPhysicalRawAddressFromDAddr(addr) == 0);
+    }
+    SUCCEED("Unmapped ranges remain unmapped without accessing a process");
 }
