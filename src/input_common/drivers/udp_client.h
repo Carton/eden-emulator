@@ -4,6 +4,7 @@
 #pragma once
 
 #include <optional>
+#include <thread>
 
 #include "common/common_types.h"
 #include "common/thread.h"
@@ -183,6 +184,7 @@ public:
 
 private:
     Common::Event complete_event;
+    std::thread job_thread;
 };
 
 void TestCommunication(const std::string& host, u16 port,
