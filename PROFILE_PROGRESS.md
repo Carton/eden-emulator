@@ -5149,3 +5149,8 @@ src 大改后 profile 需重训（有效性窗口未测）。
   水塘快照。新增可选 save_slot 配置：测试前原文件备份+源 hash，临时把完整 slot
   快照加载到 portable 测试 slot，退出后恢复。当前 prof.local 选择该水塘 slot_02；
   旧 current 与 archive 缩略图拼图在 prof-data 保存，原 archive 及日常安装未写入。
+- 现场证伪：该归档 AA/slot_02 载入后显示“初始空岛”，并非水塘。源归档标题
+  和缩略图判读不能保证地点；在 baseline 阶段终止拥有的 PID 16644，valid=false，
+  原 slot 文件自动恢复。不得将此局记为水塘测试。读 daily/master 保存缩略图后
+  也未找到可靠现成水塘快照；改从已验证村口存档进行受控步行定位并现场确认，
+  新增有界 --await-scene gate（最多300s）供 agent 设置场景，不能无限等待。

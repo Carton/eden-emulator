@@ -23,6 +23,12 @@ PATCH = {
     "player_0_button_a": '"engine:keyboard,code:88,toggle:0"',
     r"player_0_button_b\default": "false",
     "player_0_button_b": '"engine:keyboard,code:67,toggle:0"',
+    r"player_0_button_plus\default": "false",
+    "player_0_button_plus": '"engine:keyboard,code:77,toggle:0"',
+    r"player_0_button_r\default": "false",
+    "player_0_button_r": '"engine:keyboard,code:69,toggle:0"',
+    r"player_0_button_l\default": "false",
+    "player_0_button_l": '"engine:keyboard,code:81,toggle:0"',
     r"player_0_lstick\default": "false",
     r"player_0_rstick\default": "false",
     "player_0_rstick": (

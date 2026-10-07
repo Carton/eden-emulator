@@ -122,6 +122,11 @@ def main(argv=None):
         "--watch-seconds", type=positive_int, help="Must cover entry and all phases"
     )
     parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument(
+        "--await-scene",
+        action="store_true",
+        help="Allow agent positioning before probe; wait <=300s for run/scene-ready.json",
+    )
     args = parser.parse_args(argv)
     required = (
         args.entry_timeout
@@ -251,6 +256,18 @@ def main(argv=None):
                         raise RuntimeError(
                             f"Gameplay HUD absent after {args.entry_timeout}s; inspect entry shots"
                         )
+                    if args.await_scene:
+                        mark("scene_setup")
+                        log(
+                            f"SCENE_SETUP PID={game.pid}; waiting for {target / 'scene-ready.json'}"
+                        )
+                        scene_deadline = time.monotonic() + 300
+                        ready = target / "scene-ready.json"
+                        while not ready.is_file():
+                            if time.monotonic() >= scene_deadline:
+                                raise RuntimeError("Scene setup exceeded 300s")
+                            game.wait(1)
+                        record["scene_review"] = json.loads(ready.read_text(encoding="utf-8"))
                     mark("camera_probe")
                     before = shot("probe_before")
                     rot_window(game.pid, "right", 2)
