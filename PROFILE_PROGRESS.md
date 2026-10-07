@@ -5085,3 +5085,21 @@ src 大改后 profile 需重训（有效性窗口未测）。
   但 zlib 自身默认打开安装/导出包自测，导致安装步骤无产物而 find_package 失败。
   集成构建明确 ZLIB_BUILD_TESTING OFF，关闭依赖包的安装自测；Eden 自身的
   所有用例仍完整执行，不通过过滤排除失败用例。两轮日志分别保存，后续记录最终验收。
+
+
+- 最终源码版本 `9f281d362b`（含生产修复 `c7684a7b15`），MSVC RelWithDebInfo
+  GUI 和 tests 构建通过。修改 UDP 任务布局后已强制重编 input_common / yuzu /
+  tests 的对象目录，并 touch 明确包含 .inc 的 GPU memory manager 实例化文件；
+  最后一轮按新提交增量重建源码与版本信息。
+- 完整 Eden 回归：78 用例全部通过，3,884,117 断言通过；未排除任何 Eden
+  用例。CTest 当前只注册 Eden 测试目标并通过，zlib 包自身的安装自测已按上述
+  集成配置关闭。CoreTiming 按 lex 顺序（NoPausing 先运行）另验 2 用例 / 5 断言通过。
+- 可直接运行 `build-ab/bin/eden.exe`，匹配符号在同目录 `eden.pdb`；portable
+  `user/` 及已有配置路径保留。产物时间：exe/PDB 2026-10-07 11:40:52 +08:00，
+  tests 11:41:00 +08:00；生成的 GIT_REV 与源码版本一致。
+- exe SHA-256：`6236cdd3430475e67bba0ffa18e82f17364cc156c78889800037864df7c721a4`。
+  版本、exe/PDB/tests 指纹及测试统计保存于
+  `build-ab/test-fix-verification-20261007/build-manifest.json`；configure/build/
+  ctest/固定顺序计时测试的完整日志同目录，保留 ctest-first 等首轮失败日志。
+- 后续记录提交只补验证结果，不改源码；此构建尚未运行真实游戏长测或取得泄漏
+  曲线。用户可用 memory_watch.py 对该 GUI 进程采样；测试通过不代表内存泄漏已解决。
