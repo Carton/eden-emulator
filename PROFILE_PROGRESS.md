@@ -5133,3 +5133,7 @@ src 大改后 profile 需重训（有效性窗口未测）。
   20.5 GiB，无遗留 Eden/profiling Python（其他 Python 是 Blender/FreeCAD MCP）。
   Windows 分页文件当时 13,000 MiB；已向用户说明继续长测需要释放应用内存或授权
   调整分页文件。未关闭其他应用、未修改系统配置；当前尚未取得存档旋转结果。
+- 用户随后明确授权临时增大 F 盘分页文件后继续。读取原设置：AutomaticManagedPagefile
+  false，f:/pagefile.sys InitialSize=13000 / MaximumSize=30000 MiB。计划显式管理员
+  helper 调用 NtCreatePagingFile 即时扩至 32768 MiB，保留原启动设置；正常重启恢复
+  原范围，不由工具发起重启。helper/结果均在本仓库，尚待验证实时 commit limit。
