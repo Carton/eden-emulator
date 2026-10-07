@@ -5170,3 +5170,16 @@ src 大改后 profile 需重训（有效性窗口未测）。
   后半段和尾部静置；可选 report extra 生成 Matplotlib PNG/SVG，报告注明证据边界。
   全目录静态检查还有24项旧 IBS/诊断脚本风格问题，本次相关修改文件 Ruff 及公共模块
   strict mypy 通过；未把这些旧实验脚本风格清理混入当前游戏验证。
+- 用户明确本轮内存测试无需键盘/鼠标干扰检查；实际整局已显式 EDEN_IGNORE_INPUT=1，
+  游戏输入/旋转脚本和等待路径均遵守该环境变量。此要求适用于当前内存测试，
+  不用此局出 FPS 结论。用户于13:52要求暂停，按拥有的 PID148912 优雅停止；
+  GUI 未强杀，watcher status=target_exited，automation.lock 已清理。
+  36/60旋转窗口已完成（第37个启动因关窗失败），tail_idle 尚未开始；263份样本保留。
+  原slot48份文件恢复后逐份SHA256与备份一致，独立水塘fixture仍保留。
+  result.run_status=paused_by_user、valid=false；后续因主动停局产生的无渲染窗口错误
+  不表示游戏崩溃。pause-summary.json 区分用户暂停与完整失败局。
+  请求暂停前旋转样本窗12.70min：private14263.54→15119.72MiB（13.93→14.77GiB），
+  增量856.18MiB，OLS73.14MiB/min；出现约256MiB台阶，尚无完整旋转/末尾静置结果，
+  不能仅凭此认定泄漏或缓存。完整报告/曲线未生成，工作已暂停。
+  源码工具提交5b7cb7e0c9后回归100 passed/2 opt-in skipped；Windows API另开5 passed。
+  F盘实时分页文件仍为32768MiB，启动PagingFiles保持原13000/30000MiB；不自动重启。
