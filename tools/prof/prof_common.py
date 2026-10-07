@@ -23,7 +23,7 @@ def read_local_config() -> tuple[Path, dict[str, str]]:
             raise FileNotFoundError(f"Missing EDEN_PROF_CONFIG: {path}")
         return path.parent, {}
     values = json.loads(path.read_text(encoding="utf-8-sig"))
-    allowed = {"repo", "eden_dir", "data_dir", "nsp"}
+    allowed = {"repo", "eden_dir", "data_dir", "nsp", "save_slot"}
     if (
         not isinstance(values, dict)
         or set(values) - allowed
@@ -60,6 +60,12 @@ def eden_dir() -> Path:
 
 def game_path() -> Path:
     return configured_path("nsp", "EDEN_NSP", data_dir() / "TOTK.nsp")
+
+
+def save_slot() -> Path | None:
+    if "EDEN_SAVE_SLOT" not in os.environ and "save_slot" not in CONFIG:
+        return None
+    return configured_path("save_slot", "EDEN_SAVE_SLOT", Path())
 
 
 def writable_target(path: Path) -> Path:
@@ -114,6 +120,7 @@ def experiment_env(overrides: dict[str, str]) -> dict[str, str]:
         "EDEN_PYTHON",
         "EDEN_PROF_REPO",
         "EDEN_PROF_CONFIG",
+        "EDEN_SAVE_SLOT",
         "EDEN_IGNORE_INPUT",
     }
     result = {k: v for k, v in os.environ.items() if not k.startswith("EDEN_") or k in paths}

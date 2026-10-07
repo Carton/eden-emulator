@@ -10,6 +10,7 @@ def isolated_environment(tmp_path, monkeypatch):
     monkeypatch.setenv("EDEN_PROF_DATA", str(tmp_path / "archive"))
     monkeypatch.setenv("EDEN_DIR", str(tmp_path / "eden"))
     monkeypatch.setenv("EDEN_NSP", str(tmp_path / "game.nsp"))
+    monkeypatch.setenv("EDEN_SAVE_SLOT", str(tmp_path / "save-fixture"))
 
     def forbidden(*args, **kwargs):
         raise AssertionError("Unit test attempted a real subprocess; supply an explicit fake")

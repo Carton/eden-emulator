@@ -45,10 +45,11 @@ check-full 包括格式检查、Ruff、公共纯逻辑模块 prof_common.py 的 
 | EDEN_IGNORE_INPUT | 不设 = 正常用户输入看门狗；=1 完全关闭检测（幻影输入设备时才用，见 PGO.md） |
 | EDEN_PGOSWEEP | pgo_train.py 用的 pgosweep.exe；默认 VS2022 14.44 工具集路径 |
 | EDEN_PROF_CONFIG | 默认读取目标 worktree 根目录的 prof.local.json；可指向其他配置文件 |
+| EDEN_SAVE_SLOT | 可选完整 TOTK slot 目录；内存旋转测试临时加载该快照，退出后恢复原 slot 文件 |
 
 跨 worktree 优先复制 `prof.local.example.json` 到目标仓库根目录为 `prof.local.json`
 （已 gitignore）。填写 `eden_dir`、`data_dir`、`nsp`，可选 `repo` 指向源码 worktree。
-JSON 相对路径以配置文件所在目录为准，与调用时 cwd、分支无关；环境变量逐项优先。
+JSON 可选 save_slot 指向单一存档快照；相对路径以配置文件所在目录为准，与 cwd、分支无关；环境变量逐项优先。
 本目录脚本也可用 `EDEN_PROF_CONFIG` 绝对路径加载另一 worktree 配置。
 默认 build-vs22 仅兼容旧环境；不会自动选最新 exe 或强制切分支。
 `memory_watch.py` 默认输出同样使用配置。exe hash 与源码 HEAD 分开记录。
@@ -128,6 +129,9 @@ Form 是性能浮窗，不能作游戏内容/输入目标；game_shot 和共享 
 采样上限；失败保留 result.json/phases、watcher.log 和已有样本，并清理拥有的进程。
 目录含 memory/memory.csv、regions.jsonl、metadata.json 和 shots；每窗打印
 private bytes/系统 commit 余量。截图缺失、HUD/镜头验证失败或采样提前结束均失败退出。
+指定 save_slot 后，在无 Eden 时备份测试安装各用户 slot 的相关文件，把完整快照临时
+填入各 slot 保证默认读档一致；退出后原文件逐字节恢复，缺失文件删除，备份和源 hash 留档。
+只修改 portable 测试安装，源快照与日常安装只读。未设 save_slot 时使用当前默认存档。
 
 ## PGO 构建管线
 

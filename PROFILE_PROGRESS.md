@@ -5142,3 +5142,10 @@ src 大改后 profile 需重训（有效性窗口未测）。
 - 扩容后 smoke2 在截图阶段失败，完整清理。交叉读 game_shot.py 发现旧记录/共享
   shot_capture 错把 Form 性能浮窗当渲染窗；真正游戏窗为最大 eden-titled 子窗。
   前述以 Form 为目标的修正随即废弃，输入与截图统一采用 game_shot 的识别规则。
+- ae4915b6ab 的 smoke3 全流程通过，镜头 diff=0.0606，private 稳态约12.90 GiB，
+  GUI 正常退出，memory metadata target_exited；截图仍为村口桥（同 9/27 gqa），
+  并非 §23 所指水面占50-60%的原水塘。只算管线验收，不算目标场景长测。
+- 读取水塘 archive/2026-09-15_pond-round_18aaa38cef 的 save 缩略图，slot_02 才是
+  水塘快照。新增可选 save_slot 配置：测试前原文件备份+源 hash，临时把完整 slot
+  快照加载到 portable 测试 slot，退出后恢复。当前 prof.local 选择该水塘 slot_02；
+  旧 current 与 archive 缩略图拼图在 prof-data 保存，原 archive 及日常安装未写入。

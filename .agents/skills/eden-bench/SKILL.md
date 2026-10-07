@@ -15,6 +15,7 @@ description: Eden 模拟器（TOTK）本地 GUI 性能基准、输入配置、�
   PROFILE_PROGRESS 最新验证为准，不硬编码 worktree、分支或 build 目录。
   `prof.local.json` 放目标 worktree 根，示例 `tools/prof/prof.local.example.json`；
   填 eden_dir/data_dir/nsp，可选 repo。相对路径以 JSON 所在目录为准，env 优先。
+  内存实验可选 save_slot 指向完整 TOTK slot 快照；临时加载到测试安装并在退出后还原。
   跨 worktree 调用已有脚本时设置 EDEN_PROF_CONFIG 的绝对路径。
   没有配置才回退脚本仓库/build-vs22/bin；不要把此回退当作最新有效构建。
 - **脚本集：`tools/prof/`**（清单/淘汰名单/路径约定见 `tools/prof/README.md`；
@@ -49,6 +50,8 @@ memory_rot_run.py 默认限时读最新存档、双向预热、120s 基线、60x
 左右旋转、300s 静置；启动到退出全程 memory_watch 采样。先短测
 --baseline-sec 15 --rot-win 3 --rot-count 2 --tail-sec 15 验证管线。
 检查 shots 确为水塘，再使用同 PID 预热后的 private bytes 曲线判断平台/增长。
+默认最新存档可能已经变为村口桥；历史水塘快照信息见 PROFILE_PROGRESS §7 的归档
+README，读取各 slot 缩略图确认，不把“位于卡卡利科”当作水塘场景已验证。
 内存局无须套历史 FPS 预设；不要用菜单增长、加载增长、working set 或静置不降
 单独宣布泄漏。失败必须保留 result/phases/watcher.log，清理拥有的进程。
 

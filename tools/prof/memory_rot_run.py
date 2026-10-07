@@ -25,9 +25,11 @@ from prof_common import (
     eden_dir,
     game_path,
     positive_int,
+    save_slot,
     writable_target,
     write_json,
 )
+from save_fixture import temporary_slot
 from shot_capture import save_shot
 
 
@@ -209,7 +211,11 @@ def main(argv=None):
                 timeout=10,
             ).stdout.strip()
             with (target / "watcher.log").open("x", encoding="utf-8") as watcher_log:  # noqa: SIM117
-                with EdenSession() as game:
+                with (
+                    temporary_slot(eden_dir(), save_slot(), target / "save-backup") as fixture,
+                    EdenSession() as game,
+                ):
+                    record["save_fixture"] = fixture
                     record["binary"] = game.identity
                     record["pid"] = game.pid
                     mark("boot")

@@ -95,6 +95,7 @@ def test_failed_entry_cleans_owned_sampler_and_keeps_phase_record(tmp_path, monk
             closed.append("sampler")
 
     monkeypatch.setattr(runner, "preflight", lambda **kw: None)
+    monkeypatch.setattr(runner, "save_slot", lambda: None)
     monkeypatch.setattr(runner, "EdenSession", Game)
     monkeypatch.setattr(runner.subprocess, "run", lambda *a, **kw: SimpleNamespace(stdout="head"))
     monkeypatch.setattr(runner.subprocess, "Popen", lambda *a, **kw: Watcher())
