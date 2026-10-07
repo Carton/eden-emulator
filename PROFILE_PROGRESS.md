@@ -5158,3 +5158,15 @@ src 大改后 profile 需重训（有效性窗口未测）。
   但准备阶段300s在保存前超时，valid=false，自动清理并恢复原存档。
   改为可显式配置 --scene-timeout（默认仍300s），采样预算同时包含准备上限；
   下一局设置900s，并用已验证路线定位，必须完成存档与实时场景确认后才采样。
+- pond3 PID148912 已通过场景准备和镜头 probe（diff=0.06408）；现场站在水塘
+  护栏/克洛格供品石像旁，坐标1807 -0998，实时截图 pond_ready.png。
+  用 Plus=M、R=E 进入系统菜单，W 选择保存、X 确认，AA 用户 slot_00 实际写入。
+  复制四份 .sav 到 prof-data/fixtures/kakariko-pond 并逐文件校验 SHA256；源 progress
+  hash 1ee17ec7…，prof.local 已选新快照。历史精确站位仍未确认，不能作旧局 FPS 对比。
+  当前 baseline/60轮20s旋转/300s静置长测运行中，无完整增长结论。
+- 跨 worktree 复查还发现 repo 默认原脚本目录，会把目标构建归档配上错误源码 HEAD；
+  修正为配置文件所在目录（显式 repo/EDEN_PROF_REPO 仍优先），增加独立模块加载回归。
+  新增 memory_rot_report：只接受完整有效且场景已审核的局，分开汇总基线、整段旋转、
+  后半段和尾部静置；可选 report extra 生成 Matplotlib PNG/SVG，报告注明证据边界。
+  全目录静态检查还有24项旧 IBS/诊断脚本风格问题，本次相关修改文件 Ruff 及公共模块
+  strict mypy 通过；未把这些旧实验脚本风格清理混入当前游戏验证。

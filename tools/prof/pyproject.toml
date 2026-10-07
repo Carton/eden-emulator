@@ -5,6 +5,9 @@ description = "Local Eden profiling and regression tools"
 requires-python = ">=3.12"
 dependencies = ["pillow>=12.1"]
 
+[project.optional-dependencies]
+report = ["matplotlib>=3.10"]
+
 [dependency-groups]
 dev = ["ruff>=0.11", "pytest>=8", "pytest-cov>=6", "poethepoet>=0.32", "mypy>=1.15"]
 

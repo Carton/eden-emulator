@@ -18,7 +18,11 @@
 uv run --project tools/prof python tools/prof/memory_watch.py --pid 12345 --seconds 3600 --output F:\prof\memory-totk-01
 ```
 
-脚本只读取指定进程：每 5 秒采集 private bytes、working set、系统提交量和上限，每 60 秒汇总虚拟内存区域。产物包括 `memory.csv`、`regions.jsonl`、`metadata.json`。默认输出根目录为 `EDEN_PROF_DATA` 或 `F:\prof`。按 Ctrl+C 会保存已收集结果；脚本不会启动、终止或修改 Eden。
+脚本只读取指定进程：每 5 秒采集 private bytes、working set、系统提交量和上限，每 60 秒汇总虚拟内存区域。产物包括 `memory.csv`、`regions.jsonl`、`metadata.json`。默认输出根目录按 `EDEN_PROF_DATA`、`prof.local.json` 的 data_dir、`F:\prof` 顺序选择。按 Ctrl+C 会保存已收集结果；脚本不会启动、终止或修改 Eden。
+
+自动读档与原地旋转使用 `memory_rot_run.py`，路径、存档、输入准备和失败清理见本目录 README。
+归档名或 caption 缩略图不能证明存档地点；必须实际加载检查。已验证的本地水塘快照位于
+`prof-data/fixtures/kakariko-pond`，用 save_slot 选择；本轮坐标约1807 -0998，历史站位是否一致未确认。
 
 建议从加载前开始记录，预热约 5 分钟；重复同一路线、传送或菜单操作 10–20 次，再原地静置 5–10 分钟。记录每段开始的 UTC 时间和循环次数。避开无尽探索造成的正常新资源增长。不要为了等到 OOM 耗尽整机提交额度。
 

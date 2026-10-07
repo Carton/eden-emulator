@@ -46,7 +46,7 @@ def configured_path(key: str, env: str, default: Path) -> Path:
 
 # EDEN_PROF_REPO lets a foreign checkout (e.g. the master worktree) run this
 # suite against its own builds while keeping scripts from one maintained home.
-REPO = configured_path("repo", "EDEN_PROF_REPO", HERE.parents[1])
+REPO = configured_path("repo", "EDEN_PROF_REPO", CONFIG_BASE)
 TITLE = "0100F2C0115B6000"
 
 

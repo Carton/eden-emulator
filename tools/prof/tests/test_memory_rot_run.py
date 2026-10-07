@@ -1,4 +1,5 @@
 import json
+import runpy
 import subprocess
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -7,6 +8,7 @@ import pytest
 from PIL import Image
 
 import memory_rot_run as runner
+import prof_common
 from memory_rot_run import gameplay_hud, phase_summary
 from patch_input import patch_config
 from prof_common import read_local_config
@@ -32,6 +34,15 @@ def test_profile_json_paths_do_not_depend_on_working_directory(tmp_path, monkeyp
     base, values = read_local_config()
     assert base == tmp_path.resolve()
     assert (base / values["eden_dir"]).resolve() == tmp_path / "build-other/bin"
+
+
+def test_foreign_worktree_config_selects_its_source_repository(tmp_path, monkeypatch):
+    config = tmp_path / "prof.local.json"
+    config.write_text(json.dumps({"eden_dir": "build-other/bin"}))
+    monkeypatch.delenv("EDEN_PROF_REPO", raising=False)
+    monkeypatch.setenv("EDEN_PROF_CONFIG", str(config))
+    module = runpy.run_path(prof_common.__file__)
+    assert module["REPO"] == tmp_path
 
 
 def test_growth_is_measured_only_in_requested_phase():

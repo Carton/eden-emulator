@@ -52,6 +52,8 @@ check-full 包括格式检查、Ruff、公共纯逻辑模块 prof_common.py 的 
 JSON 可选 save_slot 指向单一存档快照；相对路径以配置文件所在目录为准，与 cwd、分支无关；环境变量逐项优先。
 本目录脚本也可用 `EDEN_PROF_CONFIG` 绝对路径加载另一 worktree 配置。
 默认 build-vs22 仅兼容旧环境；不会自动选最新 exe 或强制切分支。
+未显式设置 repo/EDEN_PROF_REPO 时，源码仓库默认为配置文件所在目录；
+从其他 worktree 调用共享脚本仍记录目标 worktree 的 HEAD。
 `memory_watch.py` 默认输出同样使用配置。exe hash 与源码 HEAD 分开记录。
 
 从仓库根运行：
@@ -135,6 +137,11 @@ private bytes/系统 commit 余量。截图缺失、HUD/镜头验证失败或采
 需要定位并保存新场景时，使用 `--await-scene --scene-timeout 900`。HUD 出现后暂停，
 由 agent 操作并写入该局 `scene-ready.json`（场景说明、截图证据），才进入镜头探针；
 准备超时则失败退出并恢复存档，采样上限包含这段准备时间。
+
+完成且目检场景通过后，`python tools/prof/memory_rot_report.py RUN_DIR` 生成
+基线、整段旋转、后半段旋转和静置的私有内存变化/斜率汇总；失败局或待审核场景拒绝出报告。
+`uv sync --project tools/prof --extra report` 后加 `--plot` 可生成 PNG/SVG 曲线。
+报告区分加载增长与预热后增长；有限时间的平台不能证明所有场景均无泄漏。
 
 ## PGO 构建管线
 

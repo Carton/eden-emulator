@@ -42,7 +42,7 @@ cmake.exe --build "$EDEN_BUILD_DIR"  # 明确选定该 worktree 的 build 目录
 明确选择已安装 Python，避免 .venv 引用已移除解释器。运行 memory_rot_run.py
 --prepare-only 检查 exe/游戏/portable NAND，并备份修正键级配置和 portable 路径。
 所有共享 preflight 均自动准备输入；可用 prepare_test.py --restore 还原。
-映射 A=X、B=C、移动=WASD、镜头=IJKL，player 0 显式连接，TAS 关闭，
+映射 A=X、B=C、移动=WASD、镜头=IJKL、Plus=M、L=Q/R=E，player 0 显式连接，TAS 关闭，
 custom 输入使用全局映射。消息必须发到同 PID 最大可见 eden 渲染窗；Form 是性能浮窗。input_ok
 仅证明投递，红心 HUD、镜头响应及截图目检才证明游戏与场景正确。
 
@@ -50,8 +50,10 @@ memory_rot_run.py 默认限时读最新存档、双向预热、120s 基线、60x
 左右旋转、300s 静置；启动到退出全程 memory_watch 采样。先短测
 --baseline-sec 15 --rot-win 3 --rot-count 2 --tail-sec 15 验证管线。
 检查 shots 确为水塘，再使用同 PID 预热后的 private bytes 曲线判断平台/增长。
-默认最新存档可能已经变为村口桥；历史水塘快照信息见 PROFILE_PROGRESS §7 的归档
-README，读取各 slot 缩略图确认，不把“位于卡卡利科”当作水塘场景已验证。
+默认最新存档可能已经变为村口桥；必须实际加载并目检，归档名和缩略图不保证地点。
+本轮已现场保存 prof-data/fixtures/kakariko-pond（位置/哈希见 fixture.json），
+可把 save_slot 指向完整快照。重新定位时用 --await-scene --scene-timeout 900，
+确认游戏画面后写该局 scene-ready.json，才进入探针与测量；超时自动退出并还原。
 内存局无须套历史 FPS 预设；不要用菜单增长、加载增长、working set 或静置不降
 单独宣布泄漏。失败必须保留 result/phases/watcher.log，清理拥有的进程。
 
