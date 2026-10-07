@@ -12,7 +12,7 @@ from ctypes import wintypes as wt
 from datetime import UTC, datetime
 from pathlib import Path
 
-from prof_common import writable_target
+from prof_common import data_dir, positive_int, writable_target
 
 
 class ProcessCounters(ct.Structure):
@@ -192,16 +192,13 @@ def positive(value):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--pid", type=int, required=True)
+    parser.add_argument("--pid", type=positive_int, required=True)
     parser.add_argument("--seconds", type=positive, default=3600)
     parser.add_argument("--interval", type=positive, default=5)
     parser.add_argument("--regions-every", type=positive, default=60)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
-    directory = writable_target(
-        args.output
-        or Path(os.environ.get("EDEN_PROF_DATA", "F:/prof")) / ("memory-" + uuid.uuid4().hex[:12])
-    )
+    directory = writable_target(args.output or data_dir() / ("memory-" + uuid.uuid4().hex[:12]))
     directory.mkdir(parents=True, exist_ok=False)
     target = None
     metadata = {"pid": args.pid, "started_utc": utc_now(), "status": "sampling"}
@@ -227,6 +224,9 @@ def main(argv=None):
         ):
             writer = None
             next_regions = 0
+            # Image hashing / metadata setup must not consume the sampling window.
+            start = time.monotonic()
+            metadata["sampling_started_utc"] = utc_now()
             while time.monotonic() - start < args.seconds:
                 if not target.alive():
                     metadata["status"] = "target_exited"

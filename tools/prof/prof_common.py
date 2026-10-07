@@ -13,18 +13,53 @@ import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+
+
+def read_local_config() -> tuple[Path, dict[str, str]]:
+    root = Path(os.environ.get("EDEN_PROF_REPO", str(HERE.parents[1])))
+    path = Path(os.environ.get("EDEN_PROF_CONFIG", str(root / "prof.local.json"))).resolve()
+    if not path.is_file():
+        if "EDEN_PROF_CONFIG" in os.environ:
+            raise FileNotFoundError(f"Missing EDEN_PROF_CONFIG: {path}")
+        return path.parent, {}
+    values = json.loads(path.read_text(encoding="utf-8-sig"))
+    allowed = {"repo", "eden_dir", "data_dir", "nsp"}
+    if (
+        not isinstance(values, dict)
+        or set(values) - allowed
+        or not all(isinstance(value, str) and value for value in values.values())
+    ):
+        raise ValueError(f"Invalid profiling paths in {path}; expected {sorted(allowed)}")
+    return path.parent, values
+
+
+CONFIG_BASE, CONFIG = read_local_config()
+
+
+def configured_path(key: str, env: str, default: Path) -> Path:
+    if env in os.environ:
+        return Path(os.environ[env]).resolve()
+    if key in CONFIG:
+        return (CONFIG_BASE / CONFIG[key]).resolve()
+    return default
+
+
 # EDEN_PROF_REPO lets a foreign checkout (e.g. the master worktree) run this
 # suite against its own builds while keeping scripts from one maintained home.
-REPO = Path(os.environ.get("EDEN_PROF_REPO", str(HERE.parents[1])))
+REPO = configured_path("repo", "EDEN_PROF_REPO", HERE.parents[1])
 TITLE = "0100F2C0115B6000"
 
 
 def data_dir() -> Path:
-    return Path(os.environ.get("EDEN_PROF_DATA", r"F:\prof"))
+    return configured_path("data_dir", "EDEN_PROF_DATA", Path(r"F:\prof"))
 
 
 def eden_dir() -> Path:
-    return Path(os.environ.get("EDEN_DIR", REPO / "build-vs22" / "bin"))
+    return configured_path("eden_dir", "EDEN_DIR", REPO / "build-vs22" / "bin")
+
+
+def game_path() -> Path:
+    return configured_path("nsp", "EDEN_NSP", data_dir() / "TOTK.nsp")
 
 
 def writable_target(path: Path) -> Path:
@@ -78,6 +113,7 @@ def experiment_env(overrides: dict[str, str]) -> dict[str, str]:
         "EDEN_PROF_DATA",
         "EDEN_PYTHON",
         "EDEN_PROF_REPO",
+        "EDEN_PROF_CONFIG",
         "EDEN_IGNORE_INPUT",
     }
     result = {k: v for k, v in os.environ.items() if not k.startswith("EDEN_") or k in paths}

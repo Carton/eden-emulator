@@ -1,6 +1,6 @@
 ---
 name: eden-bench
-description: Eden 模拟器（TOTK）性能基准与 profiling 工作流——VS2022 构建、自动 FPS 基准（内建帧时间 CSV + 图像 QA 截图）、交错 A/B 对、wpr+ETW 微 profile 采集分析。用于 Eden 性能优化相关任务。
+description: Eden 模拟器（TOTK）本地 GUI 性能基准、输入配置、原地旋转内存增长采样与 profiling；支持配置路径后跨 worktree 运行。
 ---
 
 # Eden TOTK 性能基准与 Profiling
@@ -11,26 +11,46 @@ description: Eden 模拟器（TOTK）性能基准与 profiling 工作流——VS
 
 ## 关键路径
 
-- 工作基线：`F:\devel\opensource\eden-emulator`，分支以 AGENTS.md 当前基线为准
-  （P2 draw-resolver 阶段在 `test/p2-draw-resolver`），构建目录 `build-vs22`
-  （v0.2.1 worktree 已冻结，勿改）
+- 脚本根 = 此 skill 所在仓库的 `tools/prof`；目标源码/构建以调用者配置和
+  PROFILE_PROGRESS 最新验证为准，不硬编码 worktree、分支或 build 目录。
+  `prof.local.json` 放目标 worktree 根，示例 `tools/prof/prof.local.example.json`；
+  填 eden_dir/data_dir/nsp，可选 repo。相对路径以 JSON 所在目录为准，env 优先。
+  跨 worktree 调用已有脚本时设置 EDEN_PROF_CONFIG 的绝对路径。
+  没有配置才回退脚本仓库/build-vs22/bin；不要把此回退当作最新有效构建。
 - **脚本集：`tools/prof/`**（清单/淘汰名单/路径约定见 `tools/prof/README.md`；
   数据归档 `EDEN_PROF_DATA` 默认 `F:\prof`——bench_results.csv / shots / diag /
   trace 都在那，**新脚本不再放 F:\prof**）
-- 游戏硬链接：`F:\prof\TOTK.nsp`；数据目录：`build-vs22\bin\user\`（portable）
+- 游戏由 nsp/EDEN_NSP 选择；数据目录 = eden_dir/user（portable）。
 - **一切 AI 生成内容仅限本地，严禁 push 上游 / 提 issue / PR**（推自己 fork 允许）
 
 ## 构建（Git Bash，增量 ~1-5 分钟）
 
 ```bash
-cd /f/devel/opensource/eden-emulator
-source /f/devel/opensource/eden-emulator/tools/windows/load-msvc-env.sh
+cd "$EDEN_PROF_REPO"  # 明确选定目标源码 worktree
+source tools/windows/load-msvc-env.sh
 export PATH="/g/Tools/glslang/bin:$(dirname "$(command -v cl.exe)"):/d/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin:/d/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja:$PATH"
-cmake.exe --build build-vs22
+cmake.exe --build "$EDEN_BUILD_DIR"  # 明确选定该 worktree 的 build 目录
 # 直接检查退出码与产物时间戳，不接吞掉失败状态的管道
 ```
 
-产物 `build-vs22/bin/eden.exe`。**勿用 eden-cli 跑 TOTK（shader 段必崩）**。
+产物以选定 build 的 bin/eden.exe 为准。**勿用 eden-cli 跑 TOTK（shader 段必崩）**。
+
+## 准备与内存旋转测试
+
+先读 tools/prof/README.md 和 MEMORY_DEBUG.md。用 uv sync --locked --python
+明确选择已安装 Python，避免 .venv 引用已移除解释器。运行 memory_rot_run.py
+--prepare-only 检查 exe/游戏/portable NAND，并备份修正键级配置和 portable 路径。
+所有共享 preflight 均自动准备输入；可用 prepare_test.py --restore 还原。
+映射 A=X、B=C、移动=WASD、镜头=IJKL，player 0 显式连接，TAS 关闭，
+custom 输入使用全局映射。消息必须发到同 PID 可见 Form 渲染窗；input_ok
+仅证明投递，红心 HUD、镜头响应及截图目检才证明游戏与场景正确。
+
+memory_rot_run.py 默认限时读最新存档、双向预热、120s 基线、60x20s 交替
+左右旋转、300s 静置；启动到退出全程 memory_watch 采样。先短测
+--baseline-sec 15 --rot-win 3 --rot-count 2 --tail-sec 15 验证管线。
+检查 shots 确为水塘，再使用同 PID 预热后的 private bytes 曲线判断平台/增长。
+内存局无须套历史 FPS 预设；不要用菜单增长、加载增长、working set 或静置不降
+单独宣布泄漏。失败必须保留 result/phases/watcher.log，清理拥有的进程。
 
 ## FPS 基准（单局 ~4 分钟；A/B 结论用交错对）
 
@@ -56,7 +76,7 @@ powershell.exe -NoProfile -Command "Start-Process -WindowStyle Hidden -FilePath 
 实际 exe SHA-256 与源码 HEAD 分开记录；旧 bench_results.csv 不改写。
 失败退出非零；机器读取成功数据用 RESULT_JSON。整对失败须重试整对；quiet sequence 的 PAIRS 使用完整标签。
 
-- 前提：qt-config.ini 已设 `record_frame_times=true`、`confirmStop=2`（都已配好）
+- preflight 自动准备 record_frame_times/confirmStop 和测试输入，检查读回；不假设已配好。
 - **跑基准期间用户不能碰键盘/鼠标**（前台锁吃掉注入按键；测试时段有人=数据作废）
 - **VOID 签名**（RESULT VOID，不进 CSV）：陈旧 CSV / fps>52 或 med<20（60fps
   菜单栅格；游戏内 med 最低 21.67）
@@ -116,7 +136,7 @@ mcp__etw__process_trace(filePath="F:\\prof\\totk_cpugpu.etl",
 
 ## 已知纪律
 
-- master 是现役基线（TOTK 已验收）；v0.2.1 worktree 冻结只作历史对照
+- 构建身份以 exe hash/PDB 及 PROFILE_PROGRESS 最新验证为准；分支 HEAD 不代表磁盘 exe。
 - 采集/基准前 `python tools/prof/check_config.py`（LosslessScaling 等会被拦；
   **NVIDIA Overlay 一律不杀不拦**，2026-09-19 用户定规，med 实测无扰）
 - 缓存归因（"成本摊匀在所有函数"类）：AMD uProf @ `D:\Program Files\AMD\AMDuProf`

@@ -66,3 +66,7 @@ vulkansdk*.exe
 
 # Build-time generated external sources
 externals/generated
+
+# Per-worktree profiling paths and local experiment artifacts
+prof.local.json
+prof-data/

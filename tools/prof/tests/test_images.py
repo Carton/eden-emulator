@@ -24,7 +24,7 @@ def test_natural_pairing_and_count_mismatch(tmp_path):
 
 
 def test_no_fallback_to_other_window(monkeypatch):
-    monkeypatch.setattr(shot_capture, "windows", lambda pid: [(123, "Eden launcher")])
+    monkeypatch.setattr(shot_capture, "windows", lambda pid, **kw: [(123, "Eden launcher")])
     assert shot_capture.capture_window(99) is None
 
 

@@ -44,6 +44,21 @@ check-full 包括格式检查、Ruff、公共纯逻辑模块 prof_common.py 的 
 | EDEN_PROF_REPO | 不设 = 脚本所在仓库；跨 worktree 跑基准时指向源码仓库根 |
 | EDEN_IGNORE_INPUT | 不设 = 正常用户输入看门狗；=1 完全关闭检测（幻影输入设备时才用，见 PGO.md） |
 | EDEN_PGOSWEEP | pgo_train.py 用的 pgosweep.exe；默认 VS2022 14.44 工具集路径 |
+| EDEN_PROF_CONFIG | 默认读取目标 worktree 根目录的 prof.local.json；可指向其他配置文件 |
+
+跨 worktree 优先复制 `prof.local.example.json` 到目标仓库根目录为 `prof.local.json`
+（已 gitignore）。填写 `eden_dir`、`data_dir`、`nsp`，可选 `repo` 指向源码 worktree。
+JSON 相对路径以配置文件所在目录为准，与调用时 cwd、分支无关；环境变量逐项优先。
+本目录脚本也可用 `EDEN_PROF_CONFIG` 绝对路径加载另一 worktree 配置。
+默认 build-vs22 仅兼容旧环境；不会自动选最新 exe 或强制切分支。
+`memory_watch.py` 默认输出同样使用配置。exe hash 与源码 HEAD 分开记录。
+
+从仓库根运行：
+
+    Copy-Item tools/prof/prof.local.example.json prof.local.json
+    uv sync --project tools/prof --locked --python D:/Tools/Python312/python.exe
+    tools/prof/.venv/Scripts/python.exe tools/prof/memory_rot_run.py --prepare-only
+    tools/prof/.venv/Scripts/python.exe tools/prof/memory_rot_run.py
 
 F:\Switch\Yuzu 及其解析后子路径禁止写入/作为运行目录。
 启动前要求 portable 配置存在且没有其他 eden.exe；不会按进程名清理游戏。
@@ -92,10 +107,26 @@ PAIRS 是明确的完整 label 对，取消旧的前缀过滤后 zip 机制。
     python patch_input.py [INI]
     python patch_input.py --restore [INI]
 
-仅维护六个测试键，备份到 INI.autotest.json。重复 patch 不覆盖原始值；
+维护 player 0 连接/类型、A/B、WASD 移动、IJKL 镜头和 TAS 开关，
+section-qualified 键备份到 INI.autotest.json，兼容旧六键备份。重复 patch 不覆盖原始值；
 restore 恢复这些键后立即返回，保留其他设置，成功后删除键备份。
 原始 .bak-autotest 全文件备份不自动恢复：先人工比对，以免回滚后来的其他配置。
 改配置前须关闭 Eden。
+
+共享 preflight 自动运行 `prepare_test.py`：检查 GUI exe/portable NAND/游戏存在，
+修正 NAND/SDMC/load/dump 路径到选定 exe 的 user 目录，修正 default 标志，
+让 TOTK custom 输入使用全局映射，并设置帧时记录/无关停确认。每份被改 INI
+各有键级备份；缺失键还原时删除，其他设置保留。`prepare_test.py --restore` 还原。
+内存测试只要求可操控和可采样，不要求历史 FPS 预设；性能基准仍检查完整预设。
+输入消息投递到同 PID 的可见 Form 渲染窗口（包括嵌入子窗口），进入
+GRenderWindow 键事件处理；不再投递到不处理这些事件的主窗。
+
+`memory_rot_run.py` 自动读默认最新存档，限时等待红心 HUD，然后用短镜头旋转
+验证画面响应；仍需检查 shots 确为水塘存档。默认先双向预热、静置 120s，
+60 个交替左右 20s 窗，最后静置 300s。采样从启动持续到进程退出，自动计算
+采样上限；失败保留 result.json/phases、watcher.log 和已有样本，并清理拥有的进程。
+目录含 memory/memory.csv、regions.jsonl、metadata.json 和 shots；每窗打印
+private bytes/系统 commit 余量。截图缺失、HUD/镜头验证失败或采样提前结束均失败退出。
 
 ## PGO 构建管线
 

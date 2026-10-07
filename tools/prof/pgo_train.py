@@ -22,7 +22,7 @@ import sys
 import time
 from pathlib import Path
 
-from prof_common import HERE, data_dir, eden_dir, positive_int
+from prof_common import HERE, eden_dir, game_path, positive_int
 
 PGOSWEEP_DEFAULT = (
     r"D:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC"
@@ -110,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
     directory = eden_dir()
     pgosweep = Path(os.environ.get("EDEN_PGOSWEEP", str(args.pgosweep)))
     exe = directory / "eden.exe"
-    game = Path(os.environ.get("EDEN_NSP", data_dir() / "TOTK.nsp"))
+    game = game_path()
     if not exe.is_file() or not game.is_file():
         print(f"missing executable or game: {exe}, {game}", file=sys.stderr)
         return 1

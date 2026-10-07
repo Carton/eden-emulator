@@ -32,7 +32,7 @@ MUST_DEFAULT = {
 }
 
 
-def validate(values: dict[str, str]) -> list[str]:
+def validate(values: dict[str, str], *, input_only: bool = False) -> list[str]:
     failures = []
 
     def get(key):
@@ -42,6 +42,8 @@ def validate(values: dict[str, str]) -> list[str]:
         return matches[0] if len(matches) == 1 else None
 
     for key, expected in MUST_MATCH.items():
+        if input_only and key not in {"keyboard_enabled", "confirmStop", "record_frame_times"}:
+            continue
         value, flag = get(key), get(key + r"\default")
         if value != expected:
             failures.append(f"{key}={value!r}; want {expected!r}")
@@ -50,15 +52,15 @@ def validate(values: dict[str, str]) -> list[str]:
         if key != "record_frame_times" and flag != "false":
             failures.append(f"{key}: default flag ignores required value")
     for key in MUST_DEFAULT:
+        if input_only:
+            continue
         if get(key) is not None and get(key + r"\default") != "true":
             failures.append(f"{key}: must use compiled default")
-    for key, codes in (
-        ("player_0_button_a", ("engine:keyboard", "code:88")),
-        ("player_0_rstick", ("code$074", "code$076")),
-    ):
-        value = get(key) or ""
-        if not all(code in value for code in codes) or get(key + r"\default") == "true":
-            failures.append(f"{key}: test input mapping is missing or ignored")
+    from patch_input import PATCH
+
+    for key, expected in PATCH.items():
+        if get(key) != expected:
+            failures.append(f"{key}: test controller setting is missing or ignored")
     return failures
 
 
@@ -66,8 +68,19 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ini", type=Path, default=eden_dir() / "user/config/qt-config.ini")
     parser.add_argument("--tolerate-overlay", action="store_true", help="Compatibility no-op")
+    parser.add_argument(
+        "--input-only", action="store_true", help="Skip historical performance preset"
+    )
     args = parser.parse_args(argv)
-    failures = validate(parse(args.ini))
+    failures = validate(parse(args.ini), input_only=args.input_only)
+    custom = args.ini.parent / "custom/0100F2C0115B6000.ini"
+    if custom.is_file():
+        values = parse(custom)
+        if (
+            values.get("Controls/player_0_profile_name")
+            and values.get(r"Controls/player_0_profile_name\default") == "false"
+        ):
+            failures.append("TOTK custom input profile overrides test controller")
     processes = process_names()
     if "losslessscaling.exe" in processes:
         # User rule (2026-09-20): terminate on sight during profiling preflight,
@@ -75,7 +88,9 @@ def main(argv=None):
         # timing/frame capture; auto-killing restores the old watchdog behavior.
         subprocess.run(
             ["taskkill", "/F", "/IM", "LosslessScaling.exe"],
-            capture_output=True, text=True, timeout=20,
+            capture_output=True,
+            text=True,
+            timeout=20,
         )
         time.sleep(2)
         if "losslessscaling.exe" in process_names():

@@ -10,6 +10,24 @@ public static class EdenInput {
     public static extern bool PostMessageW(IntPtr hwnd, uint msg, IntPtr wparam, IntPtr lparam);
     [DllImport("user32.dll", SetLastError=true)]
     public static extern bool GetLastInputInfo(ref INPUTINFO info);
+    public delegate bool EnumProc(IntPtr hwnd, IntPtr param);
+    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc callback, IntPtr param);
+    [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr parent, EnumProc callback, IntPtr param);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr hwnd, System.Text.StringBuilder text, int max);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
+    public static IntPtr RenderWindow(int pid) {
+        IntPtr found = IntPtr.Zero;
+        EnumProc child = (hwnd, param) => {
+            uint owner; GetWindowThreadProcessId(hwnd, out owner);
+            var title = new System.Text.StringBuilder(256);
+            GetWindowTextW(hwnd, title, title.Capacity);
+            if (owner == pid && IsWindowVisible(hwnd) && title.ToString() == "Form") found = hwnd;
+            return true;
+        };
+        EnumWindows((hwnd, param) => { child(hwnd, param); EnumChildWindows(hwnd, child, param); return true; }, IntPtr.Zero);
+        return found;
+    }
     public static uint LastInput() {
         INPUTINFO info = new INPUTINFO();
         info.size = (uint)Marshal.SizeOf(typeof(INPUTINFO));
@@ -23,8 +41,9 @@ public static class EdenInput {
 function Get-EdenWindow([int]$ProcessId) {
     $process = Get-Process -Id $ProcessId -ErrorAction Stop
     if ($process.ProcessName -ne 'eden') { throw 'PID is not eden.exe' }
-    $window = $process.MainWindowHandle
-    if ($window -eq [IntPtr]::Zero) { throw 'No main window' }
+    # GRenderWindow handles Qt key events; the main window does not.
+    $window = [EdenInput]::RenderWindow($ProcessId)
+    if ($window -eq [IntPtr]::Zero) { throw 'No visible Form render window for this PID' }
     return $window
 }
 

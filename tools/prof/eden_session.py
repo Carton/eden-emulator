@@ -9,9 +9,8 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager
-from pathlib import Path
 
-from prof_common import HERE, data_dir, eden_dir, require_no_eden, writable_target
+from prof_common import HERE, data_dir, eden_dir, game_path, require_no_eden, writable_target
 
 
 def input_tick() -> int:
@@ -35,8 +34,15 @@ def idle_seconds() -> float:
     return ((ctypes.windll.kernel32.GetTickCount() - input_tick()) & 0xFFFFFFFF) / 1000
 
 
-def preflight() -> None:
-    subprocess.run([sys.executable, str(HERE / "check_config.py")], check=True, timeout=30)
+def preflight(*, input_only: bool = False) -> None:
+    from prepare_test import prepare
+
+    for message in prepare(eden_dir()):
+        print(message, flush=True)
+    command = [sys.executable, str(HERE / "check_config.py")]
+    if input_only:
+        command.append("--input-only")
+    subprocess.run(command, check=True, timeout=30)
 
 
 @contextmanager
@@ -74,7 +80,7 @@ class EdenSession:
     def __enter__(self):
         require_no_eden()
         exe = self.directory / "eden.exe"
-        game = Path(os.environ.get("EDEN_NSP", data_dir() / "TOTK.nsp"))
+        game = game_path()
         if not exe.is_file() or not game.is_file():
             raise FileNotFoundError(f"Missing executable or game: {exe}, {game}")
         if not (self.directory / "user" / "config" / "qt-config.ini").is_file():

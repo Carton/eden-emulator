@@ -5103,3 +5103,24 @@ src 大改后 profile 需重训（有效性窗口未测）。
   ctest/固定顺序计时测试的完整日志同目录，保留 ctest-first 等首轮失败日志。
 - 后续记录提交只补验证结果，不改源码；此构建尚未运行真实游戏长测或取得泄漏
   曲线。用户可用 memory_watch.py 对该 GUI 进程采样；测试通过不代表内存泄漏已解决。
+
+### 37.5 2026-10-07 内存旋转自动化审计与修正（进行中）
+
+- 读取引用会话确认待测 GUI 为 build-ab/bin/eden.exe，源码 9f281d362b、
+  SHA256 6236cdd3…；旧 r5-ctrl metadata 实际却启动 eden-emulator/build-vs22，
+  截图仍停标题菜单。旧 memory_rot_run 以菜单/加载截图差异当成功，只发一次 A，
+  watcher 总时长和加载等候独立，异常不落阶段记录且未收尾 watcher，无法出有效结果。
+- 源码 GRenderWindow::keyPressEvent 才更新 keyboard gamepad；window_input.ps1
+  却投递 MainWindowHandle。改为枚举同 PID 可见 Form（包括子窗口），待实际验证。
+- 新 prof.local.json 统一配置路径（env 优先、相对路径基于 JSON 目录、无分支约束）；
+  本 worktree 选 build-ab/bin，数据在仓库 prof-data，游戏 F:/prof/TOTK.nsp。
+  prepare_test 自动备份/修正输入、手柄连接、TAS、custom profile、portable 路径、
+  帧时及关闭设置；旧六键备份可升级还原。日常 F:/Switch/Yuzu 未写入。
+- memory_rot_run 重写：限时等待红心 HUD、实际镜头响应、双向预热、基线、
+  60x20s 交替旋转、300s 静置；覆盖全窗采样、逐阶段落盘、失败保留证据和清理。
+  HUD 仍为启发式，必须目检水塘。当前尚无有效游戏长测结论。
+- 工具 .venv 指向已删除 Python 3.14，已用锁文件及本机 Python 3.12 重建。
+- 工具回归 89 passed / 2 opt-in skipped；Windows 真 API 5 passed，公共模块 strict
+  mypy、改动文件 Ruff、skill frontmatter 验证通过。启动前配置读回 ALL PASS。
+  空闲探针三秒两次 GetLastInputInfo 始终 idle=0，仍为已知手柄幻影心跳，
+  本轮无人值守实际测试显式 EDEN_IGNORE_INPUT=1，不用该局出宏观性能结论。

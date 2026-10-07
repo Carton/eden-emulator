@@ -44,6 +44,19 @@ uv run --project tools/prof python tools/prof/memory_watch.py --pid 12345 --seco
 
 ## 参考
 
+先按 README 配好 worktree 根目录的 `prof.local.json`；不指定分支，明确选择 GUI
+exe 的目录。`memory_rot_run.py --prepare-only` 检查并修正 portable 测试配置，
+然后执行 `memory_rot_run.py`（均使用 tools/prof/.venv/Scripts/python.exe）。
+输入是键盘映射的虚拟手柄：A=X、B=C、WASD 移动、IJKL 镜头。
+默认运行约 30 分钟，带限时读档、镜头验证、预热、基线、交替左右旋转及末尾静置。
+读默认最新存档，必须目检 shots 确认水塘；HUD 检测不能鉴定存档地点。
+短测可用 `--baseline-sec 15 --rot-win 3 --rot-count 2 --tail-sec 15`。
+阶段和内存样本使用 UTC 对齐，result.json 列出各阶段净增长和斜率。
+强制关闭可能丢帧 CSV，但已 flush 的内存样本仍可用；错误/用户干扰局不能用于结论。
+如果设备持续产生 GameSir 幻影输入，在确认无人占机时才设置 EDEN_IGNORE_INPUT=1。
+
+## 参考来源
+
 - [Microsoft：用 UMDH 定位用户态内存泄漏](https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/using-umdh-to-find-a-user-mode-memory-leak)
 - [Microsoft：排查应用和服务内存泄漏](https://learn.microsoft.com/en-us/troubleshoot/windows-server/performance/troubleshoot-application-service-memory-leaks)
 - [Microsoft：WPR/WPA/Xperf 排查工具](https://learn.microsoft.com/en-us/troubleshoot/windows-server/support-tools/support-tools-xperf-wpa-wpr)

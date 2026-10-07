@@ -107,7 +107,7 @@ def windows(pid: int, *, children: bool = False) -> list[tuple[int, str]]:
 
 
 def find_render_window(pid: int):
-    return next((hwnd for hwnd, title in windows(pid) if title == "Form"), None)
+    return next((hwnd for hwnd, title in windows(pid, children=True) if title == "Form"), None)
 
 
 def capture_hwnd(hwnd: int, flags: int = 2):

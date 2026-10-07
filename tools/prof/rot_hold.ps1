@@ -11,7 +11,7 @@ Start-Sleep -Milliseconds $SettleMs
 if ($Dir -eq 'none') {
     $mark = [EdenInput]::LastInput()
     Start-Sleep -Seconds $HoldSec
-    if ([EdenInput]::LastInput() -ne $mark) { throw 'User input invalidates rotation window' }
+    if (-not $env:EDEN_IGNORE_INPUT -and [EdenInput]::LastInput() -ne $mark) { throw 'User input invalidates rotation window' }
 } else {
     $vk = if ($Dir -eq 'left') { 0x4A } else { 0x4C }
     $scan = if ($Dir -eq 'left') { 0x24 } else { 0x26 }
