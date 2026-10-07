@@ -5014,10 +5014,44 @@ src 大改后 profile 需重训（有效性窗口未测）。
   的内存类型抓仍存活的分配栈，最后对单一优化做 AB/BA 对照。
   完整步骤与边界见 `tools/prof/MEMORY_DEBUG.md`。
 - 四笔修复的回植检查：`d97c0a2ec0` 已有等价提交 `9c6f9f8898`（stable patch-id
-  相同），无需重复 pick；其余三笔的回植与验证结果待本节后续补充。
+  相同），无需重复 pick；其余三笔已回植，映射与验证结果见 §37.3。
 
 - 迁移验证：新增两份 Python 文件的 Ruff lint/format 通过，公共模块 strict mypy
   通过；工具集默认 pytest 为 85 passed / 2 skipped；显式启用 Windows API 验收
   为 5 passed（含真实 64 MiB 分配/释放与自身进程短采样）。
 - 全目录 Ruff 检查另有既有脚本的 6 个格式问题、33 个 lint 问题，均位于本次
   未修改文件；未扩展迁移范围去修正历史脚本。未启动游戏或采集新的游戏曲线。
+
+### 37.3 2026-10-07 四笔修复回植
+
+| master 来源 | eden-postmerge 对应提交 | 结果 |
+|---|---|---|
+| `d97c0a2ec0` | 既有 `9c6f9f8898` | stable patch-id 相同，跳过重复 pick |
+| `2e9dcaf4db` | `8866287d4a` | 三方合并成功，补丁等价 |
+| `697132daa3` | `9b0478b68a` | zero-fill 块缩进冲突已解决，补丁等价 |
+| `9b8977ffc9` | `e1953ba3c8` | 三方合并成功，补丁等价；提交标题按本分支规则标记 local-only |
+
+- 三笔新增修复均用 `cherry-pick -x` 保留来源；第三笔仅有旧 zero-fill 块的
+  `auto zero_staging` 缩进冲突，采用源提交新增的 try/catch，保留目标分支的
+  `Engine3D()`、快照与延后失效逻辑。四组来源/目标的 stable patch-id 一致。
+- 工具迁移提交为 `581951e6ee`。确认目标文件已提交并验证后，删除
+  `../eden-emulator/PROFILE_PROGRESS.md` 与该 worktree 未跟踪的 `tools/prof/`
+  （包括 Python/pytest 缓存）；原有受 Git 跟踪的 `tools/` 内容保留。
+- 因 texture cache 头文件布局发生改变，在 `build-ab/` 内删除 video_core、core、
+  qt_common、yuzu、tests 的生成对象目录，再以 MSVC RelWithDebInfo 重建 GUI
+  和 tests。重建的源码版本为 `e1953ba3c8`；后续进度记录提交不改变源码。
+
+- 目标验证：MSVC RelWithDebInfo GUI 与 tests 重建通过；pipeline cache 回归为
+  4 用例 / 23 断言通过。GUI/tests 产物时间戳已更新，版本信息对应 `e1953ba3c8`。
+- 完整 CTest 未通过：此次定向构建未生成 zlib 示例程序，测试 shell 的 PATH
+  缺少 Ninja，依赖包示例检查未能执行；Eden 测试在既有
+  `DeviceMemoryManager: UpdatePagesCachedBatch basic` 用例访问异常。
+- 用 2026-09-26 的 `../eden-emulator/build-master/bin/tests.exe`（版本信息 `cf3ec3ecac`）
+  对照，同一批量页缓存用例也访问异常；MemoryTracker 组的 8 个断言失败亦复现，
+  其测试替身 `UpdatePagesCachedBatch` 是空实现。这些测试与实现未在回植中修改。
+- 精确排除 MemoryTracker / DeviceMemoryManager 组后，其余 45 用例中 43 通过；
+  UDP 校准与 CoreTiming[BasicOrder] 失败。旧程序也复现 UDP 校准失败；
+  CoreTiming[BasicOrder] 单独复测通过（2 断言），不能把整套测试记为全绿。
+- 构建与测试日志保存于 `build-ab/crash-backport-verification-20261007/`，
+  含旧程序对照、完整 CTest、专项测试及精确筛选后的结果。
+- 未运行长时间游戏或采集新的内存曲线；回植和回归通过不代表内存泄漏已定位。
