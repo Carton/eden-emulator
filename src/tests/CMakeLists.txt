@@ -20,6 +20,7 @@ add_executable(tests
     core/internal_network/network.cpp
     video_core/memory_tracker.cpp
     video_core/buffer_binding.cpp
+    video_core/pipeline_cache_file.cpp
     input_common/calibration_configuration_job.cpp
 )
 
