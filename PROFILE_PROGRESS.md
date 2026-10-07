@@ -4969,3 +4969,55 @@ patch_input 打测试键，bench_ab 3 对 × 90s AB/BA 交错，全程 EDEN_IGNO
 
 **后续**：LTCG-only 对照臂分离 /GL 贡献；更长/多场景训练预期边际有限；
 src 大改后 profile 需重训（有效性窗口未测）。
+
+
+---
+
+## 37. TOTK 崩溃防护与内存增长排查（2026-10-06 / 2026-10-07，local-only）
+
+### 37.1 2026-10-06 取证与修复状态
+
+原记录来自 `../eden-emulator/PROFILE_PROGRESS.md`，2026-10-07 合并到本文件，
+工具统一维护在本 worktree。原始证据仍保留在
+`../eden-emulator/build-vs22/crash-evidence-20261006/`，不会移动或覆盖。
+
+- 三份不同进程的转储显示 Eden private commit 约 18.16、18.74、19.44 GiB，
+  系统 commit 约 51.65、52.35、52.87 GiB，上限约 53.21 GiB。
+  这些转储不能拼成同一进程的持续泄漏曲线。
+- 21:59 的直接失败是 GPU 线程申请普通纹理上传 staging；22:03、22:43 是后台
+  保存 Vulkan pipeline cache 时未捕获的 `bad_alloc`。22:43 快照约 111 MiB，
+  异步纹理解码队列此前已排空。最后失败的分配栈不能直接当作内存持有者。
+- 22:43 崩溃的进程启动于 22:03:42；22:05 替换磁盘 exe 不会更新已运行的映像。
+  后续必须记录准确 exe/PDB/源码版本，不在进程运行时替换 exe。
+- master 已有生命周期修复 `d97c0a2ec0`、异步解码准入/异常防护 `2e9dcaf4db`、
+  重试与事务回滚修正 `697132daa3`；pipeline cache 安全保存与 staging OOM
+  回收重试已于 2026-10-07 提交为 `9b8977ffc9`。
+- `9b8977ffc9` 在 master 的验证：缓存回归 4 用例 / 23 断言通过，MSVC
+  RelWithDebInfo GUI 构建通过。尚未完成长时间游戏回归；内存持续耗尽时
+  staging 的单次重试仍可能失败，不能宣称所有 crash 或泄漏均已修复。
+- 2026-10-06 已确认 WPR/WPA/UMDH/GFlags 可用，但未开启系统跟踪、修改 GFlags
+  或启动新的游戏采样；尚无同一进程同场景重复操作的真实内存曲线。
+- 当时 `../eden-emulator/build-vs22/CMakeFiles/rules.ninja` 已配置中文 MSVC
+  头文件依赖前缀，旧记录中缺少前缀的结论不能直接套用当前构建。
+
+### 37.2 2026-10-07 工具迁移
+
+- 合并 `memory_watch.py`、`MEMORY_DEBUG.md` 和 `tests/test_memory_watch.py`
+  到现有 `tools/prof/`，保留此前 profiling 历史，不覆盖既有脚本。
+- 采样记录指定 PID 的 private bytes、working set、系统 commit/limit、
+  虚拟区域分类和进程创建时间；持有进程句柄，避免 PID 重用混淆。
+  磁盘 exe hash 不保证运行中被替换前的映像身份；区域总和不等于独占物理内存。
+- 接入 `prof_common.writable_target`，保护日常 `F:\Switch\Yuzu`；不覆盖既有
+  输出目录，不启动或终止 Eden。默认测试使用 API 替身；真实 64 MiB
+  VirtualAlloc/VirtualFree 与自身进程短采样需要显式 `EDEN_PROF_WINDOWS_TESTS=1`。
+- 下一步：同一进程预热后重复固定操作并静置，先确认净增长是否趋稳，再按增长
+  的内存类型抓仍存活的分配栈，最后对单一优化做 AB/BA 对照。
+  完整步骤与边界见 `tools/prof/MEMORY_DEBUG.md`。
+- 四笔修复的回植检查：`d97c0a2ec0` 已有等价提交 `9c6f9f8898`（stable patch-id
+  相同），无需重复 pick；其余三笔的回植与验证结果待本节后续补充。
+
+- 迁移验证：新增两份 Python 文件的 Ruff lint/format 通过，公共模块 strict mypy
+  通过；工具集默认 pytest 为 85 passed / 2 skipped；显式启用 Windows API 验收
+  为 5 passed（含真实 64 MiB 分配/释放与自身进程短采样）。
+- 全目录 Ruff 检查另有既有脚本的 6 个格式问题、33 个 lint 问题，均位于本次
+  未修改文件；未扩展迁移范围去修正历史脚本。未启动游戏或采集新的游戏曲线。

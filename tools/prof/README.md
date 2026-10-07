@@ -107,6 +107,32 @@ pgosweep 定点落盘 pgo_*.pgc——eden 退出路径不执行 pgort atexit dum
 完整管线（configure 标志、pgomgr 合并、PGOPTIMIZE 重链接、基准两臂、坑清单）
 见本目录 [PGO.md](PGO.md)；首轮数据见 PROFILE_PROGRESS.md §36。
 
+## 内存增长排查
+
+    uv run --project tools/prof python tools/prof/memory_watch.py --pid 12345 --seconds 3600 --output F:\prof\memory-totk-01
+
+以上命令在仓库根目录执行，PID 替换为已启动的隔离测试进程。
+`memory_watch.py` 使用 64 位 Windows Python，只读取指定 PID，不启动、终止或
+修改 Eden；默认每 5 秒采集进程 private bytes/working set 和系统 commit，
+每 60 秒汇总虚拟区域。新输出目录含 memory.csv、regions.jsonl、metadata.json，
+禁止覆盖现有目录或写入日常安装目录。磁盘 exe hash 不保证加载映像身份。
+泄漏判定、UMDH/WPR 分配栈抓取和优化对照步骤见 [MEMORY_DEBUG.md](MEMORY_DEBUG.md)。
+
+默认回归使用 API 替身，不访问真实目标进程。额外的 Windows x64 自身进程验收
+（64 MiB 分配/释放、短采样和禁止覆盖输出）可在 PowerShell 中显式启用：
+
+```powershell
+$env:EDEN_PROF_WINDOWS_TESTS = "1"
+try {
+    uv run --project tools/prof pytest tools/prof/tests/test_memory_watch.py -q
+} finally {
+    Remove-Item Env:EDEN_PROF_WINDOWS_TESTS
+}
+```
+
+该开关仅用于上述测试；不启动游戏、不启用 WPR/GFlags。不要用这组验收替代真实
+游戏的同进程增长曲线。跨 worktree 的其他基准工具需明确设置 EDEN_PROF_REPO/EDEN_DIR。
+
 ## 辅助命令
 
 | 命令 | 用途 |
