@@ -112,3 +112,8 @@ def test_failed_entry_cleans_owned_sampler_and_keeps_phase_record(tmp_path, monk
 def test_short_sampler_duration_fails_before_launch():
     with pytest.raises(SystemExit):
         runner.main(["--watch-seconds", "1"])
+
+
+def test_sampler_budget_includes_scene_setup():
+    with pytest.raises(SystemExit):
+        runner.main(["--await-scene", "--scene-timeout", "900", "--watch-seconds", "2500"])

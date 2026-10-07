@@ -108,7 +108,7 @@ PAIRS 是明确的完整 label 对，取消旧的前缀过滤后 zip 机制。
     python patch_input.py [INI]
     python patch_input.py --restore [INI]
 
-维护 player 0 连接/类型、A/B、WASD 移动、IJKL 镜头和 TAS 开关，
+维护 player 0 连接/类型、A/B、WASD 移动、IJKL 镜头、Plus=M、L=Q/R=E 和 TAS 开关，
 section-qualified 键备份到 INI.autotest.json，兼容旧六键备份。重复 patch 不覆盖原始值；
 restore 恢复这些键后立即返回，保留其他设置，成功后删除键备份。
 原始 .bak-autotest 全文件备份不自动恢复：先人工比对，以免回滚后来的其他配置。
@@ -132,6 +132,9 @@ private bytes/系统 commit 余量。截图缺失、HUD/镜头验证失败或采
 指定 save_slot 后，在无 Eden 时备份测试安装各用户 slot 的相关文件，把完整快照临时
 填入各 slot 保证默认读档一致；退出后原文件逐字节恢复，缺失文件删除，备份和源 hash 留档。
 只修改 portable 测试安装，源快照与日常安装只读。未设 save_slot 时使用当前默认存档。
+需要定位并保存新场景时，使用 `--await-scene --scene-timeout 900`。HUD 出现后暂停，
+由 agent 操作并写入该局 `scene-ready.json`（场景说明、截图证据），才进入镜头探针；
+准备超时则失败退出并恢复存档，采样上限包含这段准备时间。
 
 ## PGO 构建管线
 

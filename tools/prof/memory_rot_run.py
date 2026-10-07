@@ -125,8 +125,9 @@ def main(argv=None):
     parser.add_argument(
         "--await-scene",
         action="store_true",
-        help="Allow agent positioning before probe; wait <=300s for run/scene-ready.json",
+        help="Allow agent positioning before probe; wait for run/scene-ready.json",
     )
+    parser.add_argument("--scene-timeout", type=positive_int, default=300)
     args = parser.parse_args(argv)
     required = (
         args.entry_timeout
@@ -135,6 +136,7 @@ def main(argv=None):
         + args.rot_count * (args.rot_win + 5)
         + args.tail_sec
         + 120
+        + (args.scene_timeout if args.await_scene else 0)
     )
     if args.watch_seconds and args.watch_seconds < required:
         parser.error(f"--watch-seconds must be >= {required}; omit to compute automatically")
@@ -261,11 +263,11 @@ def main(argv=None):
                         log(
                             f"SCENE_SETUP PID={game.pid}; waiting for {target / 'scene-ready.json'}"
                         )
-                        scene_deadline = time.monotonic() + 300
+                        scene_deadline = time.monotonic() + args.scene_timeout
                         ready = target / "scene-ready.json"
                         while not ready.is_file():
                             if time.monotonic() >= scene_deadline:
-                                raise RuntimeError("Scene setup exceeded 300s")
+                                raise RuntimeError(f"Scene setup exceeded {args.scene_timeout}s")
                             game.wait(1)
                         record["scene_review"] = json.loads(ready.read_text(encoding="utf-8"))
                     mark("camera_probe")
