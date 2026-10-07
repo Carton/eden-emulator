@@ -5124,3 +5124,12 @@ src 大改后 profile 需重训（有效性窗口未测）。
   mypy、改动文件 Ruff、skill frontmatter 验证通过。启动前配置读回 ALL PASS。
   空闲探针三秒两次 GetLastInputInfo 始终 idle=0，仍为已知手柄幻影心跳，
   本轮无人值守实际测试显式 EDEN_IGNORE_INPUT=1，不用该局出宏观性能结论。
+- 自动化修复提交 ef6933dd2a；最终工具回归 91 passed / 2 skipped。
+  短测 memory-rot-smoke-20261007 在 boot 30s 时触发系统 commit 余量保护：
+  private 8.345 GiB（上一样本）、余量 0.70 GiB，随后样本 private 8.725 GiB、
+  系统剩余 0.29 GiB；尚未投递读档键。拥有的 GUI 优雅退出、watcher target_exited，
+  valid=false 的 result/阶段/CSV 均保存，证实失败清理不再丢结果。
+  退出后系统 commit 27.6 / limit 36.6 GiB，约 9 GiB 可用；进程 private 总计
+  20.5 GiB，无遗留 Eden/profiling Python（其他 Python 是 Blender/FreeCAD MCP）。
+  Windows 分页文件当时 13,000 MiB；已向用户说明继续长测需要释放应用内存或授权
+  调整分页文件。未关闭其他应用、未修改系统配置；当前尚未取得存档旋转结果。

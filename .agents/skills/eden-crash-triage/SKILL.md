@@ -6,6 +6,9 @@ description: Eden 崩溃取证——查 WER/Application Error 事件、提取 fa
 # Eden 崩溃取证（WER + PDB 符号化）
 
 工具都在仓库 `tools/prof/`（背景与坑见 PROFILE_PROGRESS §28.15-28.16）。
+目标 exe/PDB 由 prof.local.json/EDEN_DIR 和实际构建记录选择，不假定分支或
+build-vs22。analyze_hangdump.py 默认遵守相同路径配置，symbolizer 默认
+tools/prof/sym.exe，可用 EDEN_SYM 覆盖；必须匹配崩溃时运行的映像。
 
 ## 流程
 
@@ -27,7 +30,7 @@ powershell -NoProfile -Command "Get-WinEvent -FilterHashtable @{LogName='Applica
 
 ```bash
 cd tools/prof && cl /O2 /EHsc sym.cpp     # 一次性编译（VS 环境下）
-sym.exe <eden.exe 路径> <hexRVA>           # 例：sym.exe build-vs22/bin/eden.exe ebab1c
+sym.exe <匹配构建的 eden.exe 路径> <hexRVA>
 ```
 
 - 输出 `函数名 + 偏移` + `文件:行`（RelWithDebInfo 的 PDB 在 exe 旁）。

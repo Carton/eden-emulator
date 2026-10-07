@@ -5,12 +5,13 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import shutil
 import statistics
 import subprocess
 import sys
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
 
@@ -139,6 +140,7 @@ def main(argv=None):
         "args": vars(args) | {"output": str(target), "shots": str(shots)},
         "paths": {"repo": str(REPO), "eden_dir": str(eden_dir()), "game": str(game_path())},
         "scene_validation": "TOTK HUD heuristic plus camera response; review shots for pond save",
+        "scene_review": "pending",
     }
     record["args"] = {
         key: str(value) if isinstance(value, Path) else value
@@ -168,6 +170,9 @@ def main(argv=None):
                 rows = list(csv.DictReader(stream))
             if rows:
                 row = rows[-1]
+                age = (datetime.now(UTC) - datetime.fromisoformat(row["utc"])).total_seconds()
+                if age > max(45, 3 * args.interval):
+                    raise RuntimeError(f"Memory samples are stale ({age:.1f}s); see watcher.log")
                 headroom = int(row["system_commit_available_bytes"]) / 1073741824
                 log(
                     f"private={int(row['private_bytes']) / 1073741824:.3f} GiB; system commit headroom={headroom:.2f} GiB"
@@ -191,6 +196,11 @@ def main(argv=None):
         target.mkdir(parents=True, exist_ok=False)
         shots.mkdir(parents=True, exist_ok=False)
         try:
+            config_dir = eden_dir() / "user/config"
+            shutil.copy2(config_dir / "qt-config.ini", target / "qt-config.start.ini")
+            custom = config_dir / "custom/0100F2C0115B6000.ini"
+            if custom.is_file():
+                shutil.copy2(custom, target / "totk-config.start.ini")
             record["source_head"] = subprocess.run(
                 ["git", "-C", str(REPO), "rev-parse", "HEAD"],
                 capture_output=True,
@@ -282,6 +292,20 @@ def main(argv=None):
                     )
                     if metadata["status"] != "target_exited":
                         raise RuntimeError(f"Sampler coverage invalid: {metadata['status']}")
+                    with (target / "memory/memory.csv").open(encoding="utf-8") as stream:
+                        points = list(csv.DictReader(stream))
+                    if len(points) < 2:
+                        raise RuntimeError("Sampler produced insufficient memory data")
+                    covered_start = datetime.fromisoformat(points[0]["utc"])
+                    covered_end = datetime.fromisoformat(points[-1]["utc"])
+                    if covered_start > datetime.fromisoformat(phases[0]["utc"]) + timedelta(
+                        seconds=args.interval * 2
+                    ):
+                        raise RuntimeError("Sampler missed the beginning of the run")
+                    if covered_end < datetime.fromisoformat(phases[-1]["utc"]) - timedelta(
+                        seconds=args.interval * 2
+                    ):
+                        raise RuntimeError("Sampler missed the end of measurement")
                     record["valid"] = True
         except BaseException as error:
             record["error"] = f"{type(error).__name__}: {error}"

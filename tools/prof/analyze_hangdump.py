@@ -7,34 +7,39 @@ Usage: python tools/prof/analyze_hangdump.py <dump.dmp> [eden.exe path]
 Dump capture (no tools needed, same-user process):
   rundll32.exe C:\\Windows\\System32\\comsvcs.dll,MiniDump <pid> out.dmp full
 """
+
+import argparse
 import os
 import struct
 import subprocess
 import sys
+from pathlib import Path
 
-from minidump.minidumpfile import MinidumpFile
+from prof_common import HERE, eden_dir
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(os.path.dirname(HERE))
-DEFAULT_EXE = os.path.join(REPO, "build-vs22", "bin", "eden.exe")
-SYM = r"F:\prof\sym.exe"  # built from tools/prof/sym.cpp; rebuild if stale
+DEFAULT_EXE = eden_dir() / "eden.exe"
+SYM = Path(os.environ.get("EDEN_SYM", str(HERE / "sym.exe")))
 
 
 def sym_line(exe, rva):
-    if not os.path.exists(SYM):
+    if not SYM.is_file():
         return ""
     try:
-        r = subprocess.run([SYM, exe, f"{rva:x}"], capture_output=True,
-                           text=True, timeout=20)
+        r = subprocess.run([SYM, exe, f"{rva:x}"], capture_output=True, text=True, timeout=20)
         out = (r.stdout or "").strip().replace("\n", " | ")
         return "  " + out if out else ""
     except Exception:
         return ""
 
 
-def main():
-    path = sys.argv[1]
-    exe = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_EXE
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("dump", type=Path)
+    parser.add_argument("exe", nargs="?", type=Path, default=DEFAULT_EXE)
+    args = parser.parse_args(argv)
+    from minidump.minidumpfile import MinidumpFile
+
+    path, exe = args.dump, str(args.exe)
     mf = MinidumpFile.parse(path)
     mods = [(m.name, m.baseaddress, m.size) for m in mf.modules.modules]
     eden = next(((b, s) for n, b, s in mods if n.lower().endswith("eden.exe")), None)
@@ -42,8 +47,10 @@ def main():
         print("eden.exe module not found in dump")
         return 1
     eb, es = eden
-    print(f"eden.exe base=0x{eb:X} size=0x{es:X}  ({len(mods)} modules, "
-          f"{len(mf.threads.threads)} threads)")
+    print(
+        f"eden.exe base=0x{eb:X} size=0x{es:X}  ({len(mods)} modules, "
+        f"{len(mf.threads.threads)} threads)"
+    )
     reader = mf.get_reader()
     for th in mf.threads.threads:
         rip = 0
@@ -68,8 +75,7 @@ def main():
             pass
         loc = ""
         if rip:
-            loc = (f" eden+0x{rip - eb:X}" if eb <= rip < eb + es
-                   else f" rip=0x{rip:X}")
+            loc = f" eden+0x{rip - eb:X}" if eb <= rip < eb + es else f" rip=0x{rip:X}"
         print(f"--- tid {th.ThreadId}{loc} hits={len(hits)}")
         for r in hits[:10]:
             print(f"    eden+0x{r:X}{sym_line(exe, r)}")

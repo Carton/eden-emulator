@@ -42,7 +42,7 @@ uv run --project tools/prof python tools/prof/memory_watch.py --pid 12345 --seco
 
 只有找到持续增长的存活分配及其保留路径，并证明修复后同样操作不再增长，才可把结论升级为已定位并修复泄漏。目前没有真实游戏的这组对照结果。
 
-## 参考
+## 水塘原地旋转自动采样
 
 先按 README 配好 worktree 根目录的 `prof.local.json`；不指定分支，明确选择 GUI
 exe 的目录。`memory_rot_run.py --prepare-only` 检查并修正 portable 测试配置，

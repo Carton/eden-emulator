@@ -63,6 +63,9 @@ def test_menu_animation_and_black_screen_are_not_gameplay(tmp_path):
 
 def test_failed_entry_cleans_owned_sampler_and_keeps_phase_record(tmp_path, monkeypatch):
     closed = []
+    config = runner.eden_dir() / "user/config/qt-config.ini"
+    config.parent.mkdir(parents=True)
+    config.write_text("[Controls]\n")
 
     class Game:
         pid = 123
