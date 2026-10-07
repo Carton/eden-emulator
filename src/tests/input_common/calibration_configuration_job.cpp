@@ -111,7 +111,7 @@ TEST_CASE("CalibrationConfigurationJob completed", "[input_common]") {
                 max_x = max_x_;
                 max_y = max_y_;
             });
-        REQUIRE(complete_event.WaitFor(std::chrono::seconds(10)));
+        REQUIRE(complete_event.WaitUntil(std::chrono::steady_clock::now() + std::chrono::seconds(10)));
     }
     // Destroying the job joins its workers before callback state is read.
     REQUIRE(status == Job::Status::Completed);
@@ -153,7 +153,7 @@ TEST_CASE("CalibrationConfigurationJob joins an active callback", "[input_common
         },
         [](u16, u16, u16, u16) {});
 
-    if (!callback_entered.WaitFor(std::chrono::seconds(10))) {
+    if (!callback_entered.WaitUntil(std::chrono::steady_clock::now() + std::chrono::seconds(10))) {
         release_callback.Set();
         FAIL("Calibration callback did not start");
     }

@@ -5075,3 +5075,13 @@ src 大改后 profile 需重训（有效性窗口未测）。
 - 按本仓库规则先提交源码，再构建 GUI/tests 并运行回归；验证结果随后追加。
   构建沿用 build-ab 的 MSVC RelWithDebInfo，不修改日常 F:\Switch\Yuzu。
   真实游戏的内存增长采样由用户随后执行，仍不能宣称内存泄漏已修复。
+
+
+- 首轮构建成功，Eden 为 78 用例 / 75 通过 / 3 失败，原有 MemoryTracker 和
+  DeviceMemoryManager 组全部通过。新测试选用了 Windows 优化的 Event::WaitFor，
+  该路径可能在 monitor 等待提前返回时报告 false，不能作这里的严格截止时间。
+  测试改用 Event::WaitUntil(steady_clock 截止时间)，不改性能相关的生产等待实现。
+- 完整 CTest 还暴露依赖包配置矛盾：cpmfile.json 明确 ZLIB_INSTALL OFF，
+  但 zlib 自身默认打开安装/导出包自测，导致安装步骤无产物而 find_package 失败。
+  集成构建明确 ZLIB_BUILD_TESTING OFF，关闭依赖包的安装自测；Eden 自身的
+  所有用例仍完整执行，不通过过滤排除失败用例。两轮日志分别保存，后续记录最终验收。

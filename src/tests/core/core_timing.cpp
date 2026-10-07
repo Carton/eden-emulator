@@ -81,7 +81,7 @@ TEST_CASE("CoreTiming[BasicOrder]", "[core]") {
 
     core_timing.Pause(false); // No need to sync
 
-    REQUIRE(guard.callbacks_complete.WaitFor(std::chrono::seconds(10)));
+    REQUIRE(guard.callbacks_complete.WaitUntil(std::chrono::steady_clock::now() + std::chrono::seconds(10)));
     core_timing.SyncPause(true);
     REQUIRE(guard.callbacks_ran_flags.all());
 
@@ -114,7 +114,7 @@ TEST_CASE("CoreTiming[BasicOrderNoPausing]", "[core]") {
     const double scheduling_time = static_cast<double>(end - start);
     const double timer_time = static_cast<double>(TestTimerSpeed(core_timing));
 
-    REQUIRE(guard.callbacks_complete.WaitFor(std::chrono::seconds(10)));
+    REQUIRE(guard.callbacks_complete.WaitUntil(std::chrono::steady_clock::now() + std::chrono::seconds(10)));
     core_timing.SyncPause(true);
     REQUIRE(guard.callbacks_ran_flags.all());
 
