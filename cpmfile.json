@@ -333,7 +333,8 @@
         "min_version": "1.2",
         "options": [
             "ZLIB_BUILD_SHARED OFF",
-            "ZLIB_INSTALL OFF"
+            "ZLIB_INSTALL OFF",
+            "ZLIB_BUILD_TESTING OFF"
         ],
         "package": "ZLIB",
         "repo": "madler/zlib",
