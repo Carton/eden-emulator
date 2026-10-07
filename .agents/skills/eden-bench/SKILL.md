@@ -42,7 +42,7 @@ cmake.exe --build "$EDEN_BUILD_DIR"  # 明确选定该 worktree 的 build 目录
 --prepare-only 检查 exe/游戏/portable NAND，并备份修正键级配置和 portable 路径。
 所有共享 preflight 均自动准备输入；可用 prepare_test.py --restore 还原。
 映射 A=X、B=C、移动=WASD、镜头=IJKL，player 0 显式连接，TAS 关闭，
-custom 输入使用全局映射。消息必须发到同 PID 可见 Form 渲染窗；input_ok
+custom 输入使用全局映射。消息必须发到同 PID 最大可见 eden 渲染窗；Form 是性能浮窗。input_ok
 仅证明投递，红心 HUD、镜头响应及截图目检才证明游戏与场景正确。
 
 memory_rot_run.py 默认限时读最新存档、双向预热、120s 基线、60x20s 交替
@@ -114,7 +114,7 @@ mcp__etw__process_trace(filePath="F:\\prof\\totk_cpugpu.etl",
 
 ## 图像 QA（改渲染/图形路径的必做验收；完整规程见 AGENTS.md）
 
-- bench 测量窗自动截 6 张到 `F:\prof\runs\<LABEL>-<id>\shots\`（PrintWindow 抓 "Form" 渲染窗，
+- bench 测量窗自动截 6 张到 `F:\prof\runs\<LABEL>-<id>\shots\`（PrintWindow 抓 eden 渲染窗，
   遮挡免疫）；**每局确认截图内容是游戏画面**——内容=桌面/其他应用 ⇒ 该局作废
   （用户占机铁证）。截不到=游戏窗不可用，查 tap 日志。
 - 对比：`python tools/prof/shot_compare.py DIR_A DIR_B`（PASS/WARN/FAIL+坏点%）；

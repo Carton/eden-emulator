@@ -5137,3 +5137,8 @@ src 大改后 profile 需重训（有效性窗口未测）。
   false，f:/pagefile.sys InitialSize=13000 / MaximumSize=30000 MiB。计划显式管理员
   helper 调用 NtCreatePagingFile 即时扩至 32768 MiB，保留原启动设置；正常重启恢复
   原范围，不由工具发起重启。helper/结果均在本仓库，尚待验证实时 commit limit。
+- 实时扩容成功 NTSTATUS=0，commit limit 36.608→55.913 GiB；原 PagingFiles 字符串
+  f:/pagefile.sys 13000 30000 未改，结果 prof-data/pagefile-grow-20261007/result.json。
+- 扩容后 smoke2 在截图阶段失败，完整清理。交叉读 game_shot.py 发现旧记录/共享
+  shot_capture 错把 Form 性能浮窗当渲染窗；真正游戏窗为最大 eden-titled 子窗。
+  前述以 Form 为目标的修正随即废弃，输入与截图统一采用 game_shot 的识别规则。

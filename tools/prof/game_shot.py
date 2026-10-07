@@ -8,31 +8,15 @@ graphics-path QA where the 225x250 overlay capture proves nothing.
 from __future__ import annotations
 
 import argparse
-import time
 import uuid
 
 from eden_session import EdenSession, preflight, session_lock
-from prof_common import data_dir, label_value, positive_int, positive_float, writable_target
-from shot_capture import api, capture_hwnd, windows
+from prof_common import data_dir, label_value, positive_float, positive_int, writable_target
+from shot_capture import capture_hwnd, find_render_window
 
 
 def render_hwnd(pid: int) -> int:
-    best = 0
-    best_area = 0
-    for hwnd, title in windows(pid, children=True):
-        if title != "eden":
-            continue
-        rect = api()[0].GetWindowRect
-        import ctypes
-        import ctypes.wintypes as wt
-
-        r = wt.RECT()
-        if not api()[0].GetWindowRect(hwnd, ctypes.byref(r)):
-            continue
-        area = (r.right - r.left) * (r.bottom - r.top)
-        if area > best_area:
-            best, best_area = hwnd, area
-    return best
+    return find_render_window(pid) or 0
 
 
 def main(argv=None):

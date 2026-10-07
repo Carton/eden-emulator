@@ -16,13 +16,20 @@ public static class EdenInput {
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr hwnd, System.Text.StringBuilder text, int max);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int left, top, right, bottom; }
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
     public static IntPtr RenderWindow(int pid) {
         IntPtr found = IntPtr.Zero;
+        long bestArea = 0;
         EnumProc child = (hwnd, param) => {
             uint owner; GetWindowThreadProcessId(hwnd, out owner);
             var title = new System.Text.StringBuilder(256);
             GetWindowTextW(hwnd, title, title.Capacity);
-            if (owner == pid && IsWindowVisible(hwnd) && title.ToString() == "Form") found = hwnd;
+            RECT rect;
+            if (owner == pid && IsWindowVisible(hwnd) && title.ToString().Equals("eden", StringComparison.OrdinalIgnoreCase) && GetWindowRect(hwnd, out rect)) {
+                long area = (long)(rect.right - rect.left) * (rect.bottom - rect.top);
+                if (area >= 320 * 180 && area > bestArea) { found = hwnd; bestArea = area; }
+            }
             return true;
         };
         EnumWindows((hwnd, param) => { child(hwnd, param); EnumChildWindows(hwnd, child, param); return true; }, IntPtr.Zero);
@@ -43,7 +50,7 @@ function Get-EdenWindow([int]$ProcessId) {
     if ($process.ProcessName -ne 'eden') { throw 'PID is not eden.exe' }
     # GRenderWindow handles Qt key events; the main window does not.
     $window = [EdenInput]::RenderWindow($ProcessId)
-    if ($window -eq [IntPtr]::Zero) { throw 'No visible Form render window for this PID' }
+    if ($window -eq [IntPtr]::Zero) { throw 'No visible eden render window for this PID' }
     return $window
 }
 

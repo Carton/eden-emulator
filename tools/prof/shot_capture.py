@@ -107,7 +107,17 @@ def windows(pid: int, *, children: bool = False) -> list[tuple[int, str]]:
 
 
 def find_render_window(pid: int):
-    return next((hwnd for hwnd, title in windows(pid, children=True) if title == "Form"), None)
+    candidates = []
+    user, _, _ = api()
+    for hwnd, title in windows(pid, children=True):
+        if title.casefold() != "eden":
+            continue
+        rect = wt.RECT()
+        if user.GetWindowRect(hwnd, ctypes.byref(rect)):
+            area = (rect.right - rect.left) * (rect.bottom - rect.top)
+            if area >= 320 * 180:
+                candidates.append((area, hwnd))
+    return max(candidates)[1] if candidates else None
 
 
 def capture_hwnd(hwnd: int, flags: int = 2):

@@ -24,8 +24,27 @@ def test_natural_pairing_and_count_mismatch(tmp_path):
 
 
 def test_no_fallback_to_other_window(monkeypatch):
+    monkeypatch.setattr(shot_capture, "api", lambda: (None, None, None))
     monkeypatch.setattr(shot_capture, "windows", lambda pid, **kw: [(123, "Eden launcher")])
     assert shot_capture.capture_window(99) is None
+
+
+def test_render_selection_ignores_perf_overlay_and_title_strips(monkeypatch):
+    sizes = {1: (225, 250), 2: (1920, 22), 3: (1280, 720), 4: (1920, 1080)}
+
+    def rect(hwnd, pointer):
+        pointer._obj.right, pointer._obj.bottom = sizes[hwnd]
+        return True
+
+    monkeypatch.setattr(
+        shot_capture, "api", lambda: (SimpleNamespace(GetWindowRect=rect), None, None)
+    )
+    monkeypatch.setattr(
+        shot_capture,
+        "windows",
+        lambda pid, **kw: [(1, "Form"), (2, "eden"), (3, "eden"), (4, "Other app")],
+    )
+    assert shot_capture.find_render_window(123) == 3
 
 
 def test_gdi_cleanup_and_pixel_copy(monkeypatch):
