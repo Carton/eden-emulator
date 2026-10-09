@@ -5183,3 +5183,51 @@ src 大改后 profile 需重训（有效性窗口未测）。
   不能仅凭此认定泄漏或缓存。完整报告/曲线未生成，工作已暂停。
   源码工具提交5b7cb7e0c9后回归100 passed/2 opt-in skipped；Windows API另开5 passed。
   F盘实时分页文件仍为32768MiB，启动PagingFiles保持原13000/30000MiB；不自动重启。
+
+### 37.6 2026-10-09/10 重启后水塘长测：Framebuffer 槽位泄漏初判
+
+- 用户明确恢复测试，要求跑到得到初步泄漏结果；继续使用已准备的 prepare_test /
+  memory_rot_run / memory_watch / memory_rot_report 与输入、存档恢复脚本。
+  全程 EDEN_IGNORE_INPUT=1，不检查键鼠干扰，不用于 FPS 结论。实际构建仍为
+  build-ab/bin/eden.exe，源码9f281d362b、SHA256 6236cdd3430475e67bba0ffa18e82f17364cc156c78889800037864df7c721a4；
+  本轮未修改 C++ 源码或重建，日常安装目录未写入。
+- 系统已于10/7重启，实时分页文件回到13000MiB。沿用用户此前明确授权，调用
+  pagefile_grow 再即时扩至32768MiB，NTSTATUS=0，commit limit 36.608→55.913GiB；
+  启动 PagingFiles 字符串仍为 f:/pagefile.sys 13000 30000，未发起重启。
+  证据 prof-data/pagefile-grow-20261009/result.json。
+- 首轮 memory-rot-warmup-20261009 正确读入水塘，但 --await-scene 人工确认门限
+  300s超时，valid=false并正常清理，不能作为结果。已确认fixture不再使用此门限；
+  memory-rot-warmup2-20261009 完成短预热，valid=true，实际水塘截图核验通过。
+- 完整局 prof-data/memory-rot-pond-20261009，PID35380：本地10/9 23:52启动，
+  10/10 00:22结束。120s基线、60轮交替20s左右旋转、300s静置全部完成；镜头响应
+  diff=0.07167，valid=true。目检 entry_007 / rotation_030 / rotation_059 / tail_300，
+  均为卡卡利科水塘护栏及供品石像旁，坐标1807 -0998；游戏时间/天气自然变化。
+  result.scene_review 已写明人工核验依据，未用历史精确站位或旧局FPS作比较。
+- private memory：基线24样本，增9.88MiB；旋转255样本、21.33min，
+  13466.21→14669.80MiB（13.151→14.326GiB），增1203.59MiB，整段OLS58.90MiB/min；
+  采样峰值15.059GiB。后半段OLS为-25.31MiB/min、首尾下降188.29MiB；
+  静置60样本、4.95min，14637.67→14597.68MiB，降39.99MiB，末值14.256GiB。
+  早段有约256MiB台阶，后段有回收和平台；整体增长不能直接全判为泄漏。
+  系统commit余量最低12.90GiB，未触发余量保护。
+  memory-report.json / memory-trend.png / memory-trend.svg 已生成，PNG目检通过。
+- 同局调用既有 wpr_capture，单个管理员helper负责 VirtualAllocation start/stop，
+  GUI保持普通权限；va-trace/private-va.etl 189792256字节，UTC16:08:34→16:12:57。
+  本会话无ETW MCP，使用本机xperf和匹配PDB分析PID35380；trace-stats.txt显示
+  lost events/buffers均为0。alloc-stacks.txt中VMA图像分配同时有分配与释放，
+  SlotVector<ImageView>及SlotVector<Framebuffer>均出现扩容；后者在采集窗中
+  一次提交10560KiB（10.31MiB）。这些是采集窗内分配统计，不是进程全量净增长。
+- 初步确认至少存在一处 CPU framebuffer槽位回收遗漏：
+  src/video_core/texture_cache/texture_cache.h:2693 的 RemoveFramebuffers 将对象
+  move进 sentenced_framebuffers 后只删除framebuffers查找表条目，没有调用
+  slot_framebuffers.erase(framebuffer_id)。已用 git show 9f281d362b 核对待测源码
+  同样缺失，且全源码未找到该容器其他erase/clear路径。Common::SlotVector::erase
+  才会归还free_list并清stored位；仅move对象不会归还槽位，反复创建/移除导致
+  已空的槽位仍被占用，底层存储持续扩容，直到cache/session销毁。
+  ETW栈 Reserve→GetFramebufferId 与此路径一致，属于可定位的逻辑存储泄漏。
+  deferred队列另有Tick销毁路径，本结论不等于Vulkan句柄/显存泄漏，也未证明
+  约1.1GiB残留全来自此问题。本轮只诊断、未修复；量化收益需修复槽位归还后
+  加槽位计数并用同存档/相同旋转静置条件复测。详见该局diagnosis.json。
+- 收尾：拥有的GUI优雅退出、forced_close=false，watcher=target_exited；原48份
+  存档逐文件SHA256与备份一致，独立水塘fixture保留；automation.lock已删除，
+  无遗留Eden/本轮采样或capture helper，wpr -status确认未采集。实时32GiB分页
+  文件保留到正常重启，启动配置未改。本轮目标“获得初步泄漏结果”已完成。
