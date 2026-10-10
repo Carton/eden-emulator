@@ -517,6 +517,9 @@ private:
 
     u64 modification_tick = 0;
     u64 frame_tick = 0;
+    // Only counted when EDEN_TEXTURE_CACHE_DIAG=1, to verify slot retirement/reuse.
+    u64 diag_framebuffers_retired = 0;
+    u64 diag_image_allocs_retired = 0;
 
     // Declaration order matters: async_decodes must be destroyed after
     // texture_decode_worker. The worker's jthreads join on destruction while a

@@ -5231,3 +5231,17 @@ src 大改后 profile 需重训（有效性窗口未测）。
   存档逐文件SHA256与备份一致，独立水塘fixture保留；automation.lock已删除，
   无遗留Eden/本轮采样或capture helper，wpr -status确认未采集。实时32GiB分页
   文件保留到正常重启，启动配置未改。本轮目标“获得初步泄漏结果”已完成。
+
+### 37.7 2026-10-10 Astra 独立复核与槽位回收修复（进行中）
+
+- 用户指出总内存曲线未显示明显持续泄漏，要求Astra独立复核，确认后修复。
+  Astra只读审查确认Framebuffer失效后未归还SlotVector槽位；同时发现DeleteImage
+  在ImageAlloc最后一张image删除后只删索引、不归还slot，空images vector容量也保留。
+  判断来自所有权/回收路径，曲线及单次ETW扩容不能单独证明泄漏或归因整体1.1GiB。
+- Astra还指出BlitColor(VkImageView...)异步Record捕获CPU framebuffer裸指针，
+  容器move/扩容本已可能令其失效，立即复用槽位会进一步暴露；安全修复需要同时改为
+  录制前复制renderpass/framebuffer句柄与extent，原GPU资源延迟销毁机制保持不变。
+- 先加入默认关闭EDEN_TEXTURE_CACHE_DIAG=1真实路径诊断，每300tick记录两类
+  slot.size与索引map.size、累计retired数及Framebuffer对象大小；未修复版本可
+  检验遗留槽数是否等于累计移除数，修复后检查slot与map一致且retired实际增长。
+  不用复制move/erase的测试替代生产路径验证。当前仅诊断补丁，尚待构建与实测。

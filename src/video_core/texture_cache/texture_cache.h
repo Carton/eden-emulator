@@ -9,6 +9,7 @@
 #include <limits>
 #include <optional>
 #include <bit>
+#include <cstdlib>
 #include <cstring>
 #include "common/container/unordered_map.h"
 #include <boost/container/small_vector.hpp>
@@ -28,6 +29,14 @@
 #include "video_core/textures/decoders.h"
 
 namespace VideoCommon {
+
+inline bool TextureCacheSlotDiagEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_TEXTURE_CACHE_DIAG");
+        return value && value[0] == '1' && value[1] == '\0';
+    }();
+    return enabled;
+}
 
 using Tegra::Texture::TICEntry;
 using Tegra::Texture::TSCEntry;
@@ -182,6 +191,16 @@ void TextureCache<P>::TickFrame() {
     sentenced_image_view.Tick();
     TickAsyncDecode();
     TickAsyncUnswizzle();
+
+    if (TextureCacheSlotDiagEnabled() && frame_tick % 300 == 0) {
+        LOG_INFO(Render,
+                 "diag texture slots: frame={} framebuffer_slots={} framebuffer_keys={} "
+                 "framebuffer_retired={} framebuffer_object_bytes={} image_alloc_slots={} "
+                 "image_alloc_keys={} image_alloc_retired={}",
+                 frame_tick, slot_framebuffers.size(), framebuffers.size(),
+                 diag_framebuffers_retired, sizeof(Framebuffer), slot_image_allocs.size(),
+                 image_allocs_table.size(), diag_image_allocs_retired);
+    }
 
     runtime.TickFrame();
     ++frame_tick;
@@ -2649,6 +2668,9 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
 
     alloc_images.erase(alloc_image_it);
     if (alloc_images.empty()) {
+        if (TextureCacheSlotDiagEnabled()) {
+            ++diag_image_allocs_retired;
+        }
         image_allocs_table.erase(alloc_it);
     }
     for (size_t c : active_channel_ids) {
@@ -2691,6 +2713,9 @@ void TextureCache<P>::RemoveFramebuffers(std::span<const ImageViewId> removed_vi
                 last_framebuffer_serial = 0;
             }
             sentenced_framebuffers.Push(std::move(slot_framebuffers[framebuffer_id]));
+            if (TextureCacheSlotDiagEnabled()) {
+                ++diag_framebuffers_retired;
+            }
             it = framebuffers.erase(it);
         } else {
             ++it;
