@@ -5245,3 +5245,16 @@ src 大改后 profile 需重训（有效性窗口未测）。
   slot.size与索引map.size、累计retired数及Framebuffer对象大小；未修复版本可
   检验遗留槽数是否等于累计移除数，修复后检查slot与map一致且retired实际增长。
   不用复制move/erase的测试替代生产路径验证。当前仅诊断补丁，尚待构建与实测。
+- 诊断版11904c2126已全量重编相关video_core/core/qt_common/yuzu/tests，构建通过，
+  GUI及PDB保存在build-ab/framebuffer-leak-verification-20261010/diagnostic-before。
+  启动同水塘短测memory-rot-slot-before-20261010，真实路径frame=2400日志：
+  framebuffer slots1085 / keys760 / retired325；ImageAlloc slots1275 / keys943 /
+  retired332。两种slots-keys都恰好等于retired，直接观察到失效槽位未归还；
+  本轮测试已显式关闭键鼠干扰检测。发现本次开机分页文件又回到13000MiB，沿用
+  用户授权即时扩至32768MiB，启动字符串未改，证据pagefile-grow-20261010/result.json。
+- 生产修复补齐Framebuffer及最后一个image移除后的ImageAlloc slot.erase；GPU对象
+  仍进入原延迟销毁队列，仅归还空CPU槽位。BlitColor异步命令在录制前复制
+  renderpass/framebuffer句柄及extent，工作线程不再解引用可能已复用的槽内对象。
+  Astra已复核其他Record/Framebuffer指针路径，未发现另一处同类捕获；deferred_clear
+  在新建/移除前Flush排空，last_framebuffer_id在移除时已有失效处理。
+  修复代码尚待构建、完整测试和实际水塘槽位复用/图像验证，暂不宣称修复验收完成。
