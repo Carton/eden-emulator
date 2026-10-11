@@ -14,9 +14,13 @@
 #include <vector>
 #include <bit>
 #include <numeric>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include "common/cityhash.h"
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
+#include "common/scope_exit.h"
 #include "common/thread_worker.h"
 #include "core/core.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
@@ -31,6 +35,7 @@
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
+#include "video_core/renderer_vulkan/pipeline_cache_file.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
@@ -545,6 +550,10 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
 }
 
 PipelineCache::~PipelineCache() {
+    // Drain both producers and the disk writer before the final snapshot. Otherwise the
+    // destructor can race a queued flush writing the same file (and its temporary file).
+    workers.WaitForRequests();
+    serialization_thread.WaitForRequests();
     if (use_vulkan_pipeline_cache && !vulkan_pipeline_cache_filename.empty()) {
         SerializeVulkanPipelineCache(vulkan_pipeline_cache_filename, vulkan_pipeline_cache,
                                      CACHE_VERSION);
@@ -713,9 +722,6 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     if (use_vulkan_pipeline_cache) {
         SerializeVulkanPipelineCache(vulkan_pipeline_cache_filename, vulkan_pipeline_cache,
                                      CACHE_VERSION);
-        size_t size = 0;
-        vulkan_pipeline_cache.Read(&size, nullptr);
-        last_cache_size.store(size, std::memory_order_relaxed);
         last_flush = std::chrono::steady_clock::now();
     }
 
@@ -743,14 +749,20 @@ void PipelineCache::QueueVulkanPipelineCacheFlush() {
     }
     pipelines_since_flush = 0;
     last_flush = now;
-    serialization_thread.QueueWork([this] {
-        SerializeVulkanPipelineCache(vulkan_pipeline_cache_filename, vulkan_pipeline_cache,
-                                     CACHE_VERSION);
-        size_t size = 0;
-        vulkan_pipeline_cache.Read(&size, nullptr);
-        last_cache_size.store(size, std::memory_order_relaxed);
+    try {
+        serialization_thread.QueueWork([this] {
+            SCOPE_EXIT { flush_in_flight.store(false, std::memory_order_release); };
+            SerializeVulkanPipelineCache(vulkan_pipeline_cache_filename, vulkan_pipeline_cache,
+                                         CACHE_VERSION);
+        });
+    } catch (const std::exception& e) {
         flush_in_flight.store(false, std::memory_order_release);
-    });
+        try {
+            LOG_WARNING(Render_Vulkan, "Skipping driver pipeline cache flush: {}", e.what());
+        } catch (...) {
+            // Queue allocation and logging can fail under the same memory pressure.
+        }
+    }
 }
 
 GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
@@ -1027,33 +1039,48 @@ std::unique_ptr<ComputePipeline> PipelineCache::CreateComputePipeline(
 void PipelineCache::SerializeVulkanPipelineCache(const std::filesystem::path& filename,
                                                  const vk::PipelineCache& pipeline_cache,
                                                  u32 cache_version) try {
-    std::ofstream file(filename, std::ios::binary);
-    file.exceptions(std::ifstream::failbit);
-    if (!file.is_open()) {
-        LOG_ERROR(Common_Filesystem, "Failed to open Vulkan driver pipeline cache file {}",
-                  Common::FS::PathToUTF8String(filename));
+    if (!pipeline_cache) {
         return;
     }
-    file.write(VULKAN_CACHE_MAGIC_NUMBER.data(), VULKAN_CACHE_MAGIC_NUMBER.size())
-        .write(reinterpret_cast<const char*>(&cache_version), sizeof(cache_version));
-
-    size_t cache_size = 0;
-    std::vector<char> cache_data;
-    if (pipeline_cache) {
-        pipeline_cache.Read(&cache_size, nullptr);
-        cache_data.resize(cache_size);
-        pipeline_cache.Read(&cache_size, cache_data.data());
+    // Disk persistence is optional. Do not compete with rendering for the last commit
+    // headroom, or allocate an unbounded driver-provided snapshot on the worker thread.
+    constexpr size_t max_snapshot_bytes = 256ULL * 1024 * 1024;
+    size_t snapshot_limit = max_snapshot_bytes;
+#ifdef _WIN32
+    MEMORYSTATUSEX memory{};
+    memory.dwLength = sizeof(memory);
+    if (GlobalMemoryStatusEx(&memory)) {
+        constexpr u64 reserve = 512ULL * 1024 * 1024;
+        snapshot_limit = static_cast<size_t>((std::min)(
+            static_cast<u64>(max_snapshot_bytes),
+            memory.ullAvailPageFile > reserve ? memory.ullAvailPageFile - reserve : 0ULL));
     }
-    file.write(cache_data.data(), cache_size);
+#endif
+    SavePipelineCacheFile(filename, VULKAN_CACHE_MAGIC_NUMBER, cache_version, snapshot_limit,
+                          [&](size_t* size, void* data) {
+        const VkResult result = pipeline_cache.Read(size, data);
+        // The cache may grow between the two calls. Vulkan guarantees that the bytes
+        // returned with VK_INCOMPLETE are valid initial cache data; do not retry/grow.
+        if (result != VK_SUCCESS && !(data && result == VK_INCOMPLETE)) {
+            vk::Check(result);
+        }
+        if (!data) {
+            last_cache_size.store(*size, std::memory_order_relaxed);
+        }
+    });
 
     LOG_INFO(Render_Vulkan, "Vulkan driver pipelines cached at: {}",
              Common::FS::PathToUTF8String(filename));
 
-} catch (const std::ios_base::failure& e) {
-    LOG_ERROR(Common_Filesystem, "{}", e.what());
-    if (!Common::FS::RemoveFile(filename)) {
-        LOG_ERROR(Common_Filesystem, "Failed to delete Vulkan driver pipeline cache file {}",
-                  Common::FS::PathToUTF8String(filename));
+} catch (const std::exception& e) {
+    // Includes bad_alloc and Vulkan errors, not just file I/O. This is also called from
+    // the destructor: an optional disk cache must never terminate the game.
+    try {
+        LOG_WARNING(Render_Vulkan,
+                    "Driver pipeline cache save skipped ({} bytes); previous cache retained: {}",
+                    last_cache_size.load(std::memory_order_relaxed), e.what());
+    } catch (...) {
+        // Logging can itself allocate when the original failure was bad_alloc.
     }
 }
 

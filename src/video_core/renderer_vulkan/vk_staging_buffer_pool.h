@@ -100,6 +100,7 @@ private:
     void ReleaseCache(MemoryUsage usage);
 
     void ReleaseLevel(StagingBuffersCache& cache, size_t log2);
+    size_t ReleaseUnusedBuffers();
     size_t Region(size_t iter) const noexcept {
         return iter / region_size;
     }
