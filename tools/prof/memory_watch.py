@@ -12,6 +12,7 @@ from ctypes import wintypes as wt
 from datetime import UTC, datetime
 from pathlib import Path
 
+from power_guard import PowerGuard
 from prof_common import data_dir, positive_int, writable_target
 
 
@@ -201,10 +202,12 @@ def main(argv=None):
     directory = writable_target(args.output or data_dir() / ("memory-" + uuid.uuid4().hex[:12]))
     directory.mkdir(parents=True, exist_ok=False)
     target = None
+    power = PowerGuard()
     metadata = {"pid": args.pid, "started_utc": utc_now(), "status": "sampling"}
     metadata_path = directory / "metadata.json"
     start = time.monotonic()
     try:
+        power.start()
         target = WindowsProcess(args.pid)
         metadata.update(target.identity())
         image = Path(metadata["image_path"])
@@ -228,6 +231,7 @@ def main(argv=None):
             start = time.monotonic()
             metadata["sampling_started_utc"] = utc_now()
             while time.monotonic() - start < args.seconds:
+                power.check()
                 if not target.alive():
                     metadata["status"] = "target_exited"
                     break
@@ -247,6 +251,7 @@ def main(argv=None):
                     next_regions = elapsed + args.regions_every
                 time.sleep(min(args.interval, max(0, args.seconds - (time.monotonic() - start))))
             else:
+                power.check()
                 metadata["status"] = "duration_completed"
     except KeyboardInterrupt:
         metadata["status"] = "interrupted"
@@ -255,10 +260,13 @@ def main(argv=None):
         metadata.update(status="failed", error=str(error))
         raise
     finally:
-        if target is not None:
-            target.close()
-        metadata["ended_utc"] = utc_now()
-        metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        try:
+            if target is not None:
+                target.close()
+            metadata["ended_utc"] = utc_now()
+            metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        finally:
+            power.close()
     return 0
 
 

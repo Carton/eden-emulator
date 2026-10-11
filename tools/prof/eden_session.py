@@ -10,6 +10,7 @@ import sys
 import time
 from contextlib import contextmanager
 
+from power_guard import PowerGuard
 from prof_common import HERE, data_dir, eden_dir, game_path, require_no_eden, writable_target
 
 
@@ -70,6 +71,7 @@ class EdenSession:
         self.process: subprocess.Popen | None = None
         self.forced = False
         self.identity: dict[str, str | int] = {}
+        self.power = PowerGuard()
 
     @property
     def pid(self) -> int:
@@ -88,7 +90,12 @@ class EdenSession:
         with exe.open("rb") as stream:
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
         self.identity = {"exe": str(exe), "sha256": digest, "mtime_ns": exe.stat().st_mtime_ns}
-        self.process = subprocess.Popen([str(exe), str(game)], cwd=self.directory, env=self.env)
+        self.power.start()
+        try:
+            self.process = subprocess.Popen([str(exe), str(game)], cwd=self.directory, env=self.env)
+        except BaseException:
+            self.power.close()
+            raise
         return self
 
     def wait(self, seconds: float, *, quiet: bool = True) -> None:
@@ -97,11 +104,14 @@ class EdenSession:
         mark = input_tick() if quiet else None
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
+            self.power.check()
             if self.process.poll() is not None:
                 raise RuntimeError(f"Eden exited unexpectedly ({self.process.returncode})")
             if quiet and input_tick() != mark:
                 raise RuntimeError("User input detected: this run is VOID")
             time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+        # An explicit suspend can outlast the entire wait; still reject it on resume.
+        self.power.check()
 
     def tap_a(self) -> None:
         result = subprocess.run(
@@ -145,4 +155,7 @@ class EdenSession:
                 self.process.wait(timeout=15)
 
     def __exit__(self, exc_type, exc, traceback):
-        self.close()
+        try:
+            self.close()
+        finally:
+            self.power.close()

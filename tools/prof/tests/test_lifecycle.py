@@ -52,6 +52,21 @@ def test_input_during_wait_invalidates_run(monkeypatch):
         game.wait(10)
 
 
+def test_suspend_after_wait_deadline_invalidates_run(monkeypatch):
+    ticks = iter([0, 100])
+    monkeypatch.setattr(eden_session.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(eden_session, "input_tick", lambda: 0)
+    game = EdenSession()
+    game.process = SimpleNamespace(poll=lambda: None)
+
+    def resumed():
+        raise RuntimeError("System suspended: this run is VOID")
+
+    monkeypatch.setattr(game.power, "check", resumed)
+    with pytest.raises(RuntimeError, match="suspended"):
+        game.wait(10)
+
+
 def test_wpr_start_failure_does_not_cancel_foreign_session(tmp_path, monkeypatch):
     wpr = Wpr(tmp_path, ["CPU"])
     calls = []

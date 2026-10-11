@@ -5258,3 +5258,26 @@ src 大改后 profile 需重训（有效性窗口未测）。
   Astra已复核其他Record/Framebuffer指针路径，未发现另一处同类捕获；deferred_clear
   在新建/移除前Flush排空，last_framebuffer_id在移除时已有失效处理。
   修复代码尚待构建、完整测试和实际水塘槽位复用/图像验证，暂不宣称修复验收完成。
+
+- 修复提交795971d879：MSVC GUI/tests构建完成；布局变更先全量重编相关目标，修复模板再次
+  强制重编video_core；完整CTest通过，78用例/3,889,194断言，未过滤Eden用例。
+  build-ab/framebuffer-leak-verification-20261010保存原版、诊断版、修复版exe/PDB与日志。
+  修复exe SHA256 950132a6ce62ec061c493a88c27c823681be3775c1242cd23d1330957cd604ec。
+- 有效水塘短测memory-rot-slot-before-20261010完成6轮10s旋转、30s基线与30s静置，截图核验
+  同一水塘；33份真实计数最后frame9600：Framebuffer slots3520/keys811/retired2709，
+  ImageAlloc slots8709/keys5376/retired3333，全样本slots-keys等于累计retired。
+  仅失效Framebuffer对象槽占用约1.69MiB（2709*656字节），不代表进程净释放收益；
+  此证据证明细小CPU存储回收遗漏，不能归因先前曲线约1.1GiB增长或声称GPU显存泄漏。
+- 修复版随后3局真实计数均slots==keys，累计retired确实增长（其中一局Framebuffer1955、
+  ImageAlloc2661），证明生产回收分支已执行；但渲染截图全黑，HUD限时失败，均valid=false，
+  不作为同场景内存曲线或图像验收。旧诊断版对照也黑；启动INI完全相同、运行时配置与
+  Vulkan报告相同，但共用shader cache，旧版也黑不能替代修复版图像验收。
+- 用户随后确认电脑在本轮休眠。系统事件核实：10/11 01:09:05 Kernel-Power42，原因
+  Application API；Power-Troubleshooter记录UTC10/10 17:09:04至10/11 01:47:38休眠，
+  即本地01:09至09:47，Power Button恢复。GPU截图排查会话被此休眠中断，后续正常收尾、
+  原配置和存档已恢复。此前临时唤醒helper也已释放请求；显示唤醒请求不能阻止显式API休眠。
+  不把这次跨休眠的运行当作连续测量，也不据此判断黑屏原因已确认。
+- 补齐脚本PowerGuard：测试会话及memory_watch临时申请SYSTEM_REQUIRED/DISPLAY_REQUIRED，
+  退出恢复线程原请求；以GetTickCount64与QueryUnbiasedInterruptTime的差检测真正的休眠，
+  即使休眠跨过整个等待截止时间也报VOID/failed，EDEN_IGNORE_INPUT仍不跳过。此工具修复
+  待回归与休眠恢复后的游戏复测，修复版图像验收仍未完成。
