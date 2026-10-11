@@ -537,6 +537,9 @@ void DeviceMemoryManager<Traits>::UnregisterProcess(Asid asid) {
 
 template <typename Traits>
 void DeviceMemoryManager<Traits>::UpdatePagesCachedCountNoLock(DAddr addr, size_t size, s32 delta) {
+    if (size == 0) {
+        return;
+    }
     u64 uncache_begin = 0;
     u64 cache_begin = 0;
     u64 uncache_bytes = 0;
@@ -547,6 +550,16 @@ void DeviceMemoryManager<Traits>::UpdatePagesCachedCountNoLock(DAddr addr, size_
     const size_t page_end = Common::DivCeil(addr + size, Memory::YUZU_PAGESIZE);
     size_t page = addr >> Memory::YUZU_PAGEBITS;
     auto [asid, base_vaddress] = ExtractCPUBacking(page);
+    // An unmapped page has no process interface. Find the first mapped page
+    // before looking up its ASID, including when no process is registered yet.
+    while (base_vaddress == 0) {
+        if (++page == page_end) {
+            return;
+        }
+        const auto backing = ExtractCPUBacking(page);
+        asid = backing.first;
+        base_vaddress = backing.second;
+    }
     auto* memory_device_inter = registered_processes[asid.id];
     const auto release_pending = [&] {
         if (uncache_bytes > 0) {
