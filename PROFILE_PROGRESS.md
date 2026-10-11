@@ -5232,7 +5232,7 @@ src 大改后 profile 需重训（有效性窗口未测）。
   无遗留Eden/本轮采样或capture helper，wpr -status确认未采集。实时32GiB分页
   文件保留到正常重启，启动配置未改。本轮目标“获得初步泄漏结果”已完成。
 
-### 37.7 2026-10-10 Astra 独立复核与槽位回收修复（进行中）
+### 37.7 2026-10-10/11 Astra 独立复核：两处CPU槽位修复及功能短测通过
 
 - 用户指出总内存曲线未显示明显持续泄漏，要求Astra独立复核，确认后修复。
   Astra只读审查确认Framebuffer失效后未归还SlotVector槽位；同时发现DeleteImage
@@ -5281,3 +5281,25 @@ src 大改后 profile 需重训（有效性窗口未测）。
   退出恢复线程原请求；以GetTickCount64与QueryUnbiasedInterruptTime的差检测真正的休眠，
   即使休眠跨过整个等待截止时间也报VOID/failed，EDEN_IGNORE_INPUT仍不跳过。此工具修复
   待回归与休眠恢复后的游戏复测，修复版图像验收仍未完成。
+
+- 恢复后重跑memory-rot-slot-awake-20261011（PID33348，本地09:52至09:56）：原配置和
+  shader cache未改变，实际修复二进制重新正常显示。camera_response=0.11148；30s基线、
+  6轮10s交替旋转、30s静置全部完成，valid=true/forced_close=false。目检probe_after、
+  rotation_005_left、tail_030确认水塘护栏/供品石像旁1807 -0998，HUD、人物、地形与植被
+  无可见异常。恢复后成功不能追溯证明此前每次黑屏的具体原因，失败局仍不入结论。
+- 本轮32份真实计数两类slots==keys全部成立；最后frame9300：Framebuffer752/752、
+  retired2729，ImageAlloc5272/5272、retired3521。与旧版失效槽位2709/3333仍被占用
+  相对照，明确证明两处生产回收路径已修复。Astra再次独立核对数据和截图，认可CPU槽位
+  修复及真实游戏功能短测验收；不把此短测升级为整体无泄漏、长期稳定性或性能收益结论。
+- 修复版短测private旋转13样本/1.007min：13463.70→13736.13MiB，增272.43MiB，
+  其中仍有一次约256MiB台阶；静置6样本增3.43MiB。台阶尚未归因，未量化总内存节省，
+  先前约1.1GiB残留亦不能全归因CPU槽位。该局memory-report.json与PNG/SVG已保存。
+- 唤醒/休眠检测工具提交61a5727883及测试完善4c50afc6dc：完整工具回归含Windows API
+  106 passed，修改文件Ruff/格式检查通过；真实SetThreadExecutionState和两时钟API
+  探针通过并释放。日志prof-tests.log；单元测试模拟系统请求，仅显式Windows测试读真实API。
+  本轮仍EDEN_IGNORE_INPUT=1，不考虑键鼠干扰；该开关不豁免系统休眠造成的无效数据。
+- 归档verification-result.json保存构建、有效前后局、断言及证据边界；result.source_head
+  是启动时工具HEAD 61a5727883，实际C++构建源码仍795971d879，由exe/PDB指纹及manifest
+  独立标识。build-ab/bin保留修复exe和匹配PDB，日常F:/Switch/Yuzu未写入。
+  原存档48份逐文件SHA256恢复确认，watcher=target_exited，automation.lock清理、
+  无残留Eden；所有临时唤醒请求已释放，长期电源设置及原启动分页文件配置未改。
