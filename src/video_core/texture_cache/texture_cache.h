@@ -1407,9 +1407,20 @@ void TextureCache<P>::TickAsyncDecode() {
     auto i = async_decodes.begin();
     while (i != async_decodes.end()) {
         auto* async_decode = i->get();
-        std::unique_lock lock{async_decode->mutex};
-        if (!async_decode->complete) {
-            ++i;
+        {
+            std::unique_lock lock{async_decode->mutex};
+            if (!async_decode->complete) {
+                ++i;
+                continue;
+            }
+        }
+        // Observing complete under the entry lock means the worker is done
+        // with this entry. Do not touch or erase it while holding that lock:
+        // erasing destroys the mutex itself.
+        if (!async_decode->image_id) {
+            // The image was deleted while this decode was in flight; drop the
+            // result instead of dereferencing a freed or recycled slot.
+            i = async_decodes.erase(i);
             continue;
         }
         Image& image = slot_images[async_decode->image_id];
@@ -1428,6 +1439,16 @@ void TextureCache<P>::TickAsyncDecode() {
 
 template <class P>
 void TextureCache<P>::TickAsyncUnswizzle() {
+    // Drop queued tasks whose image was deleted while they were in flight,
+    // releasing any staging buffer already allocated for them. Drain all
+    // consecutive dead entries so they don't stall live ones one frame each.
+    while (!unswizzle_queue.empty() && !unswizzle_queue.front().image_id) {
+        PendingUnswizzle& task = unswizzle_queue.front();
+        if (task.initialized) {
+            runtime.FreeDeferredStagingBuffer(task.staging_buffer);
+        }
+        unswizzle_queue.pop_front();
+    }
     if (unswizzle_queue.empty()) {
         return;
     }
@@ -2331,6 +2352,24 @@ void TextureCache<P>::UntrackImage(ImageBase& image, ImageId image_id) {
 template <class P>
 void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
     ImageBase& image = slot_images[image_id];
+    // Null out any in-flight async decode/unswizzle entries for this image so
+    // TickAsyncDecode/TickAsyncUnswizzle drop them once the worker finishes,
+    // instead of dereferencing this freed (and possibly recycled) slot. The
+    // walk is unconditional because QueueAsyncDecode has no re-queue guard, so
+    // an image can own several entries while its IsDecoding flag is already
+    // cleared. The decode worker never touches image_id, and entries are only
+    // erased after completion, so no locking is needed beyond
+    // texture_cache.mutex.
+    for (auto& decode : async_decodes) {
+        if (decode->image_id == image_id) {
+            decode->image_id = ImageId{};
+        }
+    }
+    for (auto& task : unswizzle_queue) {
+        if (task.image_id == image_id) {
+            task.image_id = ImageId{};
+        }
+    }
     if (image.HasScaled()) {
         total_used_memory -= GetScaledImageSizeBytes(image);
     }

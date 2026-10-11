@@ -508,12 +508,17 @@ private:
     u64 modification_tick = 0;
     u64 frame_tick = 0;
 
+    // Declaration order matters: async_decodes must be destroyed after
+    // texture_decode_worker. The worker's jthreads join on destruction while a
+    // queued decode lambda may still be running and dereferencing its
+    // AsyncDecodeContext, so freeing the owning vector first would be a
+    // use-after-free at teardown.
+    std::vector<std::unique_ptr<AsyncDecodeContext>> async_decodes;
     Common::ThreadWorker texture_decode_worker{1, "TextureDecoder", {},
                                                Common::ThreadPlacement::Efficiency};
-    std::vector<std::unique_ptr<AsyncDecodeContext>> async_decodes;
 
     std::deque<PendingUnswizzle> unswizzle_queue;
-    u8 current_unswizzle_frame;
+    u8 current_unswizzle_frame{};
 
     // Join caching
     boost::container::small_vector<ImageId, 4> join_overlap_ids;
