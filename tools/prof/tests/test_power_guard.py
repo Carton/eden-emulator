@@ -9,7 +9,7 @@ def test_suspend_is_detected_even_when_measurement_deadline_passed(monkeypatch):
     guard = PowerGuard()
     guard.started = (100, 80)
     monkeypatch.setattr(guard, "_clocks", lambda: (1000, 90))
-    with pytest.raises(RuntimeError, match="suspended.*VOID"):
+    with pytest.raises(RuntimeError, match=r"suspended.*VOID"):
         guard.check()
 
 

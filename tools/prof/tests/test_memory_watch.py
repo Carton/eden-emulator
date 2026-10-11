@@ -21,10 +21,15 @@ class MemoryWatchUnitTests(unittest.TestCase):
             target.identity.return_value = {"image_path": str(image), "creation_filetime": 123}
             target.counters.return_value = {"private_bytes": 1024, "system_commit_bytes": 2048}
             target.regions.return_value = {"private_committed_virtual_bytes": 1024}
-            with patch.object(watch, "WindowsProcess", return_value=target):
+            with (
+                patch.object(watch, "WindowsProcess", return_value=target),
+                patch.object(watch, "PowerGuard") as power,
+            ):
                 self.assertEqual(
                     watch.main(["--pid", "42", "--seconds", "0.01", "--output", str(output)]), 0
                 )
+            power.return_value.start.assert_called_once()
+            power.return_value.close.assert_called_once()
             target.close.assert_called_once()
             metadata = json.loads((output / "metadata.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata["status"], "duration_completed")
@@ -46,9 +51,11 @@ class MemoryWatchUnitTests(unittest.TestCase):
             target.counters.side_effect = OSError("target no longer readable")
             with (
                 patch.object(watch, "WindowsProcess", return_value=target),
+                patch.object(watch, "PowerGuard") as power,
                 self.assertRaisesRegex(OSError, "target no longer readable"),
             ):
                 watch.main(["--pid", "42", "--output", str(output)])
+            power.return_value.close.assert_called_once()
             target.close.assert_called_once()
             metadata = json.loads((output / "metadata.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata["status"], "failed")
