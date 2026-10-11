@@ -994,6 +994,49 @@ void ConvertImage(std::span<const u8> input, const ImageInfo& info, std::span<u8
     }
 }
 
+boost::container::small_vector<BufferImageCopy, 16> ZeroUploadCopies(const ImageInfo& info) {
+    boost::container::small_vector<BufferImageCopy, 16> copies;
+    u32 output_offset = 0;
+
+    const auto recompression_setting = Settings::values.astc_recompression.GetValue();
+    const bool astc = IsPixelFormatASTC(info.format);
+
+    for (s32 level = 0; level < info.resources.levels; ++level) {
+        const Extent3D mip_size = AdjustMipSize(info.size, level);
+        BufferImageCopy copy{};
+
+        copy.buffer_offset = output_offset;
+        copy.image_subresource.base_level = level;
+        copy.image_subresource.base_layer = 0;
+        copy.image_subresource.num_layers = info.resources.layers;
+        copy.image_extent = mip_size;
+
+        if (astc && recompression_setting == Settings::AstcRecompression::Uncompressed) {
+            copy.buffer_size = mip_size.width * mip_size.height * mip_size.depth *
+                               copy.image_subresource.num_layers *
+                               BytesPerBlock(PixelFormat::A8B8G8R8_UNORM);
+        } else if (astc) {
+            const u32 bpp_div =
+                recompression_setting == Settings::AstcRecompression::Bc1 ? 2 : 1;
+            const u32 aligned_plane_dim = Common::AlignUp(mip_size.width, 4) *
+                                          Common::AlignUp(mip_size.height, 4);
+            copy.buffer_size =
+                (aligned_plane_dim * mip_size.depth * copy.image_subresource.num_layers) /
+                bpp_div;
+        } else {
+            copy.buffer_size = mip_size.width * mip_size.height * mip_size.depth *
+                               copy.image_subresource.num_layers *
+                               ConvertedBytesPerBlock(info.format);
+        }
+        output_offset += static_cast<u32>(copy.buffer_size);
+
+        copy.buffer_row_length = mip_size.width;
+        copy.buffer_image_height = mip_size.height;
+        copies.push_back(copy);
+    }
+    return copies;
+}
+
 boost::container::small_vector<BufferImageCopy, 16> FullDownloadCopies(const ImageInfo& info) {
     const Extent3D size = info.size;
     const u32 bytes_per_block = BytesPerBlock(info.format);

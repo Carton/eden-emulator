@@ -9,6 +9,7 @@
 #include <limits>
 #include <optional>
 #include <bit>
+#include <cstring>
 #include "common/container/unordered_map.h"
 #include <boost/container/small_vector.hpp>
 
@@ -1351,6 +1352,16 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
     auto* decode_ptr = decode.get();
     decode->image_id = image_id;
     async_decodes.push_back(std::move(decode));
+
+    // (local-only) Zero-fill the image immediately: decoded contents are uploaded in a
+    // later frame by TickAsyncDecode, but draws can sample the image in between and
+    // would read never-written VRAM (stale garbage tiles, e.g. on loading screens).
+    {
+        auto zero_staging = runtime.UploadStagingBuffer(MapSizeBytes(image));
+        std::memset(zero_staging.mapped_span.data(), 0, zero_staging.mapped_span.size_bytes());
+        image.UploadMemory(zero_staging, FixSmallVectorADL(ZeroUploadCopies(image.info)));
+        runtime.InsertUploadMemoryBarrier();
+    }
 
     std::vector<u8> local_unswizzle_data_buffer(image.unswizzled_size_bytes, 0);
     Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead> swizzle_data(*gpu_memory, image.gpu_addr, image.guest_size_bytes, &swizzle_data_buffer);

@@ -72,6 +72,13 @@ struct OverlapResult {
 void ConvertImage(std::span<const u8> input, const ImageInfo& info, std::span<u8> output,
                   std::span<BufferImageCopy> copies);
 
+// (local-only) Copies describing a full-image upload of zeros in the converted host
+// layout, mirroring ConvertImage's buffer geometry. Used to zero-fill images queued
+// for asynchronous decode so sampling during the decode window reads black instead
+// of never-written VRAM.
+[[nodiscard]] boost::container::small_vector<BufferImageCopy, 16> ZeroUploadCopies(
+    const ImageInfo& info);
+
 [[nodiscard]] boost::container::small_vector<BufferImageCopy, 16> FullDownloadCopies(
     const ImageInfo& info);
 
