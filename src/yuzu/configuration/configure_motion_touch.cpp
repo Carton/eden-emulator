@@ -68,7 +68,10 @@ CalibrationConfigurationDialog::CalibrationConfigurationDialog(QWidget* parent,
         });
 }
 
-CalibrationConfigurationDialog::~CalibrationConfigurationDialog() = default;
+CalibrationConfigurationDialog::~CalibrationConfigurationDialog() {
+    // Join callbacks before the result fields and QObject context are destroyed.
+    job.reset();
+}
 
 void CalibrationConfigurationDialog::UpdateLabelText(const QString& text) {
     status_label->setText(text);
