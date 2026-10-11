@@ -16,10 +16,18 @@
 #undef _GNU_SOURCE
 #endif
 
+#ifdef _MSC_VER
+#pragma warning(push)
+// The embedded decoder intentionally gives unused Zstd entry points internal linkage.
+#pragma warning(disable : 4505)
+#endif
 #include "zstd.h"
 #define g_ZSTD_threading_useless_symbol g_ZSTD_zbic_threading_useless_symbol
 #include "zstd.c"
 #undef g_ZSTD_threading_useless_symbol
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
 namespace Common::Compression {
 
