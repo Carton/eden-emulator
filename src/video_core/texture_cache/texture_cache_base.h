@@ -429,6 +429,7 @@ private:
     void QueueAsyncDecode(Image& image, ImageId image_id);
     void TickAsyncDecode();
     void TickAsyncDecodeDiagnostics();
+    void CountAsyncDecodeFailure();
     void SynchronousUploadContents(Image& image);
 
     void QueueAsyncUnswizzle(Image& image, ImageId image_id);

@@ -1114,18 +1114,31 @@ void TextureCache<P>::DownloadImageIntoBuffer(typename TextureCache<P>::Image* i
 
 template <class P>
 void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
-    if (False(image.flags & ImageFlagBits::CpuModified)) {
+    // NeedsDecode must also reach QueueAsyncDecode when the CPU has not
+    // touched the image again: a deferred request (budget cap, cooldown)
+    // cleared CpuModified on its first pass, and the retry entry point is
+    // exactly this function on the next use.
+    if (False(image.flags & ImageFlagBits::CpuModified) &&
+        False(image.flags & ImageFlagBits::NeedsDecode)) {
         // Only upload modified images
         return;
     }
 
     image.flags &= ~ImageFlagBits::CpuModified;
-
-    TrackImage(image, image_id);
+    // Retries for deferred decodes re-enter RefreshContents; TrackImage is
+    // not idempotent (it bumps the per-page cached count and asserts on
+    // re-entry), so only track untracked images.
+    if (False(image.flags & ImageFlagBits::Tracked)) {
+        TrackImage(image, image_id);
+    }
 
     if (image.info.num_samples > 1 && !runtime.CanUploadMSAA()) {
         LOG_WARNING(HW_GPU, "MSAA image uploads are not implemented");
         runtime.TransitionImageLayout(image);
+        // This refresh is being abandoned; clear NeedsDecode too so retry
+        // entry points (see the guard above) do not re-enter this branch
+        // every use.
+        image.flags &= ~ImageFlagBits::NeedsDecode;
         return;
     }
     if (True(image.flags & ImageFlagBits::AsynchronousDecode)) {
@@ -1357,13 +1370,20 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
     // screens). This runs before admission so a deferred first decode still
     // exposes a defined placeholder. A re-decode of an already-initialized
     // image keeps the previous valid contents instead of exposing a black
-    // window for a frame (review finding P1-1).
+    // window for a frame (review finding P1-1). If the zero-fill staging
+    // upload itself fails under pressure, leave HostInitialized clear and
+    // retry the whole request later instead of aborting the GPU thread.
     if (False(image.flags & ImageFlagBits::HostInitialized)) {
-       auto zero_staging = runtime.UploadStagingBuffer(MapSizeBytes(image));
-        std::memset(zero_staging.mapped_span.data(), 0, zero_staging.mapped_span.size_bytes());
-        image.UploadMemory(zero_staging, FixSmallVectorADL(ZeroUploadCopies(image.info)));
-        runtime.InsertUploadMemoryBarrier();
-        image.flags |= ImageFlagBits::HostInitialized;
+        try {
+            auto zero_staging = runtime.UploadStagingBuffer(MapSizeBytes(image));
+            std::memset(zero_staging.mapped_span.data(), 0, zero_staging.mapped_span.size_bytes());
+            image.UploadMemory(zero_staging, FixSmallVectorADL(ZeroUploadCopies(image.info)));
+            runtime.InsertUploadMemoryBarrier();
+            image.flags |= ImageFlagBits::HostInitialized;
+        } catch (...) {
+            CountAsyncDecodeFailure();
+            return; // NeedsDecode stays; retried on a later use
+        }
     }
 
     // Merge with the in-flight task for this image instead of stacking
@@ -1378,14 +1398,23 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
     }
 
     const size_t out_size = MapSizeBytes(image);
-    const size_t reserved_bytes = static_cast<size_t>(image.guest_size_bytes) + out_size;
+    // Charge the bytes the task actually pins: the input snapshot vector is
+    // sized from unswizzled_size_bytes and decoded_data from out_size.
+    const size_t reserved_bytes =
+        static_cast<size_t>(image.unswizzled_size_bytes) + out_size;
     if (async_decode_bytes + reserved_bytes > MAX_ASYNC_DECODE_BYTES ||
         async_decodes.size() >= MAX_ASYNC_DECODE_ENTRIES) {
         if (reserved_bytes > MAX_ASYNC_DECODE_BYTES) {
             // A single image larger than the whole budget can never be
             // admitted; decode it synchronously instead of deferring forever.
-            SynchronousUploadContents(image);
-            image.flags &= ~ImageFlagBits::NeedsDecode;
+            // Its staging allocation can still fail under pressure: keep the
+            // demand and retry rather than aborting the GPU thread.
+            try {
+                SynchronousUploadContents(image);
+                image.flags &= ~ImageFlagBits::NeedsDecode;
+            } catch (...) {
+                CountAsyncDecodeFailure();
+            }
             return;
         }
         ++async_decode_diag_deferred;
@@ -1421,7 +1450,9 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
                 std::span copies_span{copies.data(), copies.size()};
                 ConvertImage(input, info, async_decode->decoded_data, copies_span);
 
-                // TODO: Do we need this lock?
+                // This lock pairs the worker's publication of the result with
+                // the tick's observation of `complete`; it is part of the
+                // protocol, not an optimization.
                 std::unique_lock lock{async_decode->mutex};
                 async_decode->copies = std::move(copies);
                 async_decode->complete = true;
@@ -1438,14 +1469,16 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
 
         LOG_INFO(HW_GPU, "Queuing async texture decode");
 
-        // Transactional submit: the flag flip, budget charge and queueing
-        // either all happen or none, or a throwing step would strand
-        // IsDecoding or leak a reservation.
+        // Transactional submit: perform the throwing container insertion
+        // first, then the non-throwing state updates. A throw from push_back
+        // leaves nothing to roll back; a throw from QueueWork (whose failed
+        // emplace does not enqueue the task) is rolled back by the catch.
+        async_decodes.push_back(std::move(decode));
+        pushed = true;
+
         image.flags |= ImageFlagBits::IsDecoding;
         image.flags &= ~ImageFlagBits::NeedsDecode;
         async_decode_bytes += reserved_bytes;
-        async_decodes.push_back(std::move(decode));
-        pushed = true;
         ++async_decode_diag_queued;
         texture_decode_worker.QueueWork(std::move(func));
     } catch (...) {
@@ -1454,7 +1487,8 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
             async_decode_bytes -= reserved_bytes;
             image.flags &= ~ImageFlagBits::IsDecoding;
         }
-        image.flags |= ImageFlagBits::NeedsDecode; // NeedsDecode stays; retry later
+        CountAsyncDecodeFailure();
+        image.flags |= ImageFlagBits::NeedsDecode; // retried on a later use
     }
 }
 
@@ -1508,27 +1542,33 @@ void TextureCache<P>::TickAsyncDecode() {
             Image& failed_image = slot_images[async_decode->image_id];
             failed_image.flags &= ~ImageFlagBits::IsDecoding;
             failed_image.flags |= ImageFlagBits::NeedsDecode;
-            ++async_decode_diag_failed;
-            if (++async_decode_failures >= 8) {
-                async_decode_cooldown = 300; // ~5 s at 60 fps
-                async_decode_failures = 0;
-            }
+            CountAsyncDecodeFailure();
             i = async_decodes.erase(i);
             continue;
         }
-        if (tick_upload_budget == 0) {
-            // Per-tick upload byte quota exhausted: hand the reservation back
-            // and retry the entry next tick, so a single frame cannot
-            // materialize the whole backlog as staging buffers at once.
+        Image& image = slot_images[async_decode->image_id];
+        const size_t upload_size = MapSizeBytes(image);
+        // Soft per-tick upload byte quota: a single completed entry may
+        // exceed it (otherwise it would stall behind itself forever), but
+        // once the quota is spent, stop before allocating more staging so one
+        // frame cannot materialize the whole backlog at once.
+        if (upload_size > tick_upload_budget && has_uploads) {
             async_decode_bytes += async_decode->reserved_bytes;
             break;
         }
-        Image& image = slot_images[async_decode->image_id];
-        const size_t upload_size = MapSizeBytes(image);
-        auto staging = runtime.UploadStagingBuffer(upload_size);
-        std::memcpy(staging.mapped_span.data(), async_decode->decoded_data.data(),
-                    async_decode->decoded_data.size());
-        image.UploadMemory(staging, FixSmallVectorADL(async_decode->copies));
+        try {
+            auto staging = runtime.UploadStagingBuffer(upload_size);
+            std::memcpy(staging.mapped_span.data(), async_decode->decoded_data.data(),
+                        async_decode->decoded_data.size());
+            image.UploadMemory(staging, FixSmallVectorADL(async_decode->copies));
+        } catch (...) {
+            // Staging allocation or upload failed under pressure: keep the
+            // completed entry and its reservation and retry the upload on a
+            // later tick instead of aborting the GPU thread.
+            async_decode_bytes += async_decode->reserved_bytes;
+            CountAsyncDecodeFailure();
+            break;
+        }
         image.flags &= ~ImageFlagBits::IsDecoding;
         // NeedsDecode may have been re-set by writes that arrived while this
         // task was in flight; leave it set so the next use queues a fresh
@@ -1543,6 +1583,20 @@ void TextureCache<P>::TickAsyncDecode() {
         runtime.InsertUploadMemoryBarrier();
     }
     TickAsyncDecodeDiagnostics();
+}
+
+template <class P>
+void TextureCache<P>::CountAsyncDecodeFailure() {
+    // Shared failure accounting for every async-decode path that had to give
+    // up (worker decode, staging upload, zero-fill, preparation): repeated
+    // failures cool down submission for a few hundred frames so a tight retry
+    // loop cannot thrash allocations. The counter is reset by any successful
+    // upload.
+    ++async_decode_diag_failed;
+    if (++async_decode_failures >= 8) {
+        async_decode_cooldown = 300; // ~5 s at 60 fps
+        async_decode_failures = 0;
+    }
 }
 
 template <class P>
